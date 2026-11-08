@@ -39,6 +39,9 @@ _REGULAR_ACCOUNTS_HEADER = (
 _LOGIN_CONFIRMATION_TITLE = (
     _PROJECT_ROOT / "templates/profile/login_confirmation_title.png"
 )
+_CONFIRM_LOGIN_YES = (
+    _PROJECT_ROOT / "templates/profile/confirm_login_yes.png"
+)
 _SELECTED_ACCOUNT_CHECK = (
     _PROJECT_ROOT / "templates/profile/selected_account_check.png"
 )
@@ -91,6 +94,7 @@ class AccountSwitcher:
         search_offset = 0
         search_toward_end = True
         reversed_search = False
+        located_active_in_pass = False
 
         for _ in range(_MAX_SCROLLS * 2 + 1):
             screenshot, frame = self._capture()
@@ -115,12 +119,87 @@ class AccountSwitcher:
                     "Could not read any visible starred accounts after retries"
                 )
 
+            height = frame.shape[0]
+            top_down_cards = self._order_account_cards(
+                cards,
+                frame_height=height,
+                direction=1,
+            )
+            starred_header = self._starred_accounts_header_bounds(frame)
+            regular_header = self._regular_accounts_header_bounds(frame)
+            at_starred_top = (
+                starred_header is not None
+                and (top_down_cards[0][1][1] - starred_header[1]) < height * 0.22
+            )
+            at_starred_bottom = (
+                regular_header is not None
+                and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.26
+            )
+            total = traversal.total_accounts
+
             active_bounds = self._selected_account_bounds(
                 screenshot,
                 frame,
                 cards,
             )
             if active_bounds is None:
+                # If we already located the active card before scrolling (or
+                # know our global position) and the new viewport is anchored at
+                # the top or bottom of the starred list, we can map global
+                # indices directly to `top_down_cards` even when the previous
+                # card's green checkmark scrolled off the viewport edge.
+                if (
+                    located_active_in_pass
+                    and traversal.current_index is not None
+                    and traversal.direction in {-1, 1}
+                ):
+                    visible_start_index: int | None = None
+                    if at_starred_top:
+                        visible_start_index = 0
+                    elif at_starred_bottom and total is not None:
+                        visible_start_index = max(
+                            0,
+                            total - len(top_down_cards),
+                        )
+                    if visible_start_index is not None:
+                        direction = traversal.direction
+                        candidate_global = traversal.current_index + direction
+                        while (
+                            visible_start_index
+                            <= candidate_global
+                            < visible_start_index + len(top_down_cards)
+                        ):
+                            name, bounds = top_down_cards[
+                                candidate_global - visible_start_index
+                            ]
+                            if resource_for_account(name) is None:
+                                self._log(
+                                    f"Skipping starred account {candidate_global + 1}"
+                                    f"/{total if total is not None else '?'}: "
+                                    f"{name} (no resource keyword)"
+                                )
+                                traversal.current_index = candidate_global
+                                candidate_global += direction
+                                continue
+                            self._log(
+                                f"Switching to starred account "
+                                f"{candidate_global + 1}"
+                                f"/{total if total is not None else '?'}: {name}"
+                            )
+                            self.game.click(bounds, screenshot)
+                            self._confirm_account_login()
+                            self._wait_for_game(name)
+                            traversal.current_index = candidate_global
+                            return name
+                        if (direction == 1 and at_starred_bottom) or (
+                            direction == -1 and at_starred_top
+                        ):
+                            self._log(
+                                f"Reached the end of the starred accounts list "
+                                f"at account {traversal.current_index + 1}"
+                            )
+                            return None
+
                 if self._scroll_account_list(
                     screenshot,
                     frame,
@@ -142,30 +221,13 @@ class AccountSwitcher:
                     "stopping without choosing by name"
                 )
 
-            height = frame.shape[0]
-            top_down_cards = self._order_account_cards(
-                cards,
-                frame_height=height,
-                direction=1,
-            )
+            located_active_in_pass = True
             active_position = self._card_index(top_down_cards, active_bounds)
             if active_position is None:
                 raise RuntimeError(
                     "Could not map the green check to an account position"
                 )
 
-            starred_header = self._starred_accounts_header_bounds(frame)
-            regular_header = self._regular_accounts_header_bounds(frame)
-            at_starred_top = (
-                starred_header is not None
-                and (top_down_cards[0][1][1] - starred_header[1]) < height * 0.22
-            )
-            at_starred_bottom = (
-                regular_header is not None
-                and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.26
-            )
-
-            total = traversal.total_accounts
             anchored_index: int | None = None
             if at_starred_top:
                 anchored_index = active_position
@@ -187,7 +249,8 @@ class AccountSwitcher:
                     current_index = total - 1
                     traversal.direction = -1
                 elif (
-                    at_starred_bottom
+                    total is None
+                    and at_starred_bottom
                     and active_position == len(top_down_cards) - 1
                 ):
                     traversal.direction = -1
@@ -238,11 +301,9 @@ class AccountSwitcher:
                 )
 
             next_card_index = active_index + 1
-            if next_card_index < len(ordered_cards):
+            while next_card_index < len(ordered_cards):
                 next_index = traversal.current_index + direction
                 if next_index < 0:
-                    # We still have visible starred cards ahead in reverse
-                    # order; re-sync the index to the remaining visible cards.
                     remaining_cards = len(ordered_cards) - 1 - active_index
                     next_index = max(0, remaining_cards - 1)
                 elif total is not None and next_index >= total:
@@ -253,6 +314,16 @@ class AccountSwitcher:
                     total = next_index + 1
                     traversal.total_accounts = total
                 name, bounds = ordered_cards[next_card_index]
+                if resource_for_account(name) is None:
+                    self._log(
+                        f"Skipping starred account {next_index + 1}"
+                        f"/{total if total is not None else '?'}: {name} "
+                        "(no resource keyword)"
+                    )
+                    traversal.current_index = next_index
+                    active_index = next_card_index
+                    next_card_index += 1
+                    continue
                 self._log(
                     f"Switching to starred account "
                     f"{next_index + 1}"
@@ -434,20 +505,45 @@ class AccountSwitcher:
     def _confirm_account_login(self) -> None:
         """Click Có once after visually anchoring the confirmation dialog."""
 
+        title_template = cv2.imread(
+            str(_LOGIN_CONFIRMATION_TITLE),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        yes_template = cv2.imread(
+            str(_CONFIRM_LOGIN_YES),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if title_template is None or yes_template is None:
+            raise RuntimeError("Missing login confirmation templates")
+
         deadline = time.monotonic() + 12.0
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
-            title_hit = self.detector.locate_template(
-                screenshot,
-                _LOGIN_CONFIRMATION_TITLE,
-                confidence_threshold=0.72,
+            frame_height, frame_width = frame.shape[:2]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Search only the centered modal region at realistic scales so the
+            # top NHÂN VẬT window title bar cannot be mistaken for this dialog.
+            title_crop = gray[
+                round(frame_height * 0.20) : round(frame_height * 0.42),
+                round(frame_width * 0.25) : round(frame_width * 0.75),
+            ]
+            yes_crop = gray[
+                round(frame_height * 0.58) : round(frame_height * 0.78),
+                round(frame_width * 0.50) : round(frame_width * 0.78),
+            ]
+            title_score, _ = ScreenDetector._best_scale_match(
+                title_crop,
+                title_template,
+                minimum_scale=0.75,
+                maximum_scale=1.15,
             )
-            if title_hit is not None:
-                frame_height, frame_width = frame.shape[:2]
-                # The confirmation panel is centered and the blue Có button
-                # occupies this stable relative position in the game view.
-                # Clicking its known center avoids OCR and button-template
-                # scaling errors that previously left the modal untouched.
+            yes_score, _ = ScreenDetector._best_scale_match(
+                yes_crop,
+                yes_template,
+                minimum_scale=0.75,
+                maximum_scale=1.15,
+            )
+            if title_score >= 0.78 and yes_score >= 0.72:
                 button_bounds = (
                     round(frame_width * 0.61),
                     round(frame_height * 0.69),
@@ -456,8 +552,8 @@ class AccountSwitcher:
                 )
                 self._log(
                     f"Login confirmation dialog detected "
-                    f"(match={title_hit.confidence:.3f}); clicking Có and "
-                    "waiting for game load"
+                    f"(title={title_score:.3f}, yes={yes_score:.3f}); "
+                    "clicking Có and waiting for game load"
                 )
                 self.game.click(button_bounds, screenshot)
                 return
@@ -660,35 +756,62 @@ class AccountSwitcher:
 
         if not cards:
             return None
-        hit = self.detector.locate_template(
-            screenshot,
-            _SELECTED_ACCOUNT_CHECK,
-            confidence_threshold=0.66,
+        gray = (
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if frame.ndim == 3
+            else frame
         )
-        if hit is None:
+        template = cv2.imread(
+            str(_SELECTED_ACCOUNT_CHECK),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if gray is None or template is None:
             return None
 
+        score, (check_x, check_y, scale) = ScreenDetector._best_scale_match(
+            gray,
+            template,
+            minimum_scale=0.75,
+            maximum_scale=1.25,
+        )
+        if score < 0.72:
+            return None
+
+        check_height, check_width = ScreenDetector._scaled_size(template, scale)
+        if frame.ndim == 3:
+            patch = frame[
+                check_y : check_y + check_height,
+                check_x : check_x + check_width,
+            ]
+            if patch.size == 0:
+                return None
+            hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+            green_mask = cv2.inRange(
+                hsv,
+                np.array((35, 100, 100), dtype=np.uint8),
+                np.array((85, 255, 255), dtype=np.uint8),
+            )
+            if float(np.mean(green_mask > 0)) < 0.18:
+                return None
+
         height, width = frame.shape[:2]
-        check_x, check_y, check_width, check_height = hit.bounds
         check_center_x = check_x + check_width / 2
         check_center_y = check_y + check_height / 2
         candidates = []
         for _name, bounds in cards:
-            x, y, box_width, box_height = bounds
-            vertical_gap = abs((y + box_height / 2) - check_center_y)
-            if vertical_gap > height * 0.12:
+            x, y, _box_width, box_height = bounds
+            # The green check sits on the bottom-left of its card's portrait,
+            # so the card's name text is always to the right of `check_center_x`
+            # and slightly above `check_center_y`.
+            horizontal_offset = x - check_center_x
+            vertical_offset = check_center_y - (y + box_height / 2)
+            if not (width * 0.03 <= horizontal_offset <= width * 0.22):
                 continue
-            if check_center_x < x:
-                horizontal_gap = x - check_center_x
-            elif check_center_x > x + box_width:
-                horizontal_gap = check_center_x - (x + box_width)
-            else:
-                horizontal_gap = 0
-            if horizontal_gap > width * 0.22:
+            if not (height * 0.02 <= vertical_offset <= height * 0.12):
                 continue
             distance = (
-                (vertical_gap / height) ** 2
-                + (horizontal_gap / width) ** 2
+                (vertical_offset / height) ** 2
+                + (horizontal_offset / width) ** 2
             )
             candidates.append((distance, bounds))
         if not candidates:
@@ -752,7 +875,7 @@ class AccountSwitcher:
         # The cards are arranged in rows about 19% of the frame high. Move
         # roughly one row per gesture so the next viewport overlaps the current one.
         start_y, end_y = (
-            (0.72, 0.53) if toward_list_end else (0.53, 0.72)
+            (0.68, 0.55) if toward_list_end else (0.55, 0.68)
         )
         self.game.drag(
             (round(width * 0.51), round(height * start_y)),
@@ -884,7 +1007,7 @@ class AccountSwitcher:
             minimum_scale=0.45,
             maximum_scale=1.10,
         )
-        if score < 0.80:
+        if score < 0.88:
             return None
         scaled_height, scaled_width = ScreenDetector._scaled_size(
             template,
@@ -916,14 +1039,14 @@ class AccountSwitcher:
             raise RuntimeError("Could not read the regular-accounts header images")
         height, width = gray.shape[:2]
         left, right = round(width * 0.08), round(width * 0.75)
-        top, bottom = round(height * 0.25), round(height * 0.88)
+        top, bottom = round(height * 0.25), round(height * 0.93)
         score, match = ScreenDetector._best_scale_match(
             gray[top:bottom, left:right],
             template,
             minimum_scale=0.45,
             maximum_scale=1.10,
         )
-        if score < 0.80:
+        if score < 0.88:
             return None
         scaled_height, scaled_width = ScreenDetector._scaled_size(
             template,
