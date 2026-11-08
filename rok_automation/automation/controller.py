@@ -21,6 +21,8 @@ from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
     Resource,
     SearchTarget,
+    account_name_without_guild,
+    resource_for_account,
     search_plan,
 )
 from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState
@@ -75,9 +77,12 @@ class FarmingController:
         traversal = AccountTraversal()
         farmed_accounts = 0
         total_dispatched = 0
+        expected_account_name: str | None = None
         while True:
             self.context = FarmContext()
-            context = self._run_one_account()
+            context = self._run_one_account(
+                expected_account_name=expected_account_name,
+            )
             total_dispatched += context.armies_dispatched
             exhausted_resources = (
                 context.last_error
@@ -112,9 +117,14 @@ class FarmingController:
                     f"Finished {farmed_accounts} RoK account(s) linked to this Gmail account",
                 )
                 return context
+            expected_account_name = next_name
             self._log(f"Selected {next_name}; starting its farming run")
 
-    def _run_one_account(self) -> FarmContext:
+    def _run_one_account(
+        self,
+        *,
+        expected_account_name: str | None = None,
+    ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
         screenshot = self.game.screenshot()
         detection = self.detector.detect(screenshot)
@@ -140,8 +150,28 @@ class FarmingController:
 
         if detection.state is not ScreenState.WORLD_MAP:
             raise FarmingError("Could not reach the world map")
+
+        for _retry in range(2):
+            if detection.account_name and detection.preferred_resource is not None:
+                break
+            self.game.wait(0.35)
+            screenshot = self.game.screenshot()
+            detection = self.detector.detect(
+                screenshot,
+                candidate_states={ScreenState.WORLD_MAP},
+            )
+
         self.context.account_name = detection.account_name
         self.context.preferred_resource = detection.preferred_resource
+        if (
+            (not self.context.account_name or self.context.preferred_resource is None)
+            and expected_account_name
+        ):
+            fallback_resource = resource_for_account(expected_account_name)
+            fallback_name = account_name_without_guild(expected_account_name)
+            if fallback_name and fallback_resource is not None:
+                self.context.account_name = fallback_name
+                self.context.preferred_resource = fallback_resource
         if not self.context.account_name or self.context.preferred_resource is None:
             raise FarmingError(
                 "Could not read an account name with a supported resource keyword"
