@@ -1,0 +1,155 @@
+"""Command-line entry point for emulator detection and screenshot capture."""
+
+import argparse
+import sys
+from pathlib import Path
+
+from rok_automation.automation.controller import FarmingController
+from rok_automation.game.ldplayer import (
+    capture_ldplayer_window,
+    describe_window_tree,
+    find_ldplayer_window,
+)
+from rok_automation.game.interface import LDPlayerInterface
+from rok_automation.vision.screen import ScreenDetector
+from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
+
+_RESOURCE_DISPLAY_NAMES = {
+    Resource.GOLD: "Gold (Vàng)",
+    Resource.STONE: "Stone (Đá)",
+    Resource.FOOD: "Food (Ngô)",
+    Resource.WOOD: "Wood (Gỗ)",
+}
+
+
+def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="Rise of Kingdoms emulator tools")
+    parser.add_argument(
+        "--screenshot",
+        nargs="?",
+        const=Path("artifacts/ldplayer.png"),
+        type=Path,
+        metavar="PATH",
+        help="capture the visible LDPlayer game area (default: artifacts/ldplayer.png)",
+    )
+    parser.add_argument(
+        "--diagnose-window",
+        action="store_true",
+        help="list the LDPlayer window and child-window bounds",
+    )
+    parser.add_argument(
+        "--detect-screen",
+        action="store_true",
+        help="capture LDPlayer and classify the visible game screen",
+    )
+    parser.add_argument(
+        "--farm",
+        action="store_true",
+        help=(
+            "farm each linked RoK character in the current Gmail login, "
+            "dispatching up to five armies per character"
+        ),
+    )
+    parser.add_argument(
+        "--search-level",
+        type=int,
+        choices=RESOURCE_LEVELS,
+        help="known active level from controller context for a found resource",
+    )
+    args = parser.parse_args()
+
+    window = find_ldplayer_window()
+    if window is None:
+        print("Emulator: Disconnected (no matching visible LDPlayer window found)")
+        return 1
+
+    print(f"Emulator: Connected — {window.title} (handle={window.handle})")
+
+    if args.diagnose_window:
+        for description in describe_window_tree(window):
+            print(description)
+
+    if args.screenshot is not None or args.detect_screen:
+        screenshot_path = args.screenshot or Path("artifacts/ldplayer.png")
+        try:
+            output_path = capture_ldplayer_window(window, screenshot_path)
+        except (OSError, RuntimeError) as exc:
+            print(f"Screenshot failed: {exc}")
+            return 1
+        print(f"Screenshot saved: {output_path}")
+
+        if args.detect_screen:
+            try:
+                detection = ScreenDetector().detect(
+                    output_path,
+                    expected_resource_level=args.search_level,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"Screen detection failed: {exc}")
+                return 1
+            level = ""
+            if detection.state.value in {"resource_search", "resource_found"}:
+                level_value = (
+                    str(detection.resource_level)
+                    if detection.resource_level is not None
+                    else "unknown"
+                )
+                level = f", level={level_value}"
+            route = ""
+            if detection.green_route_detected is not None:
+                route_state = (
+                    "detected" if detection.green_route_detected else "not_detected"
+                )
+                route_confidence = (
+                    detection.green_route_confidence
+                    if detection.green_route_confidence is not None
+                    else 0.0
+                )
+                route = (
+                    f", green_route={route_state}"
+                    f" (confidence={route_confidence:.3f})"
+                )
+            coordinates = ""
+            if detection.resource_coordinates is not None:
+                x, y = detection.resource_coordinates
+                coordinates = f", resource_coordinates=({x},{y})"
+            print(
+                f"Screen: {detection.state.value}{level}{route}{coordinates} "
+                f"(confidence={detection.confidence:.3f}, evidence={detection.evidence})"
+            )
+            if detection.state.value == "world_map":
+                account_name = detection.account_name or "not recognized"
+                resource_name = _RESOURCE_DISPLAY_NAMES.get(
+                    detection.preferred_resource,
+                    "unknown (no recognized resource keyword)",
+                )
+                print(
+                    f"Account: {account_name}; preferred resource: {resource_name}"
+                )
+                if detection.armies_out is not None:
+                    print(f"Armies already marching: {detection.armies_out}/5")
+                else:
+                    print("Armies already marching: not recognized")
+
+    if args.farm:
+        try:
+            context = FarmingController(LDPlayerInterface(window)).run()
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"Farming stopped safely: {exc}")
+            return 1
+        if context.last_error:
+            print(
+                f"Farming stopped after {context.armies_dispatched} armies: "
+                f"{context.last_error}"
+            )
+            return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

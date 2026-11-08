@@ -1,0 +1,973 @@
+"""Navigate the in-game profile menus and select each linked RoK character."""
+
+from __future__ import annotations
+
+import re
+import time
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+
+from rok_automation.game.interface import GameInterface
+from rok_automation.logic.resource_selector import resource_for_account
+from rok_automation.vision.account_label import read_text_detections
+from rok_automation.vision.screen import ScreenDetector, ScreenState
+
+
+_OPEN_MENU_TIMEOUT = 15.0
+_ACCOUNT_LOAD_TIMEOUT = 180.0
+_MAX_SCROLLS = 32
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_CITY_MAP_BUTTON = _PROJECT_ROOT / "templates/navigation/city_map_button.png"
+_SETTINGS_BUTTON = _PROJECT_ROOT / "templates/profile/settings_button.png"
+_CHARACTER_MENU_BUTTON = (
+    _PROJECT_ROOT / "templates/profile/character_menu_button.png"
+)
+_CHARACTER_LIST_TITLE = (
+    _PROJECT_ROOT / "templates/profile/character_list_title.png"
+)
+_STARRED_ACCOUNTS_HEADER = (
+    _PROJECT_ROOT / "templates/profile/starred_accounts_header.png"
+)
+_REGULAR_ACCOUNTS_HEADER = (
+    _PROJECT_ROOT / "templates/profile/regular_accounts_header.png"
+)
+_LOGIN_CONFIRMATION_TITLE = (
+    _PROJECT_ROOT / "templates/profile/login_confirmation_title.png"
+)
+_SELECTED_ACCOUNT_CHECK = (
+    _PROJECT_ROOT / "templates/profile/selected_account_check.png"
+)
+
+
+def account_key(name: str) -> str:
+    """Normalize OCR accents and punctuation while preserving name casing."""
+
+    name = re.sub(r"\[[^]]*\]", " ", name)
+    decomposed = unicodedata.normalize("NFD", name)
+    folded = "".join(
+        char for char in decomposed
+        if not unicodedata.category(char).startswith("M")
+    ).replace("đ", "d").replace("Đ", "D")
+    return "".join(char for char in folded if char.isalnum())
+
+
+def _casefolded_account_key(name: str) -> str:
+    return account_key(name).casefold()
+
+
+@dataclass
+class AccountTraversal:
+    """Position-based cursor for one ordered pass through starred accounts."""
+
+    direction: int | None = None
+    current_index: int | None = None
+    total_accounts: int | None = None
+
+
+class AccountSwitcher:
+    """Open the character list and move by the active card's position."""
+
+    def __init__(
+        self,
+        game: GameInterface,
+        detector: ScreenDetector,
+        *,
+        log=print,
+    ) -> None:
+        self.game = game
+        self.detector = detector
+        self.log = log
+
+    def switch_to_next(self, traversal: AccountTraversal) -> str | None:
+        """Select the adjacent starred card in the chosen positional order."""
+
+        self._open_character_list()
+        initializing = traversal.current_index is None
+        search_offset = 0
+        search_toward_end = True
+        reversed_search = False
+
+        for _ in range(_MAX_SCROLLS * 2 + 1):
+            screenshot, frame = self._capture()
+            cards = self._read_account_cards(frame)
+            starred_account_total = self._read_starred_account_total(frame)
+            if starred_account_total is not None:
+                traversal.total_accounts = starred_account_total
+
+            # OCR can return an empty frame while the list is animating or
+            # dimmed. Retry briefly before treating the view as unreadable.
+            for _retry in range(2):
+                if cards:
+                    break
+                self.game.wait(0.25)
+                screenshot, frame = self._capture()
+                cards = self._read_account_cards(frame)
+                starred_account_total = self._read_starred_account_total(frame)
+                if starred_account_total is not None:
+                    traversal.total_accounts = starred_account_total
+            if not cards:
+                raise RuntimeError(
+                    "Could not read any visible starred accounts after retries"
+                )
+
+            active_bounds = self._selected_account_bounds(
+                screenshot,
+                frame,
+                cards,
+            )
+            if active_bounds is None:
+                if self._scroll_account_list(
+                    screenshot,
+                    frame,
+                    toward_list_end=search_toward_end,
+                ):
+                    if initializing:
+                        search_offset += 2 if search_toward_end else -2
+                        search_offset = max(0, search_offset)
+                    continue
+                if search_toward_end and not reversed_search:
+                    # The active character may be above the current viewport
+                    # (for example, if the list stayed scrolled down or a
+                    # previous drag overshot). Search upward before failing.
+                    search_toward_end = False
+                    reversed_search = True
+                    continue
+                raise RuntimeError(
+                    "Could not locate the green check on a starred account; "
+                    "stopping without choosing by name"
+                )
+
+            height = frame.shape[0]
+            top_down_cards = self._order_account_cards(
+                cards,
+                frame_height=height,
+                direction=1,
+            )
+            active_position = self._card_index(top_down_cards, active_bounds)
+            if active_position is None:
+                raise RuntimeError(
+                    "Could not map the green check to an account position"
+                )
+
+            starred_header = self._starred_accounts_header_bounds(frame)
+            regular_header = self._regular_accounts_header_bounds(frame)
+            at_starred_top = (
+                starred_header is not None
+                and (top_down_cards[0][1][1] - starred_header[1]) < height * 0.22
+            )
+            at_starred_bottom = (
+                regular_header is not None
+                and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.26
+            )
+
+            total = traversal.total_accounts
+            anchored_index: int | None = None
+            if at_starred_top:
+                anchored_index = active_position
+            elif at_starred_bottom and total is not None:
+                anchored_index = max(
+                    active_position,
+                    total - len(top_down_cards) + active_position,
+                )
+
+            if traversal.direction is None:
+                current_index = (
+                    anchored_index
+                    if anchored_index is not None
+                    else search_offset + active_position
+                )
+                if current_index == 0 or (at_starred_top and active_position == 0):
+                    traversal.direction = 1
+                elif total is not None and current_index >= total - 1:
+                    current_index = total - 1
+                    traversal.direction = -1
+                elif (
+                    at_starred_bottom
+                    and active_position == len(top_down_cards) - 1
+                ):
+                    traversal.direction = -1
+                elif total is not None and current_index > (total - 1) / 2:
+                    traversal.direction = -1
+                else:
+                    traversal.direction = 1
+                traversal.current_index = current_index
+                direction_name = (
+                    "top-to-bottom, left-to-right"
+                    if traversal.direction == 1
+                    else "bottom-to-top, right-to-left"
+                )
+                self._log(
+                    f"Starting positional account traversal at "
+                    f"{traversal.current_index + 1}"
+                    f"/{total if total is not None else '?'}; "
+                    f"direction: {direction_name}"
+                )
+            elif (
+                anchored_index is not None
+                and traversal.current_index != anchored_index
+            ):
+                self._log(
+                    f"Re-synced current account position to "
+                    f"{anchored_index + 1}"
+                    f"/{total if total is not None else '?'} "
+                    "from the anchored list view"
+                )
+                traversal.current_index = anchored_index
+
+            if traversal.current_index is None:
+                raise RuntimeError("The current account position is unknown")
+
+            direction = traversal.direction
+            if direction not in {-1, 1}:
+                raise RuntimeError("The account traversal direction is unknown")
+
+            ordered_cards = self._order_account_cards(
+                cards,
+                frame_height=height,
+                direction=direction,
+            )
+            active_index = self._card_index(ordered_cards, active_bounds)
+            if active_index is None:
+                raise RuntimeError(
+                    "Could not map the active account to its ordered position"
+                )
+
+            next_card_index = active_index + 1
+            if next_card_index < len(ordered_cards):
+                next_index = traversal.current_index + direction
+                if next_index < 0:
+                    # We still have visible starred cards ahead in reverse
+                    # order; re-sync the index to the remaining visible cards.
+                    remaining_cards = len(ordered_cards) - 1 - active_index
+                    next_index = max(0, remaining_cards - 1)
+                elif total is not None and next_index >= total:
+                    self._log(
+                        "A next starred card is visible beyond the header count; "
+                        "continuing by position"
+                    )
+                    total = next_index + 1
+                    traversal.total_accounts = total
+                name, bounds = ordered_cards[next_card_index]
+                self._log(
+                    f"Switching to starred account "
+                    f"{next_index + 1}"
+                    f"/{total if total is not None else '?'}: {name}"
+                )
+                self.game.click(bounds, screenshot)
+                self._confirm_account_login()
+                self._wait_for_game(name)
+                traversal.current_index = next_index
+                return name
+
+            # The active card is the last visible starred card in the current
+            # viewport along `direction`. Check if we have reached the list end
+            # before scrolling.
+            if direction == 1 and at_starred_bottom:
+                self._log(
+                    f"Reached the end of {total or traversal.current_index + 1} "
+                    f"starred accounts after account {traversal.current_index + 1}"
+                )
+                return None
+            if direction == -1 and at_starred_top:
+                self._log(
+                    "Reached the start of the starred accounts list at "
+                    f"account {traversal.current_index + 1}"
+                )
+                return None
+
+            if self._scroll_account_list(
+                screenshot,
+                frame,
+                toward_list_end=direction == 1,
+            ):
+                search_toward_end = direction == 1
+                reversed_search = False
+                continue
+
+            next_index = traversal.current_index + direction
+            count_boundary = total is not None and not 0 <= next_index < total
+            if total is not None:
+                if count_boundary or (direction == 1 and at_starred_bottom) or (
+                    direction == -1 and at_starred_top
+                ):
+                    self._log(
+                        f"Reached the end of the visible starred list at "
+                        f"account {traversal.current_index + 1}"
+                    )
+                    return None
+                raise RuntimeError(
+                    f"Could not reveal starred account {next_index + 1} of "
+                    f"{total} by scrolling; stopping rather than skipping it"
+                )
+            self._log(
+                "No next starred card appeared after scrolling; "
+                f"finished at account {traversal.current_index + 1}"
+            )
+            return None
+
+        raise RuntimeError(
+            "Stopped safely after too many character-list scrolls; "
+            "could not locate the adjacent account"
+        )
+
+    def _open_character_list(self) -> None:
+        screenshot, frame = self._capture()
+        height, width = frame.shape[:2]
+        detection = self.detector.detect(
+            screenshot,
+            read_account=False,
+            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+        )
+        if detection.state not in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+            raise RuntimeError(
+                "Account switching must start from the city or world map; "
+                f"found {detection.state.value}"
+            )
+
+        # The governor portrait stays anchored at the upper-left in city and
+        # world-map views. Use a generous hit area around the portrait.
+        self.game.click(
+            (round(width * 0.005), round(height * 0.002),
+             round(width * 0.075), round(height * 0.12)),
+            screenshot,
+        )
+        self._wait_for_text("ho so thong doc")
+        self._click_profile_settings()
+        self._click_menu_template(_CHARACTER_MENU_BUTTON, "characters")
+        self._wait_for_template(_CHARACTER_LIST_TITLE, "character list")
+
+    def _click_profile_settings(self) -> None:
+        """Use the supplied settings artwork when its small caption OCR fails."""
+
+        deadline = time.monotonic() + 5.0
+        last_screenshot: Path | None = None
+        last_frame: Any | None = None
+        while time.monotonic() < deadline:
+            screenshot, frame = self._capture()
+            last_screenshot, last_frame = screenshot, frame
+            hit = self.detector.locate_template(
+                screenshot,
+                _SETTINGS_BUTTON,
+                confidence_threshold=0.58,
+            )
+            if hit is not None:
+                self._log(
+                    f"Clicking settings button (match={hit.confidence:.3f})"
+                )
+                self.game.click(hit.bounds, screenshot)
+                return
+            self.game.wait(self.game.timing.poll_interval)
+
+        if last_screenshot is not None and last_frame is not None:
+            height, width = last_frame.shape[:2]
+            # The profile screen was confirmed immediately beforehand; this
+            # fallback targets only the lower-right settings tile.
+            self._log("Clicking settings tile at its profile-menu position")
+            self.game.click(
+                (
+                    round(width * 0.79),
+                    round(height * 0.75),
+                    round(width * 0.15),
+                    round(height * 0.20),
+                ),
+                last_screenshot,
+            )
+
+    def _click_text(self, keyword: str) -> None:
+        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
+        while time.monotonic() < deadline:
+            screenshot, frame = self._capture()
+            detections = read_text_detections(
+                frame,
+                (0, 0, frame.shape[1], frame.shape[0]),
+                upscale=2.0,
+            )
+            for text, bounds, _score in detections:
+                if keyword in _fold(text):
+                    self.game.click(bounds, screenshot)
+                    return
+            self.game.wait(self.game.timing.poll_interval)
+        raise RuntimeError(f"Could not locate the {keyword!r} menu label")
+
+    def _click_menu_template(
+        self,
+        template: Path,
+        label: str,
+        *,
+        timeout: float = _OPEN_MENU_TIMEOUT,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            screenshot, _frame = self._capture()
+            hit = self.detector.locate_template(
+                screenshot,
+                template,
+                confidence_threshold=0.58,
+            )
+            if hit is not None:
+                self._log(
+                    f"Clicking {label} button (match={hit.confidence:.3f})"
+                )
+                self.game.click(hit.bounds, screenshot)
+                return
+            self.game.wait(self.game.timing.poll_interval)
+        raise RuntimeError(f"Could not locate the {label!r} menu button")
+
+    def _wait_for_template(self, template: Path, label: str) -> None:
+        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
+        while time.monotonic() < deadline:
+            screenshot = self.game.screenshot()
+            if self.detector.locate_template(
+                screenshot,
+                template,
+                confidence_threshold=0.58,
+            ) is not None:
+                return
+            self.game.wait(self.game.timing.poll_interval)
+        raise RuntimeError(f"Timed out waiting for the {label} screen")
+
+    def _confirm_account_login(self) -> None:
+        """Click Có once after visually anchoring the confirmation dialog."""
+
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            screenshot, frame = self._capture()
+            title_hit = self.detector.locate_template(
+                screenshot,
+                _LOGIN_CONFIRMATION_TITLE,
+                confidence_threshold=0.72,
+            )
+            if title_hit is not None:
+                frame_height, frame_width = frame.shape[:2]
+                # The confirmation panel is centered and the blue Có button
+                # occupies this stable relative position in the game view.
+                # Clicking its known center avoids OCR and button-template
+                # scaling errors that previously left the modal untouched.
+                button_bounds = (
+                    round(frame_width * 0.61),
+                    round(frame_height * 0.69),
+                    max(1, round(frame_width * 0.08)),
+                    max(1, round(frame_height * 0.06)),
+                )
+                self._log(
+                    f"Login confirmation dialog detected "
+                    f"(match={title_hit.confidence:.3f}); clicking Có and "
+                    "waiting for game load"
+                )
+                self.game.click(button_bounds, screenshot)
+                return
+            self.game.wait(self.game.timing.poll_interval)
+
+        raise RuntimeError(
+            "Timed out waiting for the account-login confirmation dialog; "
+            "no unverified button was clicked"
+        )
+
+    def _wait_for_text(self, keyword: str) -> None:
+        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
+        while time.monotonic() < deadline:
+            screenshot, frame = self._capture()
+            detections = read_text_detections(
+                frame,
+                (0, 0, frame.shape[1], frame.shape[0]),
+                upscale=1.8,
+            )
+            if any(keyword in _fold(text) for text, _box, _score in detections):
+                return
+            self.game.wait(self.game.timing.poll_interval)
+        raise RuntimeError(f"Timed out waiting for menu text {keyword!r}")
+
+    def _read_account_cards(
+        self,
+        frame: Any,
+    ) -> list[tuple[str, tuple[int, int, int, int]]]:
+        height, width = frame.shape[:2]
+        min_card_y = round(height * 0.17)
+        starred_bounds = self._starred_accounts_header_bounds(frame)
+        if starred_bounds is not None:
+            min_card_y = max(
+                min_card_y,
+                starred_bounds[1] + round(starred_bounds[3] * 0.75),
+            )
+
+        # Keep card names inside the unclipped viewport so the card and its
+        # green checkmark (roughly 0.08 * height below the name) are fully visible.
+        max_card_y = round(height * 0.79)
+        regular_bounds = self._regular_accounts_header_bounds(frame)
+        if regular_bounds is not None:
+            max_card_y = min(
+                max_card_y,
+                regular_bounds[1] - round(height * 0.02),
+            )
+        if max_card_y <= min_card_y:
+            return []
+
+        detections = read_text_detections(
+            frame,
+            (
+                round(width * 0.10),
+                round(height * 0.15),
+                round(width * 0.82),
+                round(height * 0.73),
+            ),
+            upscale=3.0,
+        )
+
+        # Record kingdom (#1234 ...) and power (Sức mạnh: ...) lines so that
+        # a starred card's name line is still recognized even if OCR slightly
+        # garbles its resource keyword in a particular frame.
+        card_subline_anchors: list[tuple[int, int]] = []
+        for text, bounds, confidence in detections:
+            if confidence < 0.30:
+                continue
+            folded = _fold(text)
+            stripped = text.strip()
+            if (
+                stripped.startswith("#")
+                or "vuong quoc" in folded
+                or "vung quoc" in folded
+                or "quc " in folded
+                or "suc manh" in folded
+                or "sc mnh" in folded
+            ):
+                card_subline_anchors.append((bounds[0], bounds[1]))
+
+        cards = []
+        for text, bounds, confidence in detections:
+            stripped = text.strip()
+            folded = _fold(stripped)
+            x, y, _box_width, _box_height = bounds
+            if confidence < 0.35 or len(account_key(stripped)) < 3:
+                continue
+            if not (min_card_y <= y <= max_card_y):
+                continue
+
+            normalized_x = x / width
+            in_left_col = 0.18 <= normalized_x <= 0.38
+            in_right_col = 0.53 <= normalized_x <= 0.74
+            if not (in_left_col or in_right_col):
+                continue
+
+            if stripped.startswith("#") or re.fullmatch(r"[\W_\d]+", stripped):
+                continue
+            if any(
+                phrase in folded
+                for phrase in (
+                    "nhan vat",
+                    "nhn vt",
+                    "ngoi sao",
+                    "thuong",
+                    "thung",
+                    "tao nhan vat",
+                    "to nhn vt",
+                    "cai dat chung",
+                    "cai dat chien dau",
+                    "cai dat",
+                    "tim thong doc",
+                    "vuong quoc",
+                    "vung quoc",
+                    "quc ",
+                    "suc manh",
+                    "sc mnh",
+                    "manh:",
+                    "mnh:",
+                    "thong bao",
+                    "tai khoan",
+                    "ho tro khach hang",
+                    "huong dan choi",
+                    "ngon ngu",
+                    "cong dong",
+                    "diem hanh vi",
+                    "bieu tuong cam xuc",
+                )
+            ):
+                continue
+
+            has_resource_keyword = resource_for_account(stripped) is not None
+            above_card_subline = any(
+                abs(anchor_x - x) <= width * 0.08
+                and height * 0.02 <= (anchor_y - y) <= height * 0.12
+                for anchor_x, anchor_y in card_subline_anchors
+            )
+            if not (has_resource_keyword or above_card_subline):
+                continue
+
+            # Click the OCR text itself, which lies inside the corresponding
+            # account card, rather than guessing a fixed row/column position.
+            cards.append((stripped, bounds))
+
+        cards.sort(key=lambda item: (item[1][1], item[1][0]))
+        deduplicated: list[tuple[str, tuple[int, int, int, int]]] = []
+        for name, bounds in cards:
+            x, y, box_width, box_height = bounds
+            center_x = x + box_width / 2
+            center_y = y + box_height / 2
+            same_card = any(
+                abs(center_x - (prior_x + prior_width / 2)) <= width * 0.15
+                and abs(center_y - (prior_y + prior_height / 2))
+                <= height * 0.07
+                for _prior_name, (prior_x, prior_y, prior_width, prior_height)
+                in deduplicated
+            )
+            if not same_card:
+                # Keep separate cards even when their names are identical.
+                deduplicated.append((name, bounds))
+        return deduplicated
+
+    def _read_starred_account_total(self, frame: Any) -> int | None:
+        """Read the count at the right side of the visible starred-account header."""
+
+        header_bounds = self._starred_accounts_header_bounds(frame)
+        if header_bounds is None:
+            return None
+
+        height, width = frame.shape[:2]
+        _hx, hy, _hw, hh = header_bounds
+        detections = read_text_detections(
+            frame,
+            (
+                round(width * 0.72),
+                round(height * 0.16),
+                round(width * 0.25),
+                round(height * 0.18),
+            ),
+            upscale=2.5,
+        )
+        for text, bounds, confidence in detections:
+            # OCR sometimes groups the chevron with the numeral (for example,
+            # "3^"), so accept a standalone one- or two-digit number inside
+            # the vertical band of the matched starred-accounts header.
+            count = re.search(r"(?<!\d)(\d{1,2})(?!\d)", text)
+            if count is None or confidence < 0.25:
+                continue
+            _x, y, _box_width, _box_height = bounds
+            if hy <= y <= hy + hh:
+                return int(count.group(1))
+        return None
+
+    def _selected_account_bounds(
+        self,
+        screenshot: Path,
+        frame: Any,
+        cards: list[tuple[str, tuple[int, int, int, int]]],
+    ) -> tuple[int, int, int, int] | None:
+        """Find the card with the green check marking the active character."""
+
+        if not cards:
+            return None
+        hit = self.detector.locate_template(
+            screenshot,
+            _SELECTED_ACCOUNT_CHECK,
+            confidence_threshold=0.66,
+        )
+        if hit is None:
+            return None
+
+        height, width = frame.shape[:2]
+        check_x, check_y, check_width, check_height = hit.bounds
+        check_center_x = check_x + check_width / 2
+        check_center_y = check_y + check_height / 2
+        candidates = []
+        for _name, bounds in cards:
+            x, y, box_width, box_height = bounds
+            vertical_gap = abs((y + box_height / 2) - check_center_y)
+            if vertical_gap > height * 0.12:
+                continue
+            if check_center_x < x:
+                horizontal_gap = x - check_center_x
+            elif check_center_x > x + box_width:
+                horizontal_gap = check_center_x - (x + box_width)
+            else:
+                horizontal_gap = 0
+            if horizontal_gap > width * 0.22:
+                continue
+            distance = (
+                (vertical_gap / height) ** 2
+                + (horizontal_gap / width) ** 2
+            )
+            candidates.append((distance, bounds))
+        if not candidates:
+            return None
+        _distance, bounds = min(candidates)
+        return bounds
+
+    @staticmethod
+    def _card_index(
+        cards: list[tuple[str, tuple[int, int, int, int]]],
+        bounds: tuple[int, int, int, int],
+    ) -> int | None:
+        return next(
+            (index for index, (_name, card_bounds) in enumerate(cards)
+             if card_bounds == bounds),
+            None,
+        )
+
+    @staticmethod
+    def _order_account_cards(
+        cards: list[tuple[str, tuple[int, int, int, int]]],
+        *,
+        frame_height: int,
+        direction: int,
+    ) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Order cards row-major, optionally reversing for bottom-up traversal."""
+
+        rows: list[list[tuple[str, tuple[int, int, int, int]]]] = []
+        row_centers: list[float] = []
+        row_tolerance = frame_height * 0.065
+        for card in sorted(cards, key=lambda item: item[1][1]):
+            _name, (_x, y, _width, height) = card
+            center_y = y + height / 2
+            if not rows or abs(center_y - row_centers[-1]) > row_tolerance:
+                rows.append([card])
+                row_centers.append(center_y)
+            else:
+                rows[-1].append(card)
+                row_centers[-1] = sum(
+                    bounds[1] + bounds[3] / 2 for _label, bounds in rows[-1]
+                ) / len(rows[-1])
+
+        for row in rows:
+            row.sort(key=lambda item: item[1][0])
+
+        ordered = [card for row in rows for card in row]
+        if direction < 0:
+            ordered.reverse()
+        return ordered
+
+    def _scroll_account_list(
+        self,
+        screenshot: Path,
+        frame: Any,
+        *,
+        toward_list_end: bool,
+    ) -> bool:
+        height, width = frame.shape[:2]
+        before_sig = self._visible_account_signature(frame)
+        before_crop = self._list_viewport_gray(frame)
+        # The cards are arranged in rows about 19% of the frame high. Move
+        # roughly one row per gesture so the next viewport overlaps the current one.
+        start_y, end_y = (
+            (0.72, 0.53) if toward_list_end else (0.53, 0.72)
+        )
+        self.game.drag(
+            (round(width * 0.51), round(height * start_y)),
+            (round(width * 0.51), round(height * end_y)),
+            screenshot,
+        )
+        self.game.wait(0.55)
+        _new_screenshot, after_frame = self._capture()
+        after_crop = self._list_viewport_gray(after_frame)
+        if before_crop.shape == after_crop.shape and before_crop.size > 0:
+            diff = cv2.absdiff(before_crop, after_crop)
+            if float(np.mean(diff > 18)) >= 0.035:
+                return True
+        after_sig = self._visible_account_signature(after_frame)
+        return after_sig != before_sig
+
+    @staticmethod
+    def _list_viewport_gray(frame: Any) -> Any:
+        height, width = frame.shape[:2]
+        crop = frame[
+            round(height * 0.18) : round(height * 0.85),
+            round(width * 0.13) : round(width * 0.85),
+        ]
+        if crop.ndim == 3:
+            crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(crop, (5, 5), 0)
+
+    def _visible_account_signature(
+        self,
+        frame: Any,
+    ) -> tuple[tuple[str, int, int], ...]:
+        """Return normalized card keys and coarse positions to verify scrolling."""
+
+        height, width = frame.shape[:2]
+        return tuple(
+            (
+                _casefolded_account_key(name),
+                round(bounds[0] / width * 20),
+                round(bounds[1] / height * 20),
+            )
+            for name, bounds in self._read_account_cards(frame)
+        )
+
+    def _wait_for_game(self, expected_name: str) -> None:
+        deadline = time.monotonic() + _ACCOUNT_LOAD_TIMEOUT
+        next_progress_log = time.monotonic() + 15.0
+        opened_world_map = False
+        reported_character_list = False
+        while time.monotonic() < deadline:
+            screenshot = self.game.screenshot()
+            if self._character_list_is_open(screenshot):
+                if not reported_character_list:
+                    self._log(
+                        "Account selected, but the character list is still open; "
+                        "waiting for it to close before farming"
+                    )
+                    reported_character_list = True
+                self.game.wait(max(0.7, self.game.timing.poll_interval))
+                continue
+
+            detection = self.detector.detect(
+                screenshot,
+                candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+            )
+            if detection.state is ScreenState.CITY and not opened_world_map:
+                hit = self.detector.locate_template(
+                    screenshot,
+                    _CITY_MAP_BUTTON,
+                    confidence_threshold=0.65,
+                )
+                if hit is not None:
+                    self.game.click(hit.bounds, screenshot)
+                    opened_world_map = True
+                else:
+                    self.game.wait(max(0.7, self.game.timing.poll_interval))
+                continue
+            if detection.state is ScreenState.WORLD_MAP:
+                if detection.account_name:
+                    if (
+                        _casefolded_account_key(detection.account_name)
+                        == _casefolded_account_key(expected_name)
+                    ):
+                        self._log("RoK account loaded")
+                    else:
+                        self._log(
+                            "RoK world map loaded after character selection; "
+                            f"account-label OCR read {detection.account_name!r} "
+                            f"instead of {expected_name!r}, so continuing "
+                            "without requiring a Vietnamese OCR name match"
+                        )
+                else:
+                    self._log(
+                        "RoK world map loaded after character selection; "
+                        "account-label OCR was unavailable, so continuing"
+                    )
+                return
+            if time.monotonic() >= next_progress_log:
+                self._log(f"Still waiting for {expected_name} to load")
+                next_progress_log = time.monotonic() + 15.0
+            self.game.wait(max(0.7, self.game.timing.poll_interval))
+        raise RuntimeError(
+            f"Timed out waiting for {expected_name!r} to load; "
+            "stopping rather than farming an unverified account"
+        )
+
+    @staticmethod
+    def _starred_accounts_header_bounds(
+        frame: Any,
+    ) -> tuple[int, int, int, int] | None:
+        """Locate the starred-accounts bar if visible in the upper viewport."""
+
+        gray = (
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if frame.ndim == 3
+            else frame
+        )
+        template = cv2.imread(
+            str(_STARRED_ACCOUNTS_HEADER),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if gray is None or template is None:
+            raise RuntimeError("Could not read the starred-accounts header images")
+        height, width = gray.shape[:2]
+        left, right = round(width * 0.08), round(width * 0.75)
+        top, bottom = round(height * 0.12), round(height * 0.36)
+        score, match = ScreenDetector._best_scale_match(
+            gray[top:bottom, left:right],
+            template,
+            minimum_scale=0.45,
+            maximum_scale=1.10,
+        )
+        if score < 0.80:
+            return None
+        scaled_height, scaled_width = ScreenDetector._scaled_size(
+            template,
+            match[2],
+        )
+        return (
+            left + match[0],
+            top + match[1],
+            scaled_width,
+            scaled_height,
+        )
+
+    @staticmethod
+    def _regular_accounts_header_bounds(
+        frame: Any,
+    ) -> tuple[int, int, int, int] | None:
+        """Locate the regular-accounts bar if visible in the viewport."""
+
+        gray = (
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if frame.ndim == 3
+            else frame
+        )
+        template = cv2.imread(
+            str(_REGULAR_ACCOUNTS_HEADER),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if gray is None or template is None:
+            raise RuntimeError("Could not read the regular-accounts header images")
+        height, width = gray.shape[:2]
+        left, right = round(width * 0.08), round(width * 0.75)
+        top, bottom = round(height * 0.25), round(height * 0.88)
+        score, match = ScreenDetector._best_scale_match(
+            gray[top:bottom, left:right],
+            template,
+            minimum_scale=0.45,
+            maximum_scale=1.10,
+        )
+        if score < 0.80:
+            return None
+        scaled_height, scaled_width = ScreenDetector._scaled_size(
+            template,
+            match[2],
+        )
+        return (
+            left + match[0],
+            top + match[1],
+            scaled_width,
+            scaled_height,
+        )
+
+    @classmethod
+    def _character_list_is_open(cls, screenshot: Path) -> bool:
+        """Check the distinctive starred-accounts bar in its screen region."""
+
+        frame = cv2.imread(str(screenshot), cv2.IMREAD_GRAYSCALE)
+        if frame is None:
+            raise RuntimeError("Could not read the starred-accounts header images")
+        return cls._starred_accounts_header_bounds(frame) is not None
+
+    @classmethod
+    def _regular_accounts_section_is_visible(cls, screenshot: Path) -> bool:
+        """Use the next section header to confirm the starred list has ended."""
+
+        frame = cv2.imread(str(screenshot), cv2.IMREAD_GRAYSCALE)
+        if frame is None:
+            raise RuntimeError("Could not read the regular-accounts header images")
+        return cls._regular_accounts_header_bounds(frame) is not None
+
+    def _capture(self) -> tuple[Path, Any]:
+        screenshot = self.game.screenshot()
+        frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"Could not read screenshot: {screenshot}")
+        return screenshot, frame
+
+    def _log(self, message: str) -> None:
+        self.log(message)
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text.casefold())
+    return "".join(
+        char for char in decomposed
+        if not unicodedata.category(char).startswith("M")
+    ).replace("đ", "d")

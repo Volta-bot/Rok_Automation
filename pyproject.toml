@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rok-automation"
+version = "0.1.0"
+description = "Desktop automation for Rise of Kingdoms in LDPlayer"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mss>=10.0",
+    "numpy>=1.26",
+    "opencv-python>=4.10",
+    "rapidocr>=3.9.0",
+    "onnxruntime>=1.17",
+]
+
+[project.scripts]
+rok-automation = "rok_automation.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["rok_automation*"]

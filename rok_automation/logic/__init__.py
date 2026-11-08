@@ -1,0 +1,1 @@
+"""Game-independent farming decisions."""
