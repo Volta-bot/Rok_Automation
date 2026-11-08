@@ -523,32 +523,40 @@ class AccountSwitcher:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # Search only the centered modal region at realistic scales so the
             # top NHÂN VẬT window title bar cannot be mistaken for this dialog.
+            title_left = round(frame_width * 0.28)
+            title_top = round(frame_height * 0.12)
             title_crop = gray[
-                round(frame_height * 0.20) : round(frame_height * 0.42),
-                round(frame_width * 0.25) : round(frame_width * 0.75),
+                title_top : round(frame_height * 0.35),
+                title_left : round(frame_width * 0.72),
             ]
+            yes_left = round(frame_width * 0.48)
+            yes_top = round(frame_height * 0.58)
             yes_crop = gray[
-                round(frame_height * 0.58) : round(frame_height * 0.78),
-                round(frame_width * 0.50) : round(frame_width * 0.78),
+                yes_top : round(frame_height * 0.82),
+                yes_left : round(frame_width * 0.80),
             ]
             title_score, _ = ScreenDetector._best_scale_match(
                 title_crop,
                 title_template,
                 minimum_scale=0.75,
-                maximum_scale=1.15,
+                maximum_scale=1.20,
             )
-            yes_score, _ = ScreenDetector._best_scale_match(
+            yes_score, yes_match = ScreenDetector._best_scale_match(
                 yes_crop,
                 yes_template,
                 minimum_scale=0.75,
-                maximum_scale=1.15,
+                maximum_scale=1.20,
             )
-            if title_score >= 0.78 and yes_score >= 0.72:
+            if title_score >= 0.80 and yes_score >= 0.78:
+                yes_height, yes_width = ScreenDetector._scaled_size(
+                    yes_template,
+                    yes_match[2],
+                )
                 button_bounds = (
-                    round(frame_width * 0.61),
-                    round(frame_height * 0.69),
-                    max(1, round(frame_width * 0.08)),
-                    max(1, round(frame_height * 0.06)),
+                    yes_left + yes_match[0],
+                    yes_top + yes_match[1],
+                    yes_width,
+                    yes_height,
                 )
                 self._log(
                     f"Login confirmation dialog detected "
