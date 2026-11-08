@@ -157,7 +157,7 @@ class AccountSwitcher:
             )
             at_starred_bottom = (
                 regular_header is not None
-                and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.26
+                and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.34
             )
             total = traversal.total_accounts
             if at_starred_top or total is not None:
@@ -202,6 +202,23 @@ class AccountSwitcher:
                         "Could not locate the green check on a starred account; "
                         "stopping without choosing by name"
                     )
+
+                if anchored_index is None and (
+                    (total is not None and total <= len(top_down_cards) * 2)
+                    or active_position >= 2
+                ):
+                    if self._scroll_account_list(
+                        screenshot,
+                        frame,
+                        toward_list_end=True,
+                    ):
+                        search_offset += 2
+                        continue
+                    if total is not None:
+                        anchored_index = max(
+                            active_position,
+                            total - len(top_down_cards) + active_position,
+                        )
 
                 start_index = (
                     anchored_index
@@ -299,6 +316,23 @@ class AccountSwitcher:
                 card_offset = target_index - visible_start
             elif active_position is not None and active_global is not None:
                 card_offset = active_position + (target_index - active_global)
+
+            if (
+                card_offset is not None
+                and active_position is not None
+                and card_offset == active_position
+            ):
+                actual_index = (
+                    anchored_index
+                    if anchored_index is not None
+                    else target_index
+                )
+                traversal.skipped_index = None
+                traversal.current_index = actual_index
+                target_index = traversal.next_target_index()
+                if target_index is None:
+                    return None
+                card_offset = active_position + (target_index - actual_index)
 
             if card_offset is not None and 0 <= card_offset < len(top_down_cards):
                 name, bounds = top_down_cards[card_offset]
@@ -990,7 +1024,7 @@ class AccountSwitcher:
             raise RuntimeError("Could not read the regular-accounts header images")
         height, width = gray.shape[:2]
         left, right = round(width * 0.08), round(width * 0.75)
-        top, bottom = round(height * 0.25), round(height * 0.93)
+        top, bottom = round(height * 0.25), round(height * 0.98)
         score, match = ScreenDetector._best_scale_match(
             gray[top:bottom, left:right],
             template,
