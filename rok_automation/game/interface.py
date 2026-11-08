@@ -43,10 +43,10 @@ class GameInterface(Protocol):
 
 @dataclass(frozen=True)
 class TimingConfig:
-    click_delay: float = 0.040
+    click_delay: float = 0.015
     jitter_min: float = 0.0
     jitter_max: float = 0.0
-    poll_interval: float = 0.120
+    poll_interval: float = 0.040
     transition_timeout: float = 12.0
 
 

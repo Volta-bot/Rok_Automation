@@ -97,6 +97,20 @@ _TEMPLATES = (
         _PROJECT_ROOT / "templates/gathering/march_button.png",
     ),
 )
+_TEMPLATE_CACHE: dict[Path, Any] = {}
+
+
+def _load_gray_template(path: Path) -> Any:
+    cached = _TEMPLATE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    image_template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image_template is None:
+        raise FileNotFoundError(f"Missing UI template: {path}")
+    _TEMPLATE_CACHE[path] = image_template
+    return image_template
+
+
 class ScreenDetector:
     """Classify a screenshot from stable UI buttons, returning UNKNOWN on doubt."""
 
@@ -143,9 +157,7 @@ class ScreenDetector:
             )
         )
         for template in templates:
-            image_template = cv2.imread(str(template.path), cv2.IMREAD_GRAYSCALE)
-            if image_template is None:
-                raise FileNotFoundError(f"Missing UI template: {template.path}")
+            image_template = _load_gray_template(template.path)
 
             score, bounds = self._best_scale_match(frame, image_template)
             if score > best.confidence:
@@ -156,6 +168,8 @@ class ScreenDetector:
                     template.name,
                     (bounds[0], bounds[1], width, height),
                 )
+                if score >= 0.92 and len(templates) == 1:
+                    break
 
         if best.confidence < self.confidence_threshold:
             return ScreenDetection(
@@ -270,15 +284,13 @@ class ScreenDetector:
         frame = cv2.imread(str(screenshot_path), cv2.IMREAD_GRAYSCALE)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
-        image_template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
-        if image_template is None:
-            raise FileNotFoundError(f"Missing UI template: {template_path}")
+        image_template = _load_gray_template(Path(template_path))
 
         score, match = cls._best_scale_match(
             frame,
             image_template,
-            minimum_scale=0.40,
-            maximum_scale=1.60,
+            minimum_scale=0.45,
+            maximum_scale=1.35,
         )
         if score < confidence_threshold:
             return None
@@ -361,22 +373,38 @@ class ScreenDetector:
         best_match = (0, 0, 1.0)
         scale_start = round(minimum_scale * 100)
         scale_end = round(maximum_scale * 100)
-        for scale_step in range(scale_start, scale_end + 1, 5):
+        all_steps = range(scale_start, scale_end + 1, 5)
+        # Check scales closest to 1.0 first so standard-resolution hits
+        # short-circuit immediately without scanning all ~20 scales.
+        primary_steps = tuple(
+            step for step in (100, 95, 105, 90, 110)
+            if scale_start <= step <= scale_end
+        )
+        remaining_steps = tuple(
+            step for step in all_steps if step not in primary_steps
+        )
+        for index, scale_step in enumerate((*primary_steps, *remaining_steps)):
             scale = scale_step / 100.0
             width = max(1, round(template.shape[1] * scale))
             height = max(1, round(template.shape[0] * scale))
             if width > frame.shape[1] or height > frame.shape[0]:
                 continue
 
-            resized = cv2.resize(
-                template,
-                (width, height),
-                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+            resized = (
+                template
+                if scale_step == 100
+                else cv2.resize(
+                    template,
+                    (width, height),
+                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+                )
             )
             result = cv2.matchTemplate(frame, resized, cv2.TM_CCOEFF_NORMED)
             _min_score, max_score, _min_location, max_location = cv2.minMaxLoc(result)
             if max_score > best_score:
                 best_score = max_score
                 best_match = (max_location[0], max_location[1], scale)
+            if index + 1 == len(primary_steps) and best_score >= 0.90:
+                break
 
         return max(0.0, best_score), best_match

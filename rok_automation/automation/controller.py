@@ -22,6 +22,7 @@ from rok_automation.logic.resource_selector import (
     Resource,
     SearchTarget,
     account_name_without_guild,
+    random_preferred_resource,
     resource_for_account,
     search_plan,
 )
@@ -36,11 +37,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
 _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
-_SEARCH_SETTLE_SECONDS = 0.75
-_SEARCH_SUBMIT_DELAY = 0.25
+_SEARCH_SETTLE_SECONDS = 0.35
+_SEARCH_SUBMIT_DELAY = 0.06
 _SEARCH_MENU_READY_TIMEOUT = 2.0
 _CONTROL_READY_TIMEOUT = 2.0
-_LEVEL_REPEAT_PAUSE = 0.04
+_LEVEL_REPEAT_PAUSE = 0.02
 _UNCHANGED_SEARCH_FRAMES = 2
 _RESOURCE_BUTTONS = {
     Resource.GOLD: _SEARCH_TEMPLATES / "resource_gold.png",
@@ -104,6 +105,15 @@ class FarmingController:
                 f"{farmed_accounts} account(s) farmed this run"
             )
 
+            if not traversal.has_more_accounts():
+                context.armies_dispatched = total_dispatched
+                context.last_error = None
+                self._transition(
+                    FarmState.COMPLETE,
+                    f"Finished {farmed_accounts} RoK account(s) linked to this Gmail account",
+                )
+                return context
+
             next_name = AccountSwitcher(
                 self.game,
                 self.detector,
@@ -135,10 +145,9 @@ class FarmingController:
                 _NAVIGATION_TEMPLATES / "city_map_button.png",
                 expected_state=ScreenState.CITY,
             )
-            _screenshot, detection = self._wait_for_states(
+            screenshot, _detection = self._wait_for_states(
                 {ScreenState.WORLD_MAP}
             )
-            screenshot = self.game.screenshot()
             detection = self.detector.detect(
                 screenshot,
                 candidate_states={ScreenState.WORLD_MAP},
@@ -151,30 +160,28 @@ class FarmingController:
         if detection.state is not ScreenState.WORLD_MAP:
             raise FarmingError("Could not reach the world map")
 
-        for _retry in range(2):
-            if detection.account_name and detection.preferred_resource is not None:
-                break
-            self.game.wait(0.35)
-            screenshot = self.game.screenshot()
-            detection = self.detector.detect(
-                screenshot,
-                candidate_states={ScreenState.WORLD_MAP},
-            )
-
         self.context.account_name = detection.account_name
         self.context.preferred_resource = detection.preferred_resource
-        if (
-            (not self.context.account_name or self.context.preferred_resource is None)
-            and expected_account_name
-        ):
-            fallback_resource = resource_for_account(expected_account_name)
-            fallback_name = account_name_without_guild(expected_account_name)
-            if fallback_name and fallback_resource is not None:
-                self.context.account_name = fallback_name
-                self.context.preferred_resource = fallback_resource
-        if not self.context.account_name or self.context.preferred_resource is None:
-            raise FarmingError(
-                "Could not read an account name with a supported resource keyword"
+        if expected_account_name:
+            if not self.context.account_name:
+                self.context.account_name = (
+                    account_name_without_guild(expected_account_name)
+                    or expected_account_name
+                )
+            if self.context.preferred_resource is None:
+                self.context.preferred_resource = resource_for_account(
+                    expected_account_name
+                )
+        if not self.context.account_name:
+            self.context.account_name = "current account"
+        if self.context.preferred_resource is None:
+            self.context.preferred_resource = random_preferred_resource(
+                self.rng
+            )
+            self._log(
+                f"No resource keyword in {self.context.account_name!r}; "
+                f"randomly selected {self.context.preferred_resource.value} "
+                "(Gold weighted higher)"
             )
         if detection.armies_out is None:
             raise FarmingError(

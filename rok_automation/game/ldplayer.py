@@ -364,7 +364,7 @@ def click_ldplayer_point(
     )
     mouse_event.restype = None
     mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
-    time.sleep(0.06)
+    time.sleep(0.025)
     mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
 
@@ -426,7 +426,7 @@ def drag_ldplayer_points(
     mouse_event.restype = None
     mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
     distance = max(abs(end_screen[0] - start_screen[0]), abs(end_screen[1] - start_screen[1]))
-    steps = max(8, min(30, distance // 20))
+    steps = max(6, min(14, distance // 25))
     for step in range(1, steps + 1):
         ratio = step / steps
         x = round(start_screen[0] + (end_screen[0] - start_screen[0]) * ratio)
@@ -434,6 +434,6 @@ def drag_ldplayer_points(
         if not set_cursor_pos(x, y):
             mouse_event(0x0004, 0, 0, 0, 0)
             raise ctypes.WinError(ctypes.get_last_error())
-        time.sleep(0.01)
-    time.sleep(0.08)
+        time.sleep(0.006)
+    time.sleep(0.04)
     mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP

@@ -93,6 +93,28 @@ def resource_for_account(account_name: str) -> Resource | None:
     return None
 
 
+_RANDOM_RESOURCE_CHOICES: tuple[Resource, ...] = (
+    Resource.GOLD,
+    Resource.STONE,
+    Resource.FOOD,
+    Resource.WOOD,
+)
+_RANDOM_RESOURCE_WEIGHTS: tuple[float, ...] = (0.40, 0.20, 0.20, 0.20)
+
+
+def random_preferred_resource(
+    rng: random.Random | None = None,
+) -> Resource:
+    """Pick a preferred resource randomly, weighting Gold higher (40%)."""
+
+    chooser = rng or random
+    return chooser.choices(
+        _RANDOM_RESOURCE_CHOICES,
+        weights=_RANDOM_RESOURCE_WEIGHTS,
+        k=1,
+    )[0]
+
+
 def search_plan(
     preferred_resource: Resource,
     *,

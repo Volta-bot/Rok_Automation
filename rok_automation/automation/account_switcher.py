@@ -13,7 +13,6 @@ import cv2
 import numpy as np
 
 from rok_automation.game.interface import GameInterface
-from rok_automation.logic.resource_selector import resource_for_account
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.screen import ScreenDetector, ScreenState
 
@@ -70,6 +69,29 @@ class AccountTraversal:
     direction: int | None = None
     current_index: int | None = None
     total_accounts: int | None = None
+    skipped_index: int | None = None
+    anchored_to_top: bool = False
+
+    def next_target_index(self) -> int | None:
+        """Return the next 0-based account index to farm, or None if finished."""
+
+        if self.direction not in {-1, 1} or self.current_index is None:
+            return None
+        candidate = self.current_index + self.direction
+        if self.skipped_index is not None and candidate == self.skipped_index:
+            candidate += self.direction
+        if candidate < 0:
+            return -1 if not self.anchored_to_top else None
+        if self.total_accounts is not None and candidate >= self.total_accounts:
+            return None
+        return candidate
+
+    def has_more_accounts(self) -> bool:
+        """Return False only when traversal is initialized and at the final end."""
+
+        if self.direction not in {-1, 1} or self.current_index is None:
+            return True
+        return self.next_target_index() is not None
 
 
 class AccountSwitcher:
@@ -87,14 +109,16 @@ class AccountSwitcher:
         self.log = log
 
     def switch_to_next(self, traversal: AccountTraversal) -> str | None:
-        """Select the adjacent starred card in the chosen positional order."""
+        """Select the next starred card in the chosen positional order."""
 
         self._open_character_list()
-        initializing = traversal.current_index is None
+        initializing = traversal.direction is None
         search_offset = 0
         search_toward_end = True
         reversed_search = False
-        located_active_in_pass = False
+        target_index: int | None = (
+            traversal.next_target_index() if not initializing else None
+        )
 
         for _ in range(_MAX_SCROLLS * 2 + 1):
             screenshot, frame = self._capture()
@@ -108,7 +132,7 @@ class AccountSwitcher:
             for _retry in range(2):
                 if cards:
                     break
-                self.game.wait(0.25)
+                self.game.wait(0.20)
                 screenshot, frame = self._capture()
                 cards = self._read_account_cards(frame)
                 starred_account_total = self._read_starred_account_total(frame)
@@ -136,143 +160,107 @@ class AccountSwitcher:
                 and (regular_header[1] - top_down_cards[-1][1][1]) < height * 0.26
             )
             total = traversal.total_accounts
+            if at_starred_top or total is not None:
+                traversal.anchored_to_top = True
 
             active_bounds = self._selected_account_bounds(
                 screenshot,
                 frame,
                 cards,
             )
-            if active_bounds is None:
-                # If we already located the active card before scrolling (or
-                # know our global position) and the new viewport is anchored at
-                # the top or bottom of the starred list, we can map global
-                # indices directly to `top_down_cards` even when the previous
-                # card's green checkmark scrolled off the viewport edge.
-                if (
-                    located_active_in_pass
-                    and traversal.current_index is not None
-                    and traversal.direction in {-1, 1}
-                ):
-                    visible_start_index: int | None = None
-                    if at_starred_top:
-                        visible_start_index = 0
-                    elif at_starred_bottom and total is not None:
-                        visible_start_index = max(
-                            0,
-                            total - len(top_down_cards),
-                        )
-                    if visible_start_index is not None:
-                        direction = traversal.direction
-                        candidate_global = traversal.current_index + direction
-                        while (
-                            visible_start_index
-                            <= candidate_global
-                            < visible_start_index + len(top_down_cards)
-                        ):
-                            name, bounds = top_down_cards[
-                                candidate_global - visible_start_index
-                            ]
-                            if resource_for_account(name) is None:
-                                self._log(
-                                    f"Skipping starred account {candidate_global + 1}"
-                                    f"/{total if total is not None else '?'}: "
-                                    f"{name} (no resource keyword)"
-                                )
-                                traversal.current_index = candidate_global
-                                candidate_global += direction
-                                continue
-                            self._log(
-                                f"Switching to starred account "
-                                f"{candidate_global + 1}"
-                                f"/{total if total is not None else '?'}: {name}"
-                            )
-                            self.game.click(bounds, screenshot)
-                            self._confirm_account_login()
-                            self._wait_for_game(name)
-                            traversal.current_index = candidate_global
-                            return name
-                        if (direction == 1 and at_starred_bottom) or (
-                            direction == -1 and at_starred_top
-                        ):
-                            self._log(
-                                f"Reached the end of the starred accounts list "
-                                f"at account {traversal.current_index + 1}"
-                            )
-                            return None
-
-                if self._scroll_account_list(
-                    screenshot,
-                    frame,
-                    toward_list_end=search_toward_end,
-                ):
-                    if initializing:
-                        search_offset += 2 if search_toward_end else -2
-                        search_offset = max(0, search_offset)
-                    continue
-                if search_toward_end and not reversed_search:
-                    # The active character may be above the current viewport
-                    # (for example, if the list stayed scrolled down or a
-                    # previous drag overshot). Search upward before failing.
-                    search_toward_end = False
-                    reversed_search = True
-                    continue
-                raise RuntimeError(
-                    "Could not locate the green check on a starred account; "
-                    "stopping without choosing by name"
-                )
-
-            located_active_in_pass = True
-            active_position = self._card_index(top_down_cards, active_bounds)
-            if active_position is None:
-                raise RuntimeError(
-                    "Could not map the green check to an account position"
-                )
+            active_position = (
+                self._card_index(top_down_cards, active_bounds)
+                if active_bounds is not None
+                else None
+            )
 
             anchored_index: int | None = None
-            if at_starred_top:
-                anchored_index = active_position
-            elif at_starred_bottom and total is not None:
-                anchored_index = max(
-                    active_position,
-                    total - len(top_down_cards) + active_position,
-                )
+            if active_position is not None:
+                if at_starred_top:
+                    anchored_index = active_position
+                elif at_starred_bottom and total is not None:
+                    anchored_index = max(
+                        active_position,
+                        total - len(top_down_cards) + active_position,
+                    )
 
             if traversal.direction is None:
-                current_index = (
+                if active_position is None:
+                    if self._scroll_account_list(
+                        screenshot,
+                        frame,
+                        toward_list_end=search_toward_end,
+                    ):
+                        search_offset += 2 if search_toward_end else -2
+                        search_offset = max(0, search_offset)
+                        continue
+                    if search_toward_end and not reversed_search:
+                        search_toward_end = False
+                        reversed_search = True
+                        continue
+                    raise RuntimeError(
+                        "Could not locate the green check on a starred account; "
+                        "stopping without choosing by name"
+                    )
+
+                start_index = (
                     anchored_index
                     if anchored_index is not None
                     else search_offset + active_position
                 )
-                if current_index == 0 or (at_starred_top and active_position == 0):
+                if start_index == 0 or (at_starred_top and active_position == 0):
                     traversal.direction = 1
-                elif total is not None and current_index >= total - 1:
-                    current_index = total - 1
-                    traversal.direction = -1
+                    traversal.current_index = 0
+                    target_index = traversal.next_target_index()
+                    self._log(
+                        f"Starting positional account traversal at 1"
+                        f"/{total if total is not None else '?'}; "
+                        "direction: top-to-bottom, left-to-right"
+                    )
                 elif (
-                    total is None
-                    and at_starred_bottom
-                    and active_position == len(top_down_cards) - 1
+                    (total is not None and start_index >= total - 1)
+                    or (
+                        total is None
+                        and at_starred_bottom
+                        and active_position == len(top_down_cards) - 1
+                    )
                 ):
+                    if total is not None:
+                        start_index = total - 1
                     traversal.direction = -1
-                elif total is not None and current_index > (total - 1) / 2:
-                    traversal.direction = -1
+                    traversal.current_index = start_index
+                    target_index = traversal.next_target_index()
+                    self._log(
+                        f"Starting positional account traversal at "
+                        f"{start_index + 1}"
+                        f"/{total if total is not None else '?'}; "
+                        "direction: bottom-to-top, right-to-left"
+                    )
                 else:
-                    traversal.direction = 1
-                traversal.current_index = current_index
-                direction_name = (
-                    "top-to-bottom, left-to-right"
-                    if traversal.direction == 1
-                    else "bottom-to-top, right-to-left"
-                )
-                self._log(
-                    f"Starting positional account traversal at "
-                    f"{traversal.current_index + 1}"
-                    f"/{total if total is not None else '?'}; "
-                    f"direction: {direction_name}"
-                )
+                    traversal.skipped_index = start_index
+                    if total is None or start_index <= (total - 1) / 2:
+                        traversal.direction = 1
+                        target_index = 0
+                        self._log(
+                            f"Started mid-list at {start_index + 1}"
+                            f"/{total if total is not None else '?'}; "
+                            f"moving to nearest end (1/{total if total is not None else '?'}) "
+                            "and farming top-to-bottom, left-to-right"
+                        )
+                    else:
+                        traversal.direction = -1
+                        target_index = total - 1
+                        self._log(
+                            f"Started mid-list at {start_index + 1}/{total}; "
+                            f"moving to nearest end ({total}/{total}) "
+                            "and farming bottom-to-top, right-to-left"
+                        )
             elif (
-                anchored_index is not None
+                not initializing
+                and anchored_index is not None
+                and traversal.current_index is not None
                 and traversal.current_index != anchored_index
+                and anchored_index != traversal.skipped_index
             ):
                 self._log(
                     f"Re-synced current account position to "
@@ -281,109 +269,104 @@ class AccountSwitcher:
                     "from the anchored list view"
                 )
                 traversal.current_index = anchored_index
+                target_index = traversal.next_target_index()
+            elif (
+                not initializing
+                and not traversal.anchored_to_top
+                and active_position is not None
+                and traversal.direction == -1
+            ):
+                traversal.current_index = active_position
+                target_index = active_position - 1
 
-            if traversal.current_index is None:
-                raise RuntimeError("The current account position is unknown")
-
-            direction = traversal.direction
-            if direction not in {-1, 1}:
-                raise RuntimeError("The account traversal direction is unknown")
-
-            ordered_cards = self._order_account_cards(
-                cards,
-                frame_height=height,
-                direction=direction,
-            )
-            active_index = self._card_index(ordered_cards, active_bounds)
-            if active_index is None:
-                raise RuntimeError(
-                    "Could not map the active account to its ordered position"
+            if target_index is None:
+                self._log(
+                    "Reached the end of the starred accounts list; "
+                    "no more accounts to farm"
                 )
+                return None
 
-            next_card_index = active_index + 1
-            while next_card_index < len(ordered_cards):
-                next_index = traversal.current_index + direction
-                if next_index < 0:
-                    remaining_cards = len(ordered_cards) - 1 - active_index
-                    next_index = max(0, remaining_cards - 1)
-                elif total is not None and next_index >= total:
-                    self._log(
-                        "A next starred card is visible beyond the header count; "
-                        "continuing by position"
-                    )
-                    total = next_index + 1
-                    traversal.total_accounts = total
-                name, bounds = ordered_cards[next_card_index]
-                if resource_for_account(name) is None:
-                    self._log(
-                        f"Skipping starred account {next_index + 1}"
-                        f"/{total if total is not None else '?'}: {name} "
-                        "(no resource keyword)"
-                    )
-                    traversal.current_index = next_index
-                    active_index = next_card_index
-                    next_card_index += 1
-                    continue
+            active_global = (
+                traversal.current_index
+                if traversal.current_index is not None
+                else traversal.skipped_index
+            )
+            card_offset: int | None = None
+            if at_starred_top:
+                card_offset = target_index
+            elif at_starred_bottom and total is not None:
+                visible_start = max(0, total - len(top_down_cards))
+                card_offset = target_index - visible_start
+            elif active_position is not None and active_global is not None:
+                card_offset = active_position + (target_index - active_global)
+
+            if card_offset is not None and 0 <= card_offset < len(top_down_cards):
+                name, bounds = top_down_cards[card_offset]
                 self._log(
                     f"Switching to starred account "
-                    f"{next_index + 1}"
+                    f"{target_index + 1}"
                     f"/{total if total is not None else '?'}: {name}"
                 )
                 self.game.click(bounds, screenshot)
                 self._confirm_account_login()
                 self._wait_for_game(name)
-                traversal.current_index = next_index
+                traversal.current_index = target_index
                 return name
 
-            # The active card is the last visible starred card in the current
-            # viewport along `direction`. Check if we have reached the list end
-            # before scrolling.
-            if direction == 1 and at_starred_bottom:
+            if card_offset is not None:
+                need_scroll_toward_end = card_offset >= len(top_down_cards)
+            elif at_starred_top:
+                need_scroll_toward_end = True
+            elif at_starred_bottom:
+                need_scroll_toward_end = False
+            else:
+                need_scroll_toward_end = (
+                    search_toward_end
+                    if active_position is None and not reversed_search
+                    else traversal.direction == 1
+                )
+
+            if need_scroll_toward_end and at_starred_bottom:
                 self._log(
-                    f"Reached the end of {total or traversal.current_index + 1} "
-                    f"starred accounts after account {traversal.current_index + 1}"
+                    f"Reached the end of {total or (traversal.current_index or 0) + 1} "
+                    "starred accounts"
                 )
                 return None
-            if direction == -1 and at_starred_top:
-                self._log(
-                    "Reached the start of the starred accounts list at "
-                    f"account {traversal.current_index + 1}"
-                )
+            if not need_scroll_toward_end and at_starred_top and target_index < 0:
+                self._log("Reached the start of the starred accounts list")
                 return None
 
             if self._scroll_account_list(
                 screenshot,
                 frame,
-                toward_list_end=direction == 1,
+                toward_list_end=need_scroll_toward_end,
             ):
-                search_toward_end = direction == 1
-                reversed_search = False
+                search_toward_end = need_scroll_toward_end
                 continue
 
-            next_index = traversal.current_index + direction
-            count_boundary = total is not None and not 0 <= next_index < total
+            if not need_scroll_toward_end and not reversed_search:
+                reversed_search = True
+                search_toward_end = True
+                continue
+            if need_scroll_toward_end and not reversed_search and active_position is None:
+                reversed_search = True
+                search_toward_end = False
+                continue
+
             if total is not None:
-                if count_boundary or (direction == 1 and at_starred_bottom) or (
-                    direction == -1 and at_starred_top
-                ):
-                    self._log(
-                        f"Reached the end of the visible starred list at "
-                        f"account {traversal.current_index + 1}"
-                    )
-                    return None
                 raise RuntimeError(
-                    f"Could not reveal starred account {next_index + 1} of "
+                    f"Could not reveal starred account {target_index + 1} of "
                     f"{total} by scrolling; stopping rather than skipping it"
                 )
             self._log(
                 "No next starred card appeared after scrolling; "
-                f"finished at account {traversal.current_index + 1}"
+                f"finished at account {(traversal.current_index or 0) + 1}"
             )
             return None
 
         raise RuntimeError(
             "Stopped safely after too many character-list scrolls; "
-            "could not locate the adjacent account"
+            "could not locate the target account"
         )
 
     def _open_character_list(self) -> None:
@@ -622,25 +605,6 @@ class AccountSwitcher:
             upscale=3.0,
         )
 
-        # Record kingdom (#1234 ...) and power (Sức mạnh: ...) lines so that
-        # a starred card's name line is still recognized even if OCR slightly
-        # garbles its resource keyword in a particular frame.
-        card_subline_anchors: list[tuple[int, int]] = []
-        for text, bounds, confidence in detections:
-            if confidence < 0.30:
-                continue
-            folded = _fold(text)
-            stripped = text.strip()
-            if (
-                stripped.startswith("#")
-                or "vuong quoc" in folded
-                or "vung quoc" in folded
-                or "quc " in folded
-                or "suc manh" in folded
-                or "sc mnh" in folded
-            ):
-                card_subline_anchors.append((bounds[0], bounds[1]))
-
         cards = []
         for text, bounds, confidence in detections:
             stripped = text.strip()
@@ -657,7 +621,11 @@ class AccountSwitcher:
             if not (in_left_col or in_right_col):
                 continue
 
-            if stripped.startswith("#") or re.fullmatch(r"[\W_\d]+", stripped):
+            if (
+                stripped.startswith("#")
+                or re.fullmatch(r"[\W_\d]+", stripped)
+                or re.search(r"\d+\.\d{3}", stripped)
+            ):
                 continue
             if any(
                 phrase in folded
@@ -690,15 +658,6 @@ class AccountSwitcher:
                     "bieu tuong cam xuc",
                 )
             ):
-                continue
-
-            has_resource_keyword = resource_for_account(stripped) is not None
-            above_card_subline = any(
-                abs(anchor_x - x) <= width * 0.08
-                and height * 0.02 <= (anchor_y - y) <= height * 0.12
-                for anchor_x, anchor_y in card_subline_anchors
-            )
-            if not (has_resource_keyword or above_card_subline):
                 continue
 
             # Click the OCR text itself, which lies inside the corresponding
@@ -890,7 +849,7 @@ class AccountSwitcher:
             (round(width * 0.51), round(height * end_y)),
             screenshot,
         )
-        self.game.wait(0.55)
+        self.game.wait(0.30)
         _new_screenshot, after_frame = self._capture()
         after_crop = self._list_viewport_gray(after_frame)
         if before_crop.shape == after_crop.shape and before_crop.size > 0:
@@ -941,11 +900,12 @@ class AccountSwitcher:
                         "waiting for it to close before farming"
                     )
                     reported_character_list = True
-                self.game.wait(max(0.7, self.game.timing.poll_interval))
+                self.game.wait(max(0.20, self.game.timing.poll_interval))
                 continue
 
             detection = self.detector.detect(
                 screenshot,
+                read_account=False,
                 candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
             )
             if detection.state is ScreenState.CITY and not opened_world_map:
@@ -958,32 +918,15 @@ class AccountSwitcher:
                     self.game.click(hit.bounds, screenshot)
                     opened_world_map = True
                 else:
-                    self.game.wait(max(0.7, self.game.timing.poll_interval))
+                    self.game.wait(max(0.20, self.game.timing.poll_interval))
                 continue
             if detection.state is ScreenState.WORLD_MAP:
-                if detection.account_name:
-                    if (
-                        _casefolded_account_key(detection.account_name)
-                        == _casefolded_account_key(expected_name)
-                    ):
-                        self._log("RoK account loaded")
-                    else:
-                        self._log(
-                            "RoK world map loaded after character selection; "
-                            f"account-label OCR read {detection.account_name!r} "
-                            f"instead of {expected_name!r}, so continuing "
-                            "without requiring a Vietnamese OCR name match"
-                        )
-                else:
-                    self._log(
-                        "RoK world map loaded after character selection; "
-                        "account-label OCR was unavailable, so continuing"
-                    )
+                self._log(f"RoK world map loaded for {expected_name}")
                 return
             if time.monotonic() >= next_progress_log:
                 self._log(f"Still waiting for {expected_name} to load")
                 next_progress_log = time.monotonic() + 15.0
-            self.game.wait(max(0.7, self.game.timing.poll_interval))
+            self.game.wait(max(0.20, self.game.timing.poll_interval))
         raise RuntimeError(
             f"Timed out waiting for {expected_name!r} to load; "
             "stopping rather than farming an unverified account"

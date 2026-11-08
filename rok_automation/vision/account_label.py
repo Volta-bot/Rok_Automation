@@ -169,13 +169,10 @@ def read_account_label(
         return None, None
 
     candidates: list[tuple[float, str, Resource]] = []
+    fallback_candidates: list[tuple[float, str]] = []
     boxes = result.boxes if result.boxes is not None else ()
     scores = result.scores if result.scores is not None else ()
     for text, confidence, box in zip(result.txts, scores, boxes):
-        resource = resource_for_account(text)
-        if resource is None:
-            continue
-
         account_name = account_name_without_guild(text)
         if not account_name:
             continue
@@ -188,9 +185,24 @@ def read_account_label(
         # location weight breaks ties when another city label is also visible.
         distance = abs(normalized_x - 0.5) + abs(normalized_y - 0.42)
         rank = float(confidence) - 0.20 * distance
-        candidates.append((rank, account_name, resource))
 
-    if not candidates:
-        return None, None
-    _rank, account_name, resource = max(candidates, key=lambda item: item[0])
-    return account_name, resource
+        resource = resource_for_account(text)
+        if resource is not None:
+            candidates.append((rank, account_name, resource))
+        elif (
+            len(account_name) >= 3
+            and re.search(r"[A-Za-zÀ-ỹ]", account_name)
+            and 0.30 <= normalized_x <= 0.72
+            and 0.30 <= normalized_y <= 0.65
+        ):
+            has_guild_tag = "[" in text or "]" in text
+            fallback_rank = rank + (0.25 if has_guild_tag else 0.0) - 0.40 * distance
+            fallback_candidates.append((fallback_rank, account_name))
+
+    if candidates:
+        _rank, account_name, resource = max(candidates, key=lambda item: item[0])
+        return account_name, resource
+    if fallback_candidates:
+        _rank, account_name = max(fallback_candidates, key=lambda item: item[0])
+        return account_name, None
+    return None, None
