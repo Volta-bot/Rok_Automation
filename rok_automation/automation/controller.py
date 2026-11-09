@@ -413,7 +413,10 @@ class FarmingController:
         self._click_template(
             _NAVIGATION_TEMPLATES / "world_search_button.png",
             expected_state=detection.state,
-            confidence_threshold=0.62,
+            # The template is cropped to the button face only (no map
+            # background or red notification dot), so real hits score ~0.9+
+            # on any terrain while other UI stays near 0.6.
+            confidence_threshold=0.75,
         )
         self._wait_for_states(
             {ScreenState.RESOURCE_SEARCH}
