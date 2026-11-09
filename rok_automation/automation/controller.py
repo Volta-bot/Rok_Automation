@@ -38,10 +38,13 @@ _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
 _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
 _SEARCH_SETTLE_SECONDS = 0.35
-_SEARCH_SUBMIT_DELAY = 0.06
-_SEARCH_MENU_READY_TIMEOUT = 2.0
-_CONTROL_READY_TIMEOUT = 2.0
-_LEVEL_REPEAT_PAUSE = 0.02
+_SEARCH_SUBMIT_DELAY = 0.12
+_SEARCH_MENU_READY_TIMEOUT = 2.5
+_CONTROL_READY_TIMEOUT = 2.5
+_LEVEL_REPEAT_PAUSE = 0.12
+_LEVEL_SETTLE_DELAY = 0.18
+_MAX_ACTION_ATTEMPTS = 5
+_ACTION_RETRY_DELAY = 0.20
 _UNCHANGED_SEARCH_FRAMES = 2
 _RESOURCE_BUTTONS = {
     Resource.GOLD: _SEARCH_TEMPLATES / "resource_gold.png",
@@ -138,6 +141,12 @@ class FarmingController:
         self._transition(FarmState.DETECT_ACCOUNT)
         screenshot = self.game.screenshot()
         detection = self.detector.detect(screenshot)
+        for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
+            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+                break
+            self.game.wait(_ACTION_RETRY_DELAY)
+            screenshot = self.game.screenshot()
+            detection = self.detector.detect(screenshot)
 
         if detection.state is ScreenState.CITY:
             self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
@@ -155,6 +164,19 @@ class FarmingController:
         elif detection.state is not ScreenState.WORLD_MAP:
             raise FarmingError(
                 f"Start farming from the city or world map; detected {detection.state.value}"
+            )
+
+        for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
+            if (
+                detection.state is ScreenState.WORLD_MAP
+                and detection.armies_out is not None
+            ):
+                break
+            self.game.wait(_ACTION_RETRY_DELAY)
+            screenshot = self.game.screenshot()
+            detection = self.detector.detect(
+                screenshot,
+                candidate_states={ScreenState.WORLD_MAP},
             )
 
         if detection.state is not ScreenState.WORLD_MAP:
@@ -360,18 +382,27 @@ class FarmingController:
         return self.context
 
     def _open_search_if_needed(self) -> None:
-        screenshot = self.game.screenshot()
-        detection = self.detector.detect(
-            screenshot,
-            read_account=False,
-            candidate_states={
+        detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "uninitialized")
+        for _attempt in range(_MAX_ACTION_ATTEMPTS):
+            screenshot = self.game.screenshot()
+            detection = self.detector.detect(
+                screenshot,
+                read_account=False,
+                candidate_states={
+                    ScreenState.WORLD_MAP,
+                    ScreenState.RESOURCE_SEARCH,
+                    ScreenState.RESOURCE_FOUND,
+                },
+            )
+            if detection.state is ScreenState.RESOURCE_SEARCH:
+                return
+            if detection.state in {
                 ScreenState.WORLD_MAP,
-                ScreenState.RESOURCE_SEARCH,
                 ScreenState.RESOURCE_FOUND,
-            },
-        )
-        if detection.state is ScreenState.RESOURCE_SEARCH:
-            return
+            }:
+                break
+            self.game.wait(_ACTION_RETRY_DELAY)
+
         if detection.state not in {ScreenState.WORLD_MAP, ScreenState.RESOURCE_FOUND}:
             raise FarmingError(
                 f"Expected world map, resource result, or search menu; "
@@ -392,7 +423,7 @@ class FarmingController:
         if desired_level not in RESOURCE_LEVELS:
             raise FarmingError(f"Unsupported resource level: {desired_level}")
 
-        for _attempt in range(3):
+        for _attempt in range(_MAX_ACTION_ATTEMPTS):
             _screenshot, detection = self._wait_for_search_menu_level()
             current_level = detection.resource_level
             if current_level is None:
@@ -409,7 +440,15 @@ class FarmingController:
                 confidence_threshold=0.60,
                 repeat=click_count,
             )
-            self.game.wait(_LEVEL_REPEAT_PAUSE)
+            self.game.wait(_LEVEL_SETTLE_DELAY)
+
+            # Check up to 5 times with a small delay so the slider/label update
+            # is detected before deciding another click is needed.
+            for _verify in range(_MAX_ACTION_ATTEMPTS):
+                _screenshot, verify_detection = self._wait_for_search_menu_level()
+                if verify_detection.resource_level == desired_level:
+                    return
+                self.game.wait(_ACTION_RETRY_DELAY)
 
         _screenshot, final_detection = self._wait_for_search_menu_level()
         if final_detection.resource_level != desired_level:
@@ -423,7 +462,9 @@ class FarmingController:
 
         deadline = time.monotonic() + _SEARCH_MENU_READY_TIMEOUT
         last_state = ScreenState.UNKNOWN
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot = self.game.screenshot()
             detection = self.detector.detect(
                 screenshot,
@@ -441,7 +482,7 @@ class FarmingController:
                 ScreenState.RESOURCE_SEARCH,
             }:
                 self._require_state(detection, ScreenState.RESOURCE_SEARCH)
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
 
         if last_state is ScreenState.RESOURCE_SEARCH:
             raise FarmingError("Could not read the level shown in the search menu")
@@ -510,7 +551,9 @@ class FarmingController:
         # screen. Revalidate both state and target before every attempt.
         deadline = time.monotonic() + _CONTROL_READY_TIMEOUT
         last_state = ScreenState.UNKNOWN
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot = self.game.screenshot()
             detection = self.detector.detect(
                 screenshot,
@@ -535,10 +578,13 @@ class FarmingController:
                         if click_index + 1 < repeat:
                             self.game.wait(_LEVEL_REPEAT_PAUSE)
                     return screenshot
-            elif detection.state is not ScreenState.UNKNOWN:
+            elif (
+                detection.state is not ScreenState.UNKNOWN
+                and attempts >= _MAX_ACTION_ATTEMPTS
+            ):
                 self._require_state(detection, expected_state)
 
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
 
         raise FarmingError(
             f"Could not confirm {expected_state.value} and locate "

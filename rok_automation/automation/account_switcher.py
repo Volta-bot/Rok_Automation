@@ -20,6 +20,8 @@ from rok_automation.vision.screen import ScreenDetector, ScreenState
 _OPEN_MENU_TIMEOUT = 15.0
 _ACCOUNT_LOAD_TIMEOUT = 180.0
 _MAX_SCROLLS = 32
+_MAX_ACTION_ATTEMPTS = 5
+_ACTION_RETRY_DELAY = 0.20
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CITY_MAP_BUTTON = _PROJECT_ROOT / "templates/navigation/city_map_button.png"
 _SETTINGS_BUTTON = _PROJECT_ROOT / "templates/profile/settings_button.png"
@@ -112,20 +114,11 @@ class AccountSwitcher:
         """Select the next starred card using 6-account top/bottom pages."""
 
         self._open_character_list()
-        screenshot, frame, top_down_cards = self._read_visible_page(traversal)
+        screenshot, frame, top_down_cards, active_position = (
+            self._read_page_and_active_position(traversal)
+        )
         total = traversal.total_accounts
         page_size = len(top_down_cards)
-
-        active_bounds = self._selected_account_bounds(
-            screenshot,
-            frame,
-            top_down_cards,
-        )
-        active_position = (
-            self._card_index(top_down_cards, active_bounds)
-            if active_bounds is not None
-            else None
-        )
         at_top = self._starred_accounts_header_bounds(frame) is not None
         at_bottom = self._regular_accounts_header_bounds(frame) is not None
 
@@ -178,18 +171,17 @@ class AccountSwitcher:
                             until_check_gone=False,
                         )
                     )
-                    total = traversal.total_accounts
-                    page_size = len(top_down_cards)
-                    active_bounds = self._selected_account_bounds(
+                    (
                         screenshot,
                         frame,
                         top_down_cards,
+                        active_position,
+                    ) = self._read_page_and_active_position(
+                        traversal,
+                        initial=(screenshot, frame, top_down_cards),
                     )
-                    active_position = (
-                        self._card_index(top_down_cards, active_bounds)
-                        if active_bounds is not None
-                        else None
-                    )
+                    total = traversal.total_accounts
+                    page_size = len(top_down_cards)
                     if active_position is None:
                         raise RuntimeError(
                             "Could not locate the green check on any starred account"
@@ -299,6 +291,47 @@ class AccountSwitcher:
         traversal.current_index = target_index
         return name
 
+    def _read_page_and_active_position(
+        self,
+        traversal: AccountTraversal,
+        *,
+        initial: (
+            tuple[Path, Any, list[tuple[str, tuple[int, int, int, int]]]]
+            | None
+        ) = None,
+    ) -> tuple[
+        Path,
+        Any,
+        list[tuple[str, tuple[int, int, int, int]]],
+        int | None,
+    ]:
+        """Check up to 5 times with a small delay to locate the green tick."""
+
+        screenshot, frame, top_down_cards = (
+            initial
+            if initial is not None
+            else self._read_visible_page(traversal)
+        )
+        for attempt in range(_MAX_ACTION_ATTEMPTS):
+            active_bounds = self._selected_account_bounds(
+                screenshot,
+                frame,
+                top_down_cards,
+            )
+            active_position = (
+                self._card_index(top_down_cards, active_bounds)
+                if active_bounds is not None
+                else None
+            )
+            if active_position is not None:
+                return screenshot, frame, top_down_cards, active_position
+            if attempt + 1 < _MAX_ACTION_ATTEMPTS:
+                self.game.wait(_ACTION_RETRY_DELAY)
+                screenshot, frame, top_down_cards = self._read_visible_page(
+                    traversal
+                )
+        return screenshot, frame, top_down_cards, None
+
     def _read_visible_page(
         self,
         traversal: AccountTraversal,
@@ -309,10 +342,10 @@ class AccountSwitcher:
         if starred_account_total is not None:
             traversal.total_accounts = starred_account_total
 
-        for _retry in range(3):
+        for _retry in range(_MAX_ACTION_ATTEMPTS - 1):
             if cards:
                 break
-            self.game.wait(0.20)
+            self.game.wait(_ACTION_RETRY_DELAY)
             screenshot, frame = self._capture()
             cards = self._read_account_cards(frame)
             starred_account_total = self._read_starred_account_total(frame)
@@ -389,6 +422,17 @@ class AccountSwitcher:
             read_account=False,
             candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
         )
+        for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
+            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+                break
+            self.game.wait(_ACTION_RETRY_DELAY)
+            screenshot, frame = self._capture()
+            height, width = frame.shape[:2]
+            detection = self.detector.detect(
+                screenshot,
+                read_account=False,
+                candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+            )
         if detection.state not in {ScreenState.CITY, ScreenState.WORLD_MAP}:
             raise RuntimeError(
                 "Account switching must start from the city or world map; "
@@ -411,21 +455,25 @@ class AccountSwitcher:
         """Wait until the starred/regular character list headers and cards load."""
 
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             _screenshot, frame = self._capture()
             if (
                 self._starred_accounts_header_bounds(frame) is not None
                 or self._regular_accounts_header_bounds(frame) is not None
             ) and self._read_account_cards(frame):
                 return
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
         raise RuntimeError("Timed out waiting for the character list screen")
 
     def _click_profile_settings(self) -> None:
         """Wait for the 'Cài đặt' settings button on the profile screen and click it."""
 
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot, frame = self._capture()
             hit = self.detector.locate_template(
                 screenshot,
@@ -456,7 +504,7 @@ class AccountSwitcher:
                     self.game.click(bounds, screenshot)
                     return
 
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
 
         raise RuntimeError(
             "Timed out waiting for 'Cài đặt' on the governor profile screen"
@@ -464,7 +512,9 @@ class AccountSwitcher:
 
     def _click_text(self, keyword: str) -> None:
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot, frame = self._capture()
             detections = read_text_detections(
                 frame,
@@ -475,7 +525,7 @@ class AccountSwitcher:
                 if keyword in _fold(text):
                     self.game.click(bounds, screenshot)
                     return
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
         raise RuntimeError(f"Could not locate the {keyword!r} menu label")
 
     def _click_menu_template(
@@ -486,7 +536,9 @@ class AccountSwitcher:
         timeout: float = _OPEN_MENU_TIMEOUT,
     ) -> None:
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot, _frame = self._capture()
             hit = self.detector.locate_template(
                 screenshot,
@@ -499,12 +551,14 @@ class AccountSwitcher:
                 )
                 self.game.click(hit.bounds, screenshot)
                 return
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
         raise RuntimeError(f"Could not locate the {label!r} menu button")
 
     def _wait_for_template(self, template: Path, label: str) -> None:
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot = self.game.screenshot()
             if self.detector.locate_template(
                 screenshot,
@@ -512,7 +566,7 @@ class AccountSwitcher:
                 confidence_threshold=0.58,
             ) is not None:
                 return
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
         raise RuntimeError(f"Timed out waiting for the {label} screen")
 
     def _confirm_account_login(self) -> None:
@@ -530,7 +584,9 @@ class AccountSwitcher:
             raise RuntimeError("Missing login confirmation templates")
 
         deadline = time.monotonic() + 12.0
-        while time.monotonic() < deadline:
+        attempts = 0
+        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+            attempts += 1
             screenshot, frame = self._capture()
             frame_height, frame_width = frame.shape[:2]
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -578,7 +634,7 @@ class AccountSwitcher:
                 )
                 self.game.click(button_bounds, screenshot)
                 return
-            self.game.wait(self.game.timing.poll_interval)
+            self.game.wait(_ACTION_RETRY_DELAY)
 
         raise RuntimeError(
             "Timed out waiting for the account-login confirmation dialog; "
