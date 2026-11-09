@@ -186,16 +186,31 @@ class AccountSwitcher:
 
             if traversal.direction is None:
                 if active_position is None:
-                    if self._scroll_account_list(
-                        screenshot,
-                        frame,
-                        toward_list_end=search_toward_end,
-                    ):
-                        search_offset += 2 if search_toward_end else -2
-                        search_offset = max(0, search_offset)
-                        continue
-                    if search_toward_end and not reversed_search:
-                        search_toward_end = False
+                    at_boundary = (
+                        (search_toward_end and at_starred_bottom)
+                        or (not search_toward_end and at_starred_top)
+                    )
+                    if not at_boundary:
+                        delta_slots = self._scroll_account_list(
+                            screenshot,
+                            frame,
+                            toward_list_end=search_toward_end,
+                        )
+                        if delta_slots:
+                            step = (
+                                (2 if search_toward_end else -2)
+                                if isinstance(delta_slots, bool)
+                                else int(delta_slots)
+                            )
+                            search_offset = max(0, search_offset + step)
+                            if total is not None:
+                                search_offset = min(
+                                    max(0, total - len(top_down_cards)),
+                                    search_offset,
+                                )
+                            continue
+                    if not reversed_search:
+                        search_toward_end = not search_toward_end
                         reversed_search = True
                         continue
                     raise RuntimeError(
@@ -203,28 +218,13 @@ class AccountSwitcher:
                         "stopping without choosing by name"
                     )
 
-                if anchored_index is None and (
-                    (total is not None and total <= len(top_down_cards) * 2)
-                    or active_position >= 2
-                ):
-                    if self._scroll_account_list(
-                        screenshot,
-                        frame,
-                        toward_list_end=True,
-                    ):
-                        search_offset += 2
-                        continue
-                    if total is not None:
-                        anchored_index = max(
-                            active_position,
-                            total - len(top_down_cards) + active_position,
-                        )
-
                 start_index = (
                     anchored_index
                     if anchored_index is not None
                     else search_offset + active_position
                 )
+                if total is not None:
+                    start_index = min(total - 1, start_index)
                 if start_index == 0 or (at_starred_top and active_position == 0):
                     traversal.direction = 1
                     traversal.current_index = 0
@@ -428,6 +428,7 @@ class AccountSwitcher:
         self._click_profile_settings()
         self._click_menu_template(_CHARACTER_MENU_BUTTON, "characters")
         self._wait_for_template(_CHARACTER_LIST_TITLE, "character list")
+        self.game.wait(0.25)
 
     def _click_profile_settings(self) -> None:
         """Use the supplied settings artwork when its small caption OCR fails."""
@@ -757,6 +758,37 @@ class AccountSwitcher:
 
         if not cards:
             return None
+        height, width = frame.shape[:2]
+
+        # Primary detector: inspect each detected card's bottom-left portrait
+        # region for the bright green checkmark badge. This avoids full-screen
+        # grayscale template false positives and works across all resolutions
+        # and custom avatar frames.
+        if frame.ndim == 3:
+            best_ratio = 0.0
+            best_bounds: tuple[int, int, int, int] | None = None
+            for _name, bounds in cards:
+                x, y, _box_width, _box_height = bounds
+                rx1 = max(0, x - round(width * 0.145))
+                rx2 = max(0, x - round(width * 0.055))
+                ry1 = max(0, y + round(height * 0.025))
+                ry2 = min(height, y + round(height * 0.125))
+                roi = frame[ry1:ry2, rx1:rx2]
+                if roi.size == 0:
+                    continue
+                hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                green_mask = cv2.inRange(
+                    hsv,
+                    np.array((35, 90, 90), dtype=np.uint8),
+                    np.array((88, 255, 255), dtype=np.uint8),
+                )
+                ratio = float(np.mean(green_mask > 0))
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_bounds = bounds
+            if best_ratio >= 0.045 and best_bounds is not None:
+                return best_bounds
+
         gray = (
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             if frame.ndim == 3
@@ -772,10 +804,10 @@ class AccountSwitcher:
         score, (check_x, check_y, scale) = ScreenDetector._best_scale_match(
             gray,
             template,
-            minimum_scale=0.75,
+            minimum_scale=0.55,
             maximum_scale=1.25,
         )
-        if score < 0.72:
+        if score < 0.70:
             return None
 
         check_height, check_width = ScreenDetector._scaled_size(template, scale)
@@ -789,13 +821,12 @@ class AccountSwitcher:
             hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
             green_mask = cv2.inRange(
                 hsv,
-                np.array((35, 100, 100), dtype=np.uint8),
-                np.array((85, 255, 255), dtype=np.uint8),
+                np.array((35, 90, 90), dtype=np.uint8),
+                np.array((88, 255, 255), dtype=np.uint8),
             )
-            if float(np.mean(green_mask > 0)) < 0.18:
+            if float(np.mean(green_mask > 0)) < 0.15:
                 return None
 
-        height, width = frame.shape[:2]
         check_center_x = check_x + check_width / 2
         check_center_y = check_y + check_height / 2
         candidates = []
@@ -869,10 +900,13 @@ class AccountSwitcher:
         frame: Any,
         *,
         toward_list_end: bool,
-    ) -> bool:
+    ) -> int:
         height, width = frame.shape[:2]
-        before_sig = self._visible_account_signature(frame)
-        before_crop = self._list_viewport_gray(frame)
+        before_cards = self._order_account_cards(
+            self._read_account_cards(frame),
+            frame_height=height,
+            direction=1,
+        )
         # The cards are arranged in rows about 19% of the frame high. Move
         # roughly one row per gesture so the next viewport overlaps the current one.
         start_y, end_y = (
@@ -883,15 +917,61 @@ class AccountSwitcher:
             (round(width * 0.51), round(height * end_y)),
             screenshot,
         )
-        self.game.wait(0.30)
+        self.game.wait(0.35)
         _new_screenshot, after_frame = self._capture()
-        after_crop = self._list_viewport_gray(after_frame)
-        if before_crop.shape == after_crop.shape and before_crop.size > 0:
-            diff = cv2.absdiff(before_crop, after_crop)
-            if float(np.mean(diff > 18)) >= 0.035:
-                return True
-        after_sig = self._visible_account_signature(after_frame)
-        return after_sig != before_sig
+        after_cards = self._order_account_cards(
+            self._read_account_cards(after_frame),
+            frame_height=height,
+            direction=1,
+        )
+        if not before_cards or not after_cards:
+            return 0
+
+        pairs: list[tuple[int, int]] = []
+        for before_idx, (before_name, before_bounds) in enumerate(before_cards):
+            before_key = _casefolded_account_key(before_name)
+            before_y = before_bounds[1] + before_bounds[3] / 2
+            best_pair: tuple[float, int, int] | None = None
+            for after_idx, (after_name, after_bounds) in enumerate(after_cards):
+                if (before_idx % 2) != (after_idx % 2):
+                    continue
+                if _casefolded_account_key(after_name) != before_key:
+                    continue
+                after_y = after_bounds[1] + after_bounds[3] / 2
+                dy = round(before_y - after_y)
+                slot_shift = before_idx - after_idx
+                # Prefer matching the card instance whose vertical movement
+                # matches the slot shift (each row is ~0.188 * height).
+                expected_dy = (slot_shift / 2.0) * (height * 0.188)
+                err = abs(dy - expected_dy)
+                if best_pair is None or err < best_pair[0]:
+                    best_pair = (err, slot_shift, dy)
+            if best_pair is not None:
+                pairs.append((best_pair[1], best_pair[2]))
+
+        if pairs:
+            median_slot_shift = round(
+                float(np.median([slot for slot, _dy in pairs]))
+            )
+            median_dy = float(np.median([dy for _slot, dy in pairs]))
+            if median_slot_shift == 0 and abs(median_dy) < height * 0.06:
+                return 0
+            if median_slot_shift != 0 and (
+                (median_slot_shift > 0) == toward_list_end
+            ):
+                return median_slot_shift
+            if abs(median_dy) >= height * 0.06 and (
+                (median_dy > 0) == toward_list_end
+            ):
+                rows = max(1, round(abs(median_dy) / (height * 0.185)))
+                return 2 * rows if toward_list_end else -2 * rows
+            return 0
+
+        before_keys = [_casefolded_account_key(name) for name, _ in before_cards]
+        after_keys = [_casefolded_account_key(name) for name, _ in after_cards]
+        if before_keys != after_keys:
+            return len(before_cards) if toward_list_end else -len(before_cards)
+        return 0
 
     @staticmethod
     def _list_viewport_gray(frame: Any) -> Any:
@@ -989,10 +1069,10 @@ class AccountSwitcher:
         score, match = ScreenDetector._best_scale_match(
             gray[top:bottom, left:right],
             template,
-            minimum_scale=0.45,
-            maximum_scale=1.10,
+            minimum_scale=0.35,
+            maximum_scale=1.15,
         )
-        if score < 0.88:
+        if score < 0.76:
             return None
         scaled_height, scaled_width = ScreenDetector._scaled_size(
             template,
@@ -1028,10 +1108,10 @@ class AccountSwitcher:
         score, match = ScreenDetector._best_scale_match(
             gray[top:bottom, left:right],
             template,
-            minimum_scale=0.45,
-            maximum_scale=1.10,
+            minimum_scale=0.35,
+            maximum_scale=1.15,
         )
-        if score < 0.88:
+        if score < 0.76:
             return None
         scaled_height, scaled_width = ScreenDetector._scaled_size(
             template,
