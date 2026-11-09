@@ -424,21 +424,17 @@ class AccountSwitcher:
              round(width * 0.075), round(height * 0.12)),
             screenshot,
         )
-        self._wait_for_text("ho so thong doc")
         self._click_profile_settings()
         self._click_menu_template(_CHARACTER_MENU_BUTTON, "characters")
         self._wait_for_template(_CHARACTER_LIST_TITLE, "character list")
         self.game.wait(0.25)
 
     def _click_profile_settings(self) -> None:
-        """Use the supplied settings artwork when its small caption OCR fails."""
+        """Wait for the 'Cài đặt' settings button on the profile screen and click it."""
 
-        deadline = time.monotonic() + 5.0
-        last_screenshot: Path | None = None
-        last_frame: Any | None = None
+        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
-            last_screenshot, last_frame = screenshot, frame
             hit = self.detector.locate_template(
                 screenshot,
                 _SETTINGS_BUTTON,
@@ -450,22 +446,29 @@ class AccountSwitcher:
                 )
                 self.game.click(hit.bounds, screenshot)
                 return
+
+            height, width = frame.shape[:2]
+            detections = read_text_detections(
+                frame,
+                (
+                    round(width * 0.70),
+                    round(height * 0.70),
+                    round(width * 0.26),
+                    round(height * 0.25),
+                ),
+                upscale=2.0,
+            )
+            for text, bounds, _score in detections:
+                if "cai dat" in _fold(text):
+                    self._log("Clicking 'Cài đặt' label on profile screen")
+                    self.game.click(bounds, screenshot)
+                    return
+
             self.game.wait(self.game.timing.poll_interval)
 
-        if last_screenshot is not None and last_frame is not None:
-            height, width = last_frame.shape[:2]
-            # The profile screen was confirmed immediately beforehand; this
-            # fallback targets only the lower-right settings tile.
-            self._log("Clicking settings tile at its profile-menu position")
-            self.game.click(
-                (
-                    round(width * 0.79),
-                    round(height * 0.75),
-                    round(width * 0.15),
-                    round(height * 0.20),
-                ),
-                last_screenshot,
-            )
+        raise RuntimeError(
+            "Timed out waiting for 'Cài đặt' on the governor profile screen"
+        )
 
     def _click_text(self, keyword: str) -> None:
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
