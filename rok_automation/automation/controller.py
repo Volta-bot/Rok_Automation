@@ -441,6 +441,7 @@ class FarmingController:
                         screen,
                         _NAVIGATION_TEMPLATES / "world_search_button.png",
                         confidence_threshold=0.75,
+                        change_timeout=1.5,
                     )
                     continue
 
@@ -600,6 +601,7 @@ class FarmingController:
                             result,
                             _NAVIGATION_TEMPLATES / "world_search_button.png",
                             confidence_threshold=0.75,
+                            change_timeout=1.5,
                         )
                         continue
 
@@ -719,7 +721,7 @@ class FarmingController:
         )
         changed = self._wait_for_dispatch_change(
             screen.state,
-            screen.bounds,
+            hit.bounds,
             timeout=change_timeout,
             expected_states=next_expected,
         )
@@ -1129,14 +1131,11 @@ class FarmingController:
                 screenshot,
                 expected_states=expected_states,
             )
-            if (
-                detection.state is not ScreenState.UNKNOWN
-                and (
-                    detection.state is not clicked_state
-                    or not self._bounds_close(detection.bounds, clicked_bounds)
-                )
-            ):
-                return screenshot, detection, ambiguous
+            if detection.state is not ScreenState.UNKNOWN:
+                if expected_states and detection.state in expected_states:
+                    return screenshot, detection, ambiguous
+                if detection.state is not clicked_state:
+                    return screenshot, detection, ambiguous
             self.game.wait(self.game.timing.poll_interval)
         return None
 
