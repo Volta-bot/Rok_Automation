@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 import unicodedata
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -68,12 +69,13 @@ _DISPATCH_TEMPLATE_DIRS = {
     ScreenState.TROOP_COMPOSITION: _GATHERING_TEMPLATES,
     ScreenState.RESOURCE_SEARCH: _SEARCH_TEMPLATES,
 }
-# Diacritic-free, space-free OCR labels of each button.
+# Diacritic-free, space-free OCR labels of each button (including RapidOCR's
+# occasional dropped-vowel variants such as "Quân mi" -> "quanmi").
 _DISPATCH_BUTTON_TEXT = {
-    ScreenState.RESOURCE_FOUND: ("thuthap",),
-    ScreenState.NEW_TROOPS_PROMPT: ("quanmoi",),
-    ScreenState.TROOP_COMPOSITION: ("hanhquan",),
-    ScreenState.RESOURCE_SEARCH: ("timkiem",),
+    ScreenState.RESOURCE_FOUND: ("thuthap", "thuth"),
+    ScreenState.NEW_TROOPS_PROMPT: ("quanmoi", "quanmi", "quanm"),
+    ScreenState.TROOP_COMPOSITION: ("hanhquan", "hanhq"),
+    ScreenState.RESOURCE_SEARCH: ("timkiem", "timk"),
 }
 _DISPATCH_BUTTON_CONFIDENCE = 0.78
 # "Quân mới" scores ~0.86 on the "Thu thập" button (vs ~0.94 for the real
@@ -82,7 +84,14 @@ _DISPATCH_AMBIGUITY_MARGIN = 0.12
 _DISPATCH_TIMEOUT = 20.0
 _STEP_CHANGE_TIMEOUT = 2.5
 _FALLBACK_CONFIRM_SECONDS = 1.0
-_MAX_DISPATCH_RETRIES = 3
+# Recovery: how many failed steps / unreadable screens one army may hit
+# before the run stops safely.
+_MAX_RECOVERY_ATTEMPTS = 5
+_MAX_UNKNOWN_READS = 8
+_UNKNOWN_SCREEN_WAIT = 0.5
+_MAX_ARMY_STEPS = 80
+_SCREEN_READ_TIMEOUT = 3.0
+_CITY_TO_MAP_TIMEOUT = 6.0
 
 
 class FarmingController:
@@ -170,51 +179,83 @@ class FarmingController:
         expected_account_name: str | None = None,
     ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
-        screenshot = self.game.screenshot()
-        detection = self.detector.detect(screenshot)
+        screenshot, detection = self._read_screen()
         for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
-            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+            if detection.state is not ScreenState.UNKNOWN:
                 break
             self.game.wait(_ACTION_RETRY_DELAY)
-            screenshot = self.game.screenshot()
-            detection = self.detector.detect(screenshot)
+            screenshot, detection = self._read_screen()
 
         if detection.state is ScreenState.CITY:
-            self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
-            self._click_template(
-                _NAVIGATION_TEMPLATES / "city_map_button.png",
-                expected_state=ScreenState.CITY,
-            )
-            screenshot, _detection = self._wait_for_states(
-                {ScreenState.WORLD_MAP}
-            )
-            detection = self.detector.detect(
-                screenshot,
-                candidate_states={ScreenState.WORLD_MAP},
-            )
-        elif detection.state is not ScreenState.WORLD_MAP:
+            for _attempt in range(_MAX_ACTION_ATTEMPTS):
+                self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
+                self._press_and_wait(
+                    screenshot,
+                    detection,
+                    _NAVIGATION_TEMPLATES / "city_map_button.png",
+                    confidence_threshold=0.68,
+                    change_timeout=_CITY_TO_MAP_TIMEOUT,
+                )
+                screenshot, detection = self._read_screen()
+                if detection.state is not ScreenState.CITY:
+                    break
+                self.game.wait(_ACTION_RETRY_DELAY)
+
+        world_flow_states = {
+            ScreenState.WORLD_MAP,
+            ScreenState.RESOURCE_SEARCH,
+            ScreenState.RESOURCE_FOUND,
+            ScreenState.NEW_TROOPS_PROMPT,
+            ScreenState.TROOP_COMPOSITION,
+        }
+        if detection.state not in world_flow_states:
             raise FarmingError(
                 f"Start farming from the city or world map; detected {detection.state.value}"
             )
 
+        world_detection = self.detector.detect(
+            screenshot,
+            candidate_states={ScreenState.WORLD_MAP},
+        )
         for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
             if (
-                detection.state is ScreenState.WORLD_MAP
-                and detection.armies_out is not None
+                world_detection.state is ScreenState.WORLD_MAP
+                and world_detection.armies_out is not None
             ):
+                break
+            if detection.state is not ScreenState.WORLD_MAP:
                 break
             self.game.wait(_ACTION_RETRY_DELAY)
             screenshot = self.game.screenshot()
-            detection = self.detector.detect(
+            world_detection = self.detector.detect(
                 screenshot,
                 candidate_states={ScreenState.WORLD_MAP},
             )
 
-        if detection.state is not ScreenState.WORLD_MAP:
-            raise FarmingError("Could not reach the world map")
+        if world_detection.state is ScreenState.WORLD_MAP:
+            self.context.account_name = world_detection.account_name
+            self.context.preferred_resource = world_detection.preferred_resource
+            armies_out = world_detection.armies_out
+        else:
+            # Started mid-flow (e.g. search menu, gather prompt, or march screen
+            # already open): still read the account label/army count if visible,
+            # and default armies_out to 0 so _farm_one_army continues from the
+            # current screen state.
+            color_frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+            if color_frame is not None:
+                from rok_automation.vision.account_label import (
+                    read_account_label,
+                    read_army_count,
+                )
 
-        self.context.account_name = detection.account_name
-        self.context.preferred_resource = detection.preferred_resource
+                account_name, preferred_resource = read_account_label(color_frame)
+                self.context.account_name = account_name
+                self.context.preferred_resource = preferred_resource
+                armies_out = read_army_count(color_frame)
+                if armies_out is None:
+                    armies_out = 0
+            else:
+                armies_out = 0
         if expected_account_name:
             if not self.context.account_name:
                 self.context.account_name = (
@@ -236,12 +277,12 @@ class FarmingController:
                 f"randomly selected {self.context.preferred_resource.value} "
                 "(Gold weighted higher)"
             )
-        if detection.armies_out is None:
+        if armies_out is None:
             raise FarmingError(
                 "Could not read the world-map troop counter (x/5); "
                 "not dispatching without knowing the available army slots"
             )
-        self.context.starting_armies_out = detection.armies_out
+        self.context.starting_armies_out = armies_out
         dispatch_limit = min(
             self.max_armies,
             5 - self.context.starting_armies_out,
@@ -264,7 +305,7 @@ class FarmingController:
 
         # The search dialog retains its resource choice after it is closed.
         # Remember that choice for this run and only click a different type.
-        selected_resource: Resource | None = None
+        self._selected_resource = None
         # A failed level stays unavailable for later armies in this run.
         highest_candidate_level = {
             resource: RESOURCE_LEVELS[0] for resource in Resource
@@ -273,138 +314,11 @@ class FarmingController:
 
         for army_number in range(1, dispatch_limit + 1):
             total_army_number = self.context.starting_armies_out + army_number
-            self._open_search_if_needed()
-            dispatched = False
-            target_list: list[SearchTarget] = list(search_plan(
-                self.context.preferred_resource,
-                rng=self.rng,
-            ))
-            dispatch_failures = 0
-            target_index = 0
-
-            while target_index < len(target_list):
-                target = target_list[target_index]
-                target_index += 1
-                if target.level > highest_candidate_level[target.resource]:
-                    continue
-
-                self.context.current_target = target
-                self._transition(
-                    FarmState.SELECT_TARGET,
-                    f"Army {total_army_number}/5: selecting "
-                    f"{target.resource.value} Lv{target.level}",
-                )
-                if selected_resource is not target.resource:
-                    self._click_template(
-                        _RESOURCE_BUTTONS[target.resource],
-                        expected_state=ScreenState.RESOURCE_SEARCH,
-                        confidence_threshold=0.62,
-                    )
-                    selected_resource = target.resource
-                self._set_search_level(target.level)
-
-                self._transition(
-                    FarmState.SEARCH_RESOURCE,
-                    f"Searching {target.resource.value} Lv{target.level}",
-                )
-                # Let the search panel finish applying a newly selected level
-                # before submitting the search.
-                self.game.wait(_SEARCH_SUBMIT_DELAY)
-                before_search_path = self._click_template(
-                    _SEARCH_TEMPLATES / "submit_button.png",
-                    expected_state=ScreenState.RESOURCE_SEARCH,
-                )
-                before_search = cv2.imread(
-                    str(before_search_path), cv2.IMREAD_COLOR
-                )
-                if before_search is None:
-                    raise FarmingError("Could not read the pre-search screenshot")
-                _result_path, result = self._wait_for_search_result(before_search)
-                self._transition(FarmState.PROCESS_RESULT)
-
-                if result.state is ScreenState.NO_RESULT:
-                    highest_candidate_level[target.resource] = min(
-                        highest_candidate_level[target.resource],
-                        target.level - 1,
-                    )
-                    self._log(
-                        f"No {target.resource.value} Lv{target.level} found; "
-                        f"remembering Lv{highest_candidate_level[target.resource]} "
-                        "as the highest level to try next"
-                    )
-                    continue
-
-                coordinates = result.resource_coordinates
-                if coordinates is not None:
-                    self._log(
-                        f"Resource location: X:{coordinates[0]} Y:{coordinates[1]}"
-                    )
-                duplicate_coordinates = next(
-                    (
-                        prior
-                        for prior in seen_resource_coordinates
-                        if coordinates is not None
-                        and max(
-                            abs(coordinates[0] - prior[0]),
-                            abs(coordinates[1] - prior[1]),
-                        ) <= 2
-                    ),
-                    None,
-                )
-                if duplicate_coordinates is not None:
-                    # Search can return the same node after another army has
-                    # already been assigned there, even when its route is not
-                    # visible in this particular frame.
-                    highest_candidate_level[target.resource] = min(
-                        highest_candidate_level[target.resource],
-                        target.level - 1,
-                    )
-                    self._log(
-                        f"Already handled nearby resource at "
-                        f"X:{coordinates[0]} Y:{coordinates[1]} "
-                        f"(previously X:{duplicate_coordinates[0]} "
-                        f"Y:{duplicate_coordinates[1]}); skipping it and remembering "
-                        f"{target.resource.value} up to Lv"
-                        f"{highest_candidate_level[target.resource]}"
-                    )
-                    self._open_search_if_needed()
-                    continue
-
-                if result.green_route_detected:
-                    if coordinates is not None:
-                        seen_resource_coordinates.add(coordinates)
-                    highest_candidate_level[target.resource] = min(
-                        highest_candidate_level[target.resource],
-                        target.level - 1,
-                    )
-                    self._log(
-                        f"Green incoming march route at this location; skipping "
-                        f"{target.resource.value} Lv{target.level} "
-                        f"(confidence={result.green_route_confidence or 0.0:.3f}); "
-                        f"remembering a maximum level of "
-                        f"{highest_candidate_level[target.resource]}"
-                    )
-                    self._open_search_if_needed()
-                    continue
-
-                if not self._dispatch_army(target, total_army_number):
-                    # A click missed and the game fell back to the world map
-                    # (or search menu) before marching: search again for the
-                    # same target instead of stopping.
-                    dispatch_failures += 1
-                    if dispatch_failures > _MAX_DISPATCH_RETRIES:
-                        raise FarmingError(
-                            f"Gather flow failed {dispatch_failures} times for "
-                            f"army {total_army_number}/5; stopping safely"
-                        )
-                    self._open_search_if_needed()
-                    target_index -= 1
-                    continue
-                if coordinates is not None:
-                    seen_resource_coordinates.add(coordinates)
-                dispatched = True
-                break
-
+            dispatched = self._farm_one_army(
+                total_army_number,
+                highest_candidate_level,
+                seen_resource_coordinates,
+            )
             if not dispatched:
                 self.context.last_error = (
                     "No available resource location found in the search plan"
@@ -423,45 +337,320 @@ class FarmingController:
         )
         return self.context
 
-    def _open_search_if_needed(self) -> None:
-        detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "uninitialized")
-        for _attempt in range(_MAX_ACTION_ATTEMPTS):
-            screenshot = self.game.screenshot()
-            detection = self.detector.detect(
-                screenshot,
-                read_account=False,
-                candidate_states={
-                    ScreenState.WORLD_MAP,
-                    ScreenState.RESOURCE_SEARCH,
-                    ScreenState.RESOURCE_FOUND,
-                },
-            )
-            if detection.state is ScreenState.RESOURCE_SEARCH:
-                return
-            if detection.state in {
-                ScreenState.WORLD_MAP,
-                ScreenState.RESOURCE_FOUND,
-            }:
-                break
-            self.game.wait(_ACTION_RETRY_DELAY)
+    def _farm_one_army(
+        self,
+        army_number: int,
+        highest_candidate_level: dict[Resource, int],
+        seen_resource_coordinates: set[tuple[int, int]],
+    ) -> bool:
+        """Send one army by following the farming flow from whatever screen is up.
 
-        if detection.state not in {ScreenState.WORLD_MAP, ScreenState.RESOURCE_FOUND}:
-            raise FarmingError(
-                f"Expected world map, resource result, or search menu; "
-                f"found {detection.state.value}"
-            )
+        Flow: city → (map button) → world map → (search button) → search menu
+        → (resource, level, Tìm kiếm) → resource found → (Thu thập) →
+        Quân mới → Hành quân → world map.
 
-        self._transition(FarmState.OPEN_SEARCH, "Opening resource search")
-        self._click_template(
-            _NAVIGATION_TEMPLATES / "world_search_button.png",
-            expected_state=detection.state,
-            # The template is cropped to the button face only (no map
-            # background or red notification dot), so real hits score ~0.9+
-            # on any terrain while other UI stays near 0.6.
-            confidence_threshold=0.75,
+        Every iteration first identifies the current screen and then performs
+        only the step that belongs to that screen. If a step fails (missed
+        click, timeout, unexpected screen), the next iteration re-identifies
+        the screen and continues from there instead of stopping.
+
+        Returns ``True`` when the army was dispatched and ``False`` when no
+        target in the search plan had an available node.
+        """
+
+        target_list: list[SearchTarget] = list(search_plan(
+            self.context.preferred_resource,
+            rng=self.rng,
+        ))
+        target_index = 0
+        pending_result: ScreenDetection | None = None
+        recoveries = 0
+        unknown_reads = 0
+        last_error = "none"
+
+        def current_target() -> SearchTarget:
+            return target_list[min(target_index, len(target_list) - 1)]
+
+        def skip_unavailable_targets() -> None:
+            nonlocal target_index
+            while (
+                target_index < len(target_list)
+                and target_list[target_index].level
+                > highest_candidate_level[target_list[target_index].resource]
+            ):
+                target_index += 1
+
+        for _step in range(_MAX_ARMY_STEPS):
+            if recoveries > _MAX_RECOVERY_ATTEMPTS:
+                raise FarmingError(
+                    f"Could not recover the farming flow for army {army_number}/5 "
+                    f"after {_MAX_RECOVERY_ATTEMPTS} attempts; last error: {last_error}"
+                )
+            try:
+                if pending_result is not None:
+                    # A search just opened a result; handle it directly.
+                    screenshot, screen = None, pending_result
+                else:
+                    screenshot, screen = self._read_screen()
+                state = screen.state
+
+                if state is ScreenState.UNKNOWN:
+                    unknown_reads += 1
+                    if unknown_reads > _MAX_UNKNOWN_READS:
+                        raise FarmingError(
+                            "Could not recognise the current screen "
+                            f"({screen.evidence}); stopping safely"
+                        )
+                    self._log("Waiting for a recognisable screen…")
+                    self.game.wait(_UNKNOWN_SCREEN_WAIT)
+                    continue
+                unknown_reads = 0
+
+                if state is ScreenState.CITY:
+                    self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
+                    self._press_and_wait(
+                        screenshot,
+                        screen,
+                        _NAVIGATION_TEMPLATES / "city_map_button.png",
+                        confidence_threshold=0.68,
+                        change_timeout=_CITY_TO_MAP_TIMEOUT,
+                    )
+                    continue
+
+                if state is ScreenState.WORLD_MAP:
+                    self._transition(FarmState.OPEN_SEARCH, "Opening resource search")
+                    self._press_and_wait(
+                        screenshot,
+                        screen,
+                        _NAVIGATION_TEMPLATES / "world_search_button.png",
+                        confidence_threshold=0.75,
+                    )
+                    continue
+
+                if state is ScreenState.RESOURCE_SEARCH:
+                    skip_unavailable_targets()
+                    if target_index >= len(target_list):
+                        return False
+                    target = target_list[target_index]
+                    self.context.current_target = target
+                    self._transition(
+                        FarmState.SELECT_TARGET,
+                        f"Army {army_number}/5: selecting "
+                        f"{target.resource.value} Lv{target.level}",
+                    )
+                    if self._selected_resource is not target.resource:
+                        self._click_template(
+                            _RESOURCE_BUTTONS[target.resource],
+                            expected_state=ScreenState.RESOURCE_SEARCH,
+                            confidence_threshold=0.62,
+                        )
+                        self._selected_resource = target.resource
+                    self._set_search_level(target.level)
+
+                    self._transition(
+                        FarmState.SEARCH_RESOURCE,
+                        f"Searching {target.resource.value} Lv{target.level}",
+                    )
+                    # Let the search panel finish applying a newly selected
+                    # level before submitting the search.
+                    self.game.wait(_SEARCH_SUBMIT_DELAY)
+                    before_search_path = self._click_template(
+                        _SEARCH_TEMPLATES / "submit_button.png",
+                        expected_state=ScreenState.RESOURCE_SEARCH,
+                    )
+                    before_search = cv2.imread(
+                        str(before_search_path), cv2.IMREAD_COLOR
+                    )
+                    if before_search is None:
+                        raise FarmingError("Could not read the pre-search screenshot")
+                    _result_path, result = self._wait_for_search_result(before_search)
+                    self._transition(FarmState.PROCESS_RESULT)
+
+                    if result.state is ScreenState.NO_RESULT:
+                        highest_candidate_level[target.resource] = min(
+                            highest_candidate_level[target.resource],
+                            target.level - 1,
+                        )
+                        self._log(
+                            f"No {target.resource.value} Lv{target.level} found; "
+                            f"remembering Lv{highest_candidate_level[target.resource]} "
+                            "as the highest level to try next"
+                        )
+                        target_index += 1
+                        continue
+                    pending_result = result
+                    continue
+
+                if state is ScreenState.RESOURCE_FOUND:
+                    target = current_target()
+                    if pending_result is not None:
+                        result = pending_result
+                        pending_result = None
+                    else:
+                        # Reached the result panel through recovery: re-read
+                        # its coordinates and route before deciding.
+                        self._log("Resource panel is open; continuing from Thu thập")
+                        result = self.detector.detect(
+                            screenshot,
+                            read_account=False,
+                            candidate_states={ScreenState.RESOURCE_FOUND},
+                        )
+                    coordinates = result.resource_coordinates
+                    if coordinates is not None:
+                        self._log(
+                            f"Resource location: X:{coordinates[0]} Y:{coordinates[1]}"
+                        )
+                    duplicate_coordinates = next(
+                        (
+                            prior
+                            for prior in seen_resource_coordinates
+                            if coordinates is not None
+                            and max(
+                                abs(coordinates[0] - prior[0]),
+                                abs(coordinates[1] - prior[1]),
+                            ) <= 2
+                        ),
+                        None,
+                    )
+                    skip_reason: str | None = None
+                    if duplicate_coordinates is not None:
+                        # Search can return the same node after another army
+                        # has already been assigned there, even when its
+                        # route is not visible in this particular frame.
+                        skip_reason = (
+                            f"Already handled nearby resource at "
+                            f"X:{coordinates[0]} Y:{coordinates[1]} "
+                            f"(previously X:{duplicate_coordinates[0]} "
+                            f"Y:{duplicate_coordinates[1]})"
+                        )
+                    elif result.green_route_detected:
+                        if coordinates is not None:
+                            seen_resource_coordinates.add(coordinates)
+                        skip_reason = (
+                            "Green incoming march route at this location "
+                            f"(confidence={result.green_route_confidence or 0.0:.3f})"
+                        )
+                    if skip_reason is not None:
+                        highest_candidate_level[target.resource] = min(
+                            highest_candidate_level[target.resource],
+                            target.level - 1,
+                        )
+                        self._log(
+                            f"{skip_reason}; skipping {target.resource.value} "
+                            f"Lv{target.level} and remembering a maximum level of "
+                            f"{highest_candidate_level[target.resource]}"
+                        )
+                        target_index += 1
+                        self._transition(FarmState.OPEN_SEARCH, "Opening resource search")
+                        fresh_path = self.game.screenshot()
+                        self._press_and_wait(
+                            fresh_path,
+                            result,
+                            _NAVIGATION_TEMPLATES / "world_search_button.png",
+                            confidence_threshold=0.75,
+                        )
+                        continue
+
+                    if self._dispatch_army(target, army_number):
+                        if coordinates is not None:
+                            seen_resource_coordinates.add(coordinates)
+                        return True
+                    recoveries += 1
+                    last_error = "gather flow fell back before Hành quân"
+                    continue
+
+                if state in {
+                    ScreenState.NEW_TROOPS_PROMPT,
+                    ScreenState.TROOP_COMPOSITION,
+                }:
+                    self._log(
+                        f"On the {state.value} screen; continuing the gather flow"
+                    )
+                    if self._dispatch_army(current_target(), army_number):
+                        return True
+                    recoveries += 1
+                    last_error = "gather flow fell back before Hành quân"
+                    continue
+
+                raise FarmingError(f"No farming step for screen {state.value}")
+            except FarmingError as error:
+                pending_result = None
+                recoveries += 1
+                last_error = str(error)
+                # The resource choice may or may not have been applied.
+                self._selected_resource = None
+                self._log(
+                    f"Step failed ({error}); checking which screen is showing "
+                    f"and continuing from there ({recoveries}/{_MAX_RECOVERY_ATTEMPTS})"
+                )
+                self.game.wait(_ACTION_RETRY_DELAY)
+
+        raise FarmingError(
+            f"Army {army_number}/5 did not finish within {_MAX_ARMY_STEPS} steps; "
+            f"last error: {last_error}"
         )
-        self._wait_for_states(
-            {ScreenState.RESOURCE_SEARCH}
+
+    def _read_screen(self) -> tuple[Path, ScreenDetection]:
+        """Identify the current farming screen from two matching captures.
+
+        Overlay panels (search menu, resource panel, Quân mới, Hành quân)
+        take priority over the city/world-map HUD that stays visible behind
+        them. Look-alike blue buttons are confirmed with OCR.
+        """
+
+        deadline = time.monotonic() + _SCREEN_READ_TIMEOUT
+        previous: ScreenDetection | None = None
+        screenshot = self.game.screenshot()
+        detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
+        while True:
+            detection, ambiguous = self._classify_dispatch_screen(screenshot)
+            stable = (
+                previous is not None
+                and previous.state is detection.state
+                and self._bounds_close(previous.bounds, detection.bounds)
+            )
+            previous = detection
+            if stable and detection.state is not ScreenState.UNKNOWN:
+                if not ambiguous:
+                    return screenshot, detection
+                ocr_state = self._read_button_state(screenshot, detection.bounds)
+                if ocr_state is not None:
+                    return screenshot, replace(detection, state=ocr_state)
+                return screenshot, detection
+            if time.monotonic() >= deadline:
+                return screenshot, detection
+            self.game.wait(self.game.timing.poll_interval)
+            screenshot = self.game.screenshot()
+
+    def _press_and_wait(
+        self,
+        screenshot: Path | None,
+        screen: ScreenDetection,
+        template_path: Path,
+        *,
+        confidence_threshold: float,
+        change_timeout: float = _STEP_CHANGE_TIMEOUT,
+    ) -> None:
+        """Click a navigation button and wait until the screen moves on."""
+
+        if screenshot is None:
+            screenshot = self.game.screenshot()
+        hit = self.detector.locate_template(
+            screenshot,
+            template_path,
+            confidence_threshold=confidence_threshold,
+        )
+        if hit is None:
+            raise FarmingError(
+                f"Could not locate {template_path.name} on the "
+                f"{screen.state.value} screen"
+            )
+        self._log(f"Clicking {template_path.stem} (match={hit.confidence:.3f})")
+        self.game.click(hit.bounds, screenshot)
+        self._wait_for_dispatch_change(
+            screen.state,
+            screen.bounds,
+            timeout=change_timeout,
         )
 
     def _set_search_level(self, desired_level: int) -> None:
@@ -586,13 +775,14 @@ class FarmingController:
                 # Thu thập, Quân mới and Tìm kiếm are the same blue button, so
                 # confirm the label with OCR before trusting the template.
                 ocr_state = self._read_button_state(screenshot, detection.bounds)
-                if ocr_state is None:
-                    previous = None
-                    self.game.wait(_ACTION_RETRY_DELAY)
-                    continue
-                state = ocr_state
+                if ocr_state is not None:
+                    state = ocr_state
 
-            if state in {ScreenState.WORLD_MAP, ScreenState.RESOURCE_SEARCH}:
+            if state in {
+                ScreenState.CITY,
+                ScreenState.WORLD_MAP,
+                ScreenState.RESOURCE_SEARCH,
+            }:
                 if marched and state is ScreenState.WORLD_MAP:
                     self.context.armies_dispatched += 1
                     self._log(
@@ -613,7 +803,7 @@ class FarmingController:
                         )
                         self._log(
                             f"Gather flow failed: expected the {expected} screen "
-                            f"but landed on {state.value}; searching for another node"
+                            f"but landed on {state.value}; continuing from {state.value}"
                         )
                         return False
                 self.game.wait(self.game.timing.poll_interval)
@@ -678,9 +868,9 @@ class FarmingController:
         world = self.detector.detect(
             screenshot,
             read_account=False,
-            candidate_states={ScreenState.WORLD_MAP},
+            candidate_states={ScreenState.WORLD_MAP, ScreenState.CITY},
         )
-        if world.state is ScreenState.WORLD_MAP:
+        if world.state in {ScreenState.WORLD_MAP, ScreenState.CITY}:
             return world, False
         best_score = hits[0][0] if hits else 0.0
         return ScreenDetection(ScreenState.UNKNOWN, best_score, "no gather-flow button"), False
@@ -715,11 +905,13 @@ class FarmingController:
         self,
         clicked_state: ScreenState,
         clicked_bounds: tuple[int, int, int, int] | None,
+        *,
+        timeout: float = _STEP_CHANGE_TIMEOUT,
     ) -> None:
         """Wait until the clicked button is gone so stale frames aren't reused."""
 
         self.game.wait(_ACTION_RETRY_DELAY)
-        deadline = time.monotonic() + _STEP_CHANGE_TIMEOUT
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             screenshot = self.game.screenshot()
             detection, _ambiguous = self._classify_dispatch_screen(screenshot)
