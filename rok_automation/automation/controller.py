@@ -85,8 +85,8 @@ _DISPATCH_BUTTON_TEXT = {
 _DISPATCH_BUTTON_CONFIDENCE = 0.78
 _DISPATCH_AMBIGUITY_MARGIN = 0.12
 _DISPATCH_TIMEOUT = 20.0
-_STEP_CHANGE_TIMEOUT = 2.5
-_STEP_SETTLE_DELAY = 0.05
+_STEP_CHANGE_TIMEOUT = 1.2
+_STEP_SETTLE_DELAY = 0.12
 _FALLBACK_CONFIRM_SECONDS = 0.45
 _NEXT_DISPATCH_STATE: dict[ScreenState, ScreenState] = {
     ScreenState.RESOURCE_FOUND: ScreenState.NEW_TROOPS_PROMPT,
@@ -996,10 +996,7 @@ class FarmingController:
             )
             if (
                 detection.state is not ScreenState.UNKNOWN
-                and (
-                    detection.state is not clicked_state
-                    or not self._bounds_close(detection.bounds, clicked_bounds)
-                )
+                and detection.state is not clicked_state
             ):
                 return screenshot, detection, ambiguous
             self.game.wait(self.game.timing.poll_interval)
