@@ -84,8 +84,36 @@ ROKauto/
 
 ### Prerequisites
 - **OS:** Windows 10 / 11
-- **Emulator:** LDPlayer 9 (with Rise of Kingdoms set to **Vietnamese** in-game language)
+- **Emulator:** LDPlayer 9 (with Rise of Kingdoms set to **Tiếng Việt** in-game language)
 - **Python:** Python 3.11 or newer
+
+---
+
+### Recommended Emulator & Display Settings
+
+> [!IMPORTANT]
+> **MAKE THE LDPLAYER SCREEN AS BIG AS POSSIBLE!**
+> Computer vision template matching and text OCR (reading account names, army count `x/5`, and search levels `Cấp: 8`) require high pixel sharpness. **Do not run LDPlayer in a tiny window or low resolution.** If the screen is shrunk, text and buttons become blurry and detection will fail.
+
+1. **Maximize the Window:**
+   - Always maximize or expand the LDPlayer window on your monitor so UI elements are as large and clear as possible.
+   - Keep the LDPlayer window visible and unminimized during automation (do not overlap other windows over it).
+
+2. **LDPlayer Emulator Resolution Settings:**
+   - In LDPlayer, click the **Settings** (gear icon) on the right toolbar ➔ **Advanced**:
+     - Mode: **Tablet (Landscape)**
+     - Resolution: **`1600x900 (dpi 240)`** or **`1920x1080 (dpi 280)`** *(minimum: `1280x720 (dpi 240)`)*
+     - **Avoid** Phone/Mobile portrait resolutions (e.g. `720x1280`) or low resolutions (`960x540`).
+   - Save and restart LDPlayer.
+
+3. **Windows Display Scaling:**
+   - Windows Settings ➔ **System** ➔ **Display** ➔ Set **Scale** to **100%** to prevent Windows from blurring the game render window.
+
+4. **Rise of Kingdoms In-Game Settings:**
+   - **Language:** Must be set to **Tiếng Việt** (*Avatar ➔ Cài đặt ➔ Ngôn ngữ*).
+   - **Graphics Quality:** Set to **Trung bình (Medium)** or **Cao (High)** for crisp button edges and fonts.
+
+---
 
 ### Setup
 Clone the repository and install the package in editable mode:
