@@ -34,6 +34,7 @@ from rok_automation.vision.screen import (
     ScreenDetector,
     ScreenState,
     load_color_frame,
+    load_gray_frame,
 )
 
 
@@ -454,8 +455,23 @@ class FarmingController:
                         f"Army {army_number}/5: selecting "
                         f"{target.resource.value} Lv{target.level}",
                     )
-                    switched_resource = self._selected_resource is not target.resource
-                    if switched_resource:
+                    # Determine which resource tab is currently active on screen.
+                    active_resource = screen.preferred_resource
+                    if active_resource is None and screen.bounds is not None and screenshot is not None:
+                        frame = load_gray_frame(screenshot)
+                        if frame is not None:
+                            res = ScreenDetector.identify_active_search_resource(
+                                screen.bounds, frame.shape[1]
+                            )
+                            if isinstance(res, Resource):
+                                active_resource = res
+
+                    if active_resource == target.resource:
+                        # Desired resource is already selected and dialog is open.
+                        # Do NOT click the icon again, as that toggles the box closed.
+                        self._selected_resource = target.resource
+                    else:
+                        # Dialog is on a different tab (or closed); click to switch/open.
                         self._click_template(
                             _RESOURCE_BUTTONS[target.resource],
                             expected_state=ScreenState.RESOURCE_SEARCH,
@@ -951,12 +967,22 @@ class FarmingController:
                         context_key=self._selected_resource,
                     )
                     if hit is not None:
+                        active_res = None
+                        if exp_state is ScreenState.RESOURCE_SEARCH:
+                            frame = load_gray_frame(screenshot)
+                            if frame is not None:
+                                res = ScreenDetector.identify_active_search_resource(
+                                    hit.bounds, frame.shape[1]
+                                )
+                                if isinstance(res, Resource):
+                                    active_res = res
                         return (
                             ScreenDetection(
                                 exp_state,
                                 hit.confidence,
                                 template_name,
                                 hit.bounds,
+                                preferred_resource=active_res,
                             ),
                             False,
                         )
@@ -983,7 +1009,7 @@ class FarmingController:
                                 False,
                             )
 
-        hits: list[tuple[float, ScreenState, Any]] = []
+        hits: list[tuple[float, ScreenState, Any, Any]] = []
         for state, template_name in _DISPATCH_BUTTONS.items():
             hit = self.detector.locate_template(
                 screenshot,
@@ -992,23 +1018,47 @@ class FarmingController:
                 context_key=self._selected_resource,
             )
             if hit is not None:
-                hits.append((hit.confidence, state, hit))
+                active_res = None
+                if state is ScreenState.RESOURCE_SEARCH:
+                    frame = load_gray_frame(screenshot)
+                    if frame is not None:
+                        res = ScreenDetector.identify_active_search_resource(
+                            hit.bounds, frame.shape[1]
+                        )
+                        if isinstance(res, Resource):
+                            active_res = res
+                hits.append((hit.confidence, state, hit, active_res))
                 if hit.confidence >= 0.85:
                     # Inner text is already verified in locate_template for
                     # blue buttons, so a strong hit is unambiguous.
                     return (
-                        ScreenDetection(state, hit.confidence, template_name, hit.bounds),
+                        ScreenDetection(
+                            state,
+                            hit.confidence,
+                            template_name,
+                            hit.bounds,
+                            preferred_resource=active_res,
+                        ),
                         False,
                     )
         hits.sort(key=lambda item: item[0], reverse=True)
         if hits:
-            score, state, hit = hits[0]
+            score, state, hit, active_res = hits[0]
             runner_up = hits[1] if len(hits) > 1 else None
             ambiguous = (
                 runner_up is not None
                 and score - runner_up[0] < _DISPATCH_AMBIGUITY_MARGIN
             )
-            return ScreenDetection(state, score, _DISPATCH_BUTTONS[state], hit.bounds), ambiguous
+            return (
+                ScreenDetection(
+                    state,
+                    score,
+                    _DISPATCH_BUTTONS[state],
+                    hit.bounds,
+                    preferred_resource=active_res,
+                ),
+                ambiguous,
+            )
 
         world = self.detector.detect(
             screenshot,

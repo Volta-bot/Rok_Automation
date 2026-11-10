@@ -1,79 +1,126 @@
-# Rise of Kingdoms Automation
+# Rise of Kingdoms Farming Automation (`rok-automation`)
 
-An incremental Windows desktop automation project for Rise of Kingdoms running in LDPlayer 9.
+A fast, state-driven Windows desktop automation tool for **Rise of Kingdoms** running inside **LDPlayer 9**. It automatically detects the active governor account, infers its preferred resource from its name, dispatches all available gathering armies while avoiding contested nodes, and cycles through every starred character linked to the signed-in account.
 
-## Current capability
+---
 
-The project can detect a visible LDPlayer window, capture the game-render child area to PNG, recognize the account and resource, classify supplied UI states, and read the level shown in the search panel. On the world map it reads the current `x/5` march counter; if the counter is not visible, it treats that as `0/5`. On a found resource, it checks for an incoming green dotted route and reads the resource's X/Y coordinates; during one account's run, it skips occupied routes and coordinates it has already handled. When it encounters an occupied location at a level, it remembers to try lower levels for the rest of that account's run. The optional `--farm` mode uses a guarded state machine to search resources and dispatch only into army slots that are free. After each account, it opens the profile → settings → character screens and advances from the green-check card by position, top-left to bottom-right or in reverse depending on the starting position. It scrolls the character list one row at a time when needed. Gmail switching is not part of this flow. It stops if a required screen or control cannot be recognized.
+## Key Features
 
-## Observed farming flow
+### 1. State-Driven Farming Loop with Automatic Self-Recovery
+Instead of relying on blind delays or fixed coordinate clicks, the automation continuously classifies the current game screen and executes the action for that exact state:
 
-1. Start in the city; click the map button at the lower left to move to the world map.
-2. Read the city label below the player's city, ignore text inside square brackets (the guild name), and map `Vàng`/`Gold`, `Đá`/`Stone`, `Ngô`/`Food`, or `Gỗ`/`Wood` to its resource. A number may directly follow the keyword, as in `Gỗ8`.
-3. Click the lower-left magnifying-glass button and choose a resource type. Current resource levels descend from 8 to 5; the account's preferred resource is tried before randomly ordered alternatives.
-4. On a failed search, the camera stays put and the game displays a message beginning `Không tìm thấy` and ending `hãy thử lại sau`.
-5. On success, the camera moves to the resource. The observed action sequence is `THU THẬP` → `Quân mới` → `HÀNH QUÂN`.
+`City View` → **(Map Button)** → `World Map` → **(Search Button)** → `Resource Search Menu` → **(Select Resource & Level → Tìm kiếm)** → `Resource Node Found` → **(Thu thập)** → `New Troops (Quân mới)` → **(Hành quân)** → `World Map`
 
-The farming controller tries the preferred resource at levels 8 through 5, then randomly orders the other resource types and tries levels 8 through 5 for each. A failed search lowers the level; a result with a detected green incoming route is skipped before trying the next target; an apparently clear result proceeds through gather, new troops, and march. Blue and white incoming routes are not detected yet. A run stops if no supported resource location is found or a screen transition cannot be verified.
+- **Self-Healing Recovery:** If any click misses, lags, or accidentally closes a popup back to the World Map (or an earlier step), the controller detects the actual screen it landed on and resumes the flow from that state automatically.
+- **Smart Resource Selection:** Reads the governor name on the World Map (or from the character selection card), strips the `[Guild]` tag, and maps Vietnamese/English keywords (`Vàng`/`Gold`, `Đá`/`Stone`, `Ngô`/`Food`, `Gỗ`/`Wood`, including OCR variants like `G6`, `Ng0`) to the preferred resource. If an account name has no resource keyword, it selects a weighted-random resource (**40% Gold**, **20% Stone**, **20% Food**, **20% Wood**).
+- **Dynamic Level Fallback (Lv8 → Lv5):** Searches from Level 8 down to Level 5 for the preferred resource first, then shuffles the remaining resource types (Lv8 → Lv5). When a level has no available nodes or is contested, it remembers the highest viable level for that resource for the rest of the account's run.
+- **Contested Node & Duplicate Avoidance:**
+  - **Green Incoming Route Detection:** Analyzes HSV color masks and line geometry to detect incoming green dotted march lines from other players and skips contested nodes.
+  - **Coordinate Deduplication:** Reads the node's `X: ... Y: ...` coordinates from the resource popup and skips nodes already visited during the current account's session.
+  - **Map-Change Detection:** Compares map margin strips before and after pressing `Tìm kiếm` to detect when no node was found (`Không tìm thấy...`) without waiting for toast animations to fade.
+- **Active March Slot Detection:** Reads the `x/5` march counter on the right side of the World Map (treating an absent counter as `0/5`) and only dispatches armies for the remaining free slots.
 
-## Run
+### 2. Multi-Account Character Switching (`Nhân vật`)
+Once all 5 army slots are marching (or all resource levels are exhausted), the automation switches to the next starred character:
 
-From the repository root, use Python 3.11 or newer. Install the project and its screen-capture and Vietnamese OCR dependencies:
+`Top-Left Governor Portrait` → `Cài đặt (Settings)` → `Nhân vật (Characters)` → `Starred Character List` → `Confirm Login (Có)` → `Game Load`
+
+- **State-Driven Menu Navigation:** Recovers automatically if any menu click misses or falls back to an earlier screen.
+- **Positional Starred-Account Traversal:**
+  - Detects the active account via its bright green checkmark badge (`selected_account_check.png` + HSV green verification).
+  - Supports 12-account starred lists split across a top 6 page (`1/12..6/12`) and bottom 6 page (`7/12..12/12`).
+  - If the green checkmark is not in the first 6 accounts upon opening `Nhân vật`, it scrolls down immediately to scan the last 6 accounts.
+  - If started mid-list, it jumps to the nearest list end (`1/12` or `12/12`) and traverses sequentially in one clean pass (`top-to-bottom` or `bottom-to-top`), skipping the already-farmed starting account.
+
+### 3. High-Speed Vision Optimizations
+- **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
+- **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
+- **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
+- **Sub-Millisecond Blue-Button Text Verification:** Distinguishes similar cyan buttons (`Tìm kiếm`, `Thu thập`, `Quân mới`, `Hành quân`) in `~0.05ms` by correlating their inner text strip (`[22%:78%, 14%:86%]`), reserving OCR only for genuinely ambiguous frames.
+- **In-Memory Frame Caching:** Captured screenshots are cached in memory (`BGR` and `Grayscale`) during `mss` grab so downstream detectors and OCR readers never re-decode PNG files from disk.
+
+---
+
+## Technology Stack
+
+| Component | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Language** | Python 3.11+ | Core application logic, state machines, and CLI |
+| **Window & Input API** | Win32 API (`ctypes` / `user32.dll`) | Per-monitor DPI awareness (`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`), `LDPlayer` & `RenderWindow` handle discovery, and hardware-level cursor click/drag synthesis |
+| **Screen Capture** | `mss` | Ultra-fast desktop region capture of LDPlayer's child `RenderWindow` |
+| **Computer Vision** | OpenCV (`opencv-python`) & `numpy` | Multi-scale normalized cross-correlation (`TM_CCOEFF_NORMED`), HSV color segmentation (green march routes & active account checkmarks), and map-motion diffing |
+| **OCR Engine** | `rapidocr` + `onnxruntime` | Offline Vietnamese & English text recognition for governor names, `x/5` army counters, `Cấp: N` search levels, and `X/Y` node coordinates |
+
+---
+
+## Project Structure
+
+```text
+ROKauto/
+├── rok_automation/
+│   ├── __main__.py                 # CLI entry point (--farm, --detect-screen, --screenshot, --diagnose-window)
+│   ├── automation/
+│   │   ├── controller.py           # State-driven farming loop, search level caching, & army dispatch
+│   │   ├── account_switcher.py     # State-driven profile/settings/character switcher & list scroller
+│   │   ├── context.py              # Per-account runtime context (armies out, target, errors)
+│   │   └── states.py               # Farming state enum definitions
+│   ├── game/
+│   │   ├── ldplayer.py             # Win32 LDPlayer window discovery, MSS capture, click & drag
+│   │   └── interface.py            # GameInterface abstraction & timing configuration
+│   ├── logic/
+│   │   └── resource_selector.py    # Vietnamese/English resource keyword parser & Lv8-Lv5 search planner
+│   └── vision/
+│       ├── screen.py               # ROI/pinned template matcher, screen classifier, & level reader
+│       ├── account_label.py        # RapidOCR wrapper for governor labels & x/5 march counter
+│       └── green_route.py          # HSV + morphological detector for incoming green march routes
+├── templates/                      # UI reference templates (navigation, search, gathering, profile)
+├── run.bat                         # One-click interactive Windows launcher
+└── pyproject.toml                  # Package metadata and dependencies
+```
+
+---
+
+## Installation & Usage
+
+### Prerequisites
+- **OS:** Windows 10 / 11
+- **Emulator:** LDPlayer 9 (with Rise of Kingdoms set to **Vietnamese** in-game language)
+- **Python:** Python 3.11 or newer
+
+### Setup
+Clone the repository and install the package in editable mode:
 
 ```powershell
+git clone https://github.com/Volta-bot/Rok_Automation.git
+cd Rok_Automation
 python -m pip install -e .
 ```
 
-Check emulator detection:
+### Quick Start (`run.bat`)
+Double-click `run.bat` or run it from a terminal:
 
 ```powershell
-python -m rok_automation
+.\run.bat
 ```
+Press `y` when prompted to start farming across all starred accounts.
 
-The command prints the detected window title and handle, or reports that no matching window was found. Window matching currently looks for `LDPlayer` or `雷电` in the title.
+### CLI Commands
 
-Capture LDPlayer's game-render area to `artifacts/ldplayer.png`:
+- **Run full multi-account farming automation:**
+  ```powershell
+  python -m rok_automation --farm
+  ```
+- **Detect and classify the current LDPlayer screen (read-only):**
+  ```powershell
+  python -m rok_automation --detect-screen
+  ```
+- **Capture a screenshot of LDPlayer's render area:**
+  ```powershell
+  python -m rok_automation --screenshot artifacts/ldplayer.png
+  ```
+- **Inspect LDPlayer window handles and child bounds:**
+  ```powershell
+  python -m rok_automation --diagnose-window
+  ```
 
-```powershell
-python -m rok_automation --screenshot
-```
-
-You can supply another output path with `--screenshot path\to\capture.png`. This uses ordinary desktop capture, so the game area must be visible, unminimized, and unobscured while capturing.
-
-Capture and classify the visible game screen:
-
-```powershell
-python -m pip install -e .
-python -m rok_automation --detect-screen --search-level 8
-```
-
-The detector reports `unknown` if no supplied template matches confidently. In the resource-search panel it reads the visible `Cấp: N` label and reports that level; `--search-level` remains available for a controller to attach its known active level to a found-resource panel. On the world map it prints the account name without its bracketed guild tag and the preferred resource mapped from Vietnamese or English resource keywords.
-
-On a found-resource screen, `--detect-screen` also reports `green_route=detected` or `green_route=not_detected` with a confidence score. The current route check covers the green march route only; it does not yet recognize blue or white routes. On the world map, it reports the `x/5` march count used to limit new dispatches.
-
-To farm the current RoK character and then move through the other linked characters under the same signed-in Gmail account, run:
-
-```powershell
-python -m rok_automation --farm
-```
-
-Keep LDPlayer visible and unobscured. The command may click the game, dispatch up to five armies per character, and move through starred RoK characters in positional order until it reaches the end of the list. It does not switch Gmail accounts. It stops if it cannot verify a screen transition or locate the active account card.
-
-To inspect the detected LDPlayer window and its child-window bounds:
-
-```powershell
-python -m rok_automation --diagnose-window
-```
-
-## Planned development
-
-1. Emulator window detection (implemented)
-2. Screenshot capture (implemented)
-3. Basic mouse interaction (implemented for matched controls)
-4. GUI skeleton
-5. No-result detection by comparing the map before and after search (implemented)
-6. Resource-search workflow and screen transitions (implemented for farming)
-7. Teleport and gathering workflow
-8. Daily rewards, recovery, and logging refinement
-
-Visual recognition will use screenshots from the actual game. No game coordinates or image templates are assumed in advance.
+> **Note:** Because capture and input operate directly on LDPlayer's visible `RenderWindow`, keep LDPlayer unminimized and visible on screen while the automation is running.

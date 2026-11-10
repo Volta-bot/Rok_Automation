@@ -290,7 +290,12 @@ class ScreenDetector:
             )
         if best.state is ScreenState.RESOURCE_SEARCH and best.bounds is not None:
             level = self._read_search_level(frame, best.bounds)
+            active_res = self.identify_active_search_resource(best.bounds, frame.shape[1])
             evidence = best.evidence
+            if isinstance(active_res, Resource):
+                evidence = f"{evidence}; active resource: {active_res.value}"
+            elif active_res:
+                evidence = f"{evidence}; active tab: {active_res}"
             if level is not None:
                 evidence = f"{evidence}; OCR read Cấp: {level}"
             return ScreenDetection(
@@ -299,6 +304,7 @@ class ScreenDetector:
                 evidence,
                 best.bounds,
                 level,
+                preferred_resource=active_res if isinstance(active_res, Resource) else None,
             )
         if best.state is ScreenState.RESOURCE_FOUND:
             color_frame = load_color_frame(image_path)
@@ -558,6 +564,25 @@ class ScreenDetector:
             return False
         res = cv2.matchTemplate(search_patch, inner_tpl, cv2.TM_CCOEFF_NORMED)
         return float(res.max()) >= 0.56
+
+    @staticmethod
+    def identify_active_search_resource(
+        submit_bounds: tuple[int, int, int, int],
+        frame_width: int,
+    ) -> Resource | str:
+        """Identify which resource tab the search dialog is currently anchored above."""
+
+        center_x = (submit_bounds[0] + submit_bounds[2] / 2) / frame_width
+        if center_x < 0.285:
+            return "barbarian"
+        elif center_x < 0.428:
+            return Resource.FOOD
+        elif center_x < 0.575:
+            return Resource.WOOD
+        elif center_x < 0.725:
+            return Resource.STONE
+        else:
+            return Resource.GOLD
 
     @staticmethod
     def _read_search_level(
