@@ -285,8 +285,13 @@ class AccountSwitcher:
             f"{target_index + 1}"
             f"/{total if total is not None else '?'}: {name}"
         )
-        self.game.click(bounds, screenshot)
-        self._confirm_account_login()
+        self._select_card_and_confirm_login(
+            traversal,
+            target_index=target_index,
+            card_offset=card_offset,
+            initial_screenshot=screenshot,
+            initial_bounds=bounds,
+        )
         self._wait_for_game(name)
         traversal.current_index = target_index
         return name
@@ -415,162 +420,280 @@ class AccountSwitcher:
         return screenshot, frame, top_down_cards
 
     def _open_character_list(self) -> None:
-        screenshot, frame = self._capture()
+        """Drive Top-Left Portrait → Cài đặt → Nhân vật → Character List by state.
+
+        Every iteration detects which menu/screen is currently showing and
+        presses the button for *that* screen. If a click misses or a menu closes
+        back to an earlier screen, the loop re-detects the current state and
+        continues from there.
+        """
+
+        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT * 2
+        clicks = {
+            "portrait": 0,
+            "settings": 0,
+            "characters": 0,
+        }
+        last_state = "unknown"
+
+        while time.monotonic() < deadline:
+            screenshot, frame = self._capture()
+            state, bounds, score = self._detect_menu_state(screenshot, frame)
+            last_state = state
+
+            if state == "character_list":
+                self.game.wait(0.20)
+                return
+
+            if state == "settings_menu" and bounds is not None:
+                clicks["characters"] += 1
+                if clicks["characters"] > _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Nhân vật button did not open character list after "
+                        f"{_MAX_ACTION_ATTEMPTS} clicks"
+                    )
+                retry_note = (
+                    f" (retry {clicks['characters'] - 1})"
+                    if clicks["characters"] > 1
+                    else ""
+                )
+                self._log(
+                    f"Clicking characters button (match={score:.3f}){retry_note}"
+                )
+                self.game.click(bounds, screenshot)
+                self._wait_for_menu_state_change("settings_menu")
+                continue
+
+            if state == "governor_profile" and bounds is not None:
+                clicks["settings"] += 1
+                if clicks["settings"] > _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Cài đặt button did not open settings after "
+                        f"{_MAX_ACTION_ATTEMPTS} clicks"
+                    )
+                retry_note = (
+                    f" (retry {clicks['settings'] - 1})"
+                    if clicks["settings"] > 1
+                    else ""
+                )
+                if score > 0.0:
+                    self._log(
+                        f"Clicking settings button (match={score:.3f}){retry_note}"
+                    )
+                else:
+                    self._log(
+                        f"Clicking 'Cài đặt' label on profile screen{retry_note}"
+                    )
+                self.game.click(bounds, screenshot)
+                self._wait_for_menu_state_change("governor_profile")
+                continue
+
+            if state == "map_or_city" and bounds is not None:
+                clicks["portrait"] += 1
+                if clicks["portrait"] > _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Governor portrait did not open profile after "
+                        f"{_MAX_ACTION_ATTEMPTS} clicks"
+                    )
+                retry_note = (
+                    f" (retry {clicks['portrait'] - 1})"
+                    if clicks["portrait"] > 1
+                    else ""
+                )
+                if clicks["portrait"] > 1:
+                    self._log(
+                        f"Clicking top-left governor icon{retry_note}"
+                    )
+                self.game.click(bounds, screenshot)
+                self._wait_for_menu_state_change("map_or_city")
+                continue
+
+            self.game.wait(_ACTION_RETRY_DELAY)
+
+        raise RuntimeError(
+            f"Timed out opening the character selection screen; "
+            f"last detected state was {last_state}"
+        )
+
+    def _detect_menu_state(
+        self,
+        screenshot: Path,
+        frame: Any,
+    ) -> tuple[str, tuple[int, int, int, int] | None, float]:
+        """Classify which step of the account-switcher menu chain is on screen.
+
+        Checks from the deepest modal back to the base map/city screen so an
+        open modal always takes priority over background UI.
+        """
+
+        login_yes = self._find_login_confirmation_yes(frame)
+        if login_yes is not None:
+            bounds, _title_score, yes_score = login_yes
+            return "login_confirmation", bounds, yes_score
+
+        if (
+            self._starred_accounts_header_bounds(frame) is not None
+            or self._regular_accounts_header_bounds(frame) is not None
+        ) and self._read_account_cards(frame):
+            return "character_list", None, 1.0
+
+        char_hit = self.detector.locate_template(
+            screenshot,
+            _CHARACTER_MENU_BUTTON,
+            confidence_threshold=0.70,
+        )
+        if char_hit is not None:
+            return "settings_menu", char_hit.bounds, char_hit.confidence
+
+        settings_hit = self.detector.locate_template(
+            screenshot,
+            _SETTINGS_BUTTON,
+            confidence_threshold=0.70,
+        )
+        if settings_hit is not None:
+            return "governor_profile", settings_hit.bounds, settings_hit.confidence
+
         height, width = frame.shape[:2]
+        detections = read_text_detections(
+            frame,
+            (
+                round(width * 0.70),
+                round(height * 0.70),
+                round(width * 0.26),
+                round(height * 0.25),
+            ),
+            upscale=2.0,
+        )
+        for text, bounds, _score in detections:
+            if "cai dat" in _fold(text):
+                return "governor_profile", bounds, 0.0
+
         detection = self.detector.detect(
             screenshot,
             read_account=False,
             candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
         )
-        for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
-            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
-                break
-            self.game.wait(_ACTION_RETRY_DELAY)
+        if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+            portrait_bounds = (
+                round(width * 0.005),
+                round(height * 0.002),
+                round(width * 0.075),
+                round(height * 0.12),
+            )
+            return "map_or_city", portrait_bounds, detection.confidence
+
+        return "unknown", None, 0.0
+
+    def _wait_for_menu_state_change(self, previous_state: str) -> None:
+        """Wait briefly until the screen advances past ``previous_state``."""
+
+        self.game.wait(_ACTION_RETRY_DELAY)
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
             screenshot, frame = self._capture()
-            height, width = frame.shape[:2]
-            detection = self.detector.detect(
-                screenshot,
-                read_account=False,
-                candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
-            )
-        if detection.state not in {ScreenState.CITY, ScreenState.WORLD_MAP}:
-            raise RuntimeError(
-                "Account switching must start from the city or world map; "
-                f"found {detection.state.value}"
-            )
-
-        # The governor portrait stays anchored at the upper-left in city and
-        # world-map views. Use a generous hit area around the portrait.
-        self.game.click(
-            (round(width * 0.005), round(height * 0.002),
-             round(width * 0.075), round(height * 0.12)),
-            screenshot,
-        )
-        self._click_profile_settings()
-        self._click_menu_template(_CHARACTER_MENU_BUTTON, "characters")
-        self._wait_for_character_list()
-        self.game.wait(0.25)
-
-    def _wait_for_character_list(self) -> None:
-        """Wait until the starred/regular character list headers and cards load."""
-
-        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            _screenshot, frame = self._capture()
-            if (
-                self._starred_accounts_header_bounds(frame) is not None
-                or self._regular_accounts_header_bounds(frame) is not None
-            ) and self._read_account_cards(frame):
+            state, _bounds, _score = self._detect_menu_state(screenshot, frame)
+            if state != previous_state and state != "unknown":
                 return
-            self.game.wait(_ACTION_RETRY_DELAY)
-        raise RuntimeError("Timed out waiting for the character list screen")
+            self.game.wait(self.game.timing.poll_interval)
 
-    def _click_profile_settings(self) -> None:
-        """Wait for the 'Cài đặt' settings button on the profile screen and click it."""
-
-        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            screenshot, frame = self._capture()
-            hit = self.detector.locate_template(
-                screenshot,
-                _SETTINGS_BUTTON,
-                confidence_threshold=0.58,
-            )
-            if hit is not None:
-                self._log(
-                    f"Clicking settings button (match={hit.confidence:.3f})"
-                )
-                self.game.click(hit.bounds, screenshot)
-                return
-
-            height, width = frame.shape[:2]
-            detections = read_text_detections(
-                frame,
-                (
-                    round(width * 0.70),
-                    round(height * 0.70),
-                    round(width * 0.26),
-                    round(height * 0.25),
-                ),
-                upscale=2.0,
-            )
-            for text, bounds, _score in detections:
-                if "cai dat" in _fold(text):
-                    self._log("Clicking 'Cài đặt' label on profile screen")
-                    self.game.click(bounds, screenshot)
-                    return
-
-            self.game.wait(_ACTION_RETRY_DELAY)
-
-        raise RuntimeError(
-            "Timed out waiting for 'Cài đặt' on the governor profile screen"
-        )
-
-    def _click_text(self, keyword: str) -> None:
-        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            screenshot, frame = self._capture()
-            detections = read_text_detections(
-                frame,
-                (0, 0, frame.shape[1], frame.shape[0]),
-                upscale=2.0,
-            )
-            for text, bounds, _score in detections:
-                if keyword in _fold(text):
-                    self.game.click(bounds, screenshot)
-                    return
-            self.game.wait(_ACTION_RETRY_DELAY)
-        raise RuntimeError(f"Could not locate the {keyword!r} menu label")
-
-    def _click_menu_template(
+    def _select_card_and_confirm_login(
         self,
-        template: Path,
-        label: str,
+        traversal: AccountTraversal,
         *,
-        timeout: float = _OPEN_MENU_TIMEOUT,
+        target_index: int,
+        card_offset: int,
+        initial_screenshot: Path,
+        initial_bounds: tuple[int, int, int, int],
     ) -> None:
-        deadline = time.monotonic() + timeout
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            screenshot, _frame = self._capture()
-            hit = self.detector.locate_template(
-                screenshot,
-                template,
-                confidence_threshold=0.58,
-            )
-            if hit is not None:
-                self._log(
-                    f"Clicking {label} button (match={hit.confidence:.3f})"
+        """Click the target character card and confirm login ('Có') by state.
+
+        If clicking the character card misses and the character selection screen
+        remains open, re-click the card. If the menu falls back to an earlier
+        screen, re-open the character list and continue.
+        """
+
+        self.game.click(initial_bounds, initial_screenshot)
+        card_clicks = 1
+        yes_clicks = 0
+        confirmed_login = False
+        deadline = time.monotonic() + 20.0
+
+        while time.monotonic() < deadline:
+            self.game.wait(_ACTION_RETRY_DELAY)
+            screenshot, frame = self._capture()
+            state, bounds, _score = self._detect_menu_state(screenshot, frame)
+
+            if state == "login_confirmation" and bounds is not None:
+                login_yes = self._find_login_confirmation_yes(frame)
+                if login_yes is not None:
+                    yes_bounds, title_score, yes_score = login_yes
+                    yes_clicks += 1
+                    if yes_clicks > _MAX_ACTION_ATTEMPTS:
+                        raise RuntimeError(
+                            f"Login confirmation 'Có' button did not respond "
+                            f"after {_MAX_ACTION_ATTEMPTS} clicks"
+                        )
+                    self._log(
+                        f"Login confirmation dialog detected "
+                        f"(title={title_score:.3f}, yes={yes_score:.3f}); "
+                        "clicking Có and waiting for game load"
+                    )
+                    self.game.click(yes_bounds, screenshot)
+                    confirmed_login = True
+                    self._wait_for_menu_state_change("login_confirmation")
+                    return
+
+            if confirmed_login and state != "login_confirmation":
+                return
+
+            if state == "character_list":
+                if card_clicks >= _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(
+                        "Timed out waiting for the account-login confirmation dialog; "
+                        f"character card did not open dialog after {card_clicks} clicks"
+                    )
+                cards = self._order_account_cards(
+                    self._read_account_cards(frame),
+                    frame_height=frame.shape[0],
+                    direction=1,
                 )
-                self.game.click(hit.bounds, screenshot)
-                return
-            self.game.wait(_ACTION_RETRY_DELAY)
-        raise RuntimeError(f"Could not locate the {label!r} menu button")
+                if 0 <= card_offset < len(cards):
+                    _card_name, card_bounds = cards[card_offset]
+                    card_clicks += 1
+                    self._log(
+                        f"Character list still open; clicking account card again "
+                        f"(retry {card_clicks - 1})"
+                    )
+                    self.game.click(card_bounds, screenshot)
+                    continue
 
-    def _wait_for_template(self, template: Path, label: str) -> None:
-        deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            screenshot = self.game.screenshot()
-            if self.detector.locate_template(
-                screenshot,
-                template,
-                confidence_threshold=0.58,
-            ) is not None:
-                return
-            self.game.wait(_ACTION_RETRY_DELAY)
-        raise RuntimeError(f"Timed out waiting for the {label} screen")
+            if state in {"settings_menu", "governor_profile", "map_or_city"}:
+                if confirmed_login:
+                    return
+                self._log(
+                    f"Menu fell back to {state} before login confirmation; "
+                    "re-opening character list"
+                )
+                self._open_character_list()
+                if target_index >= 6:
+                    self._scroll_all_the_way(
+                        traversal,
+                        toward_list_end=True,
+                        until_check_gone=False,
+                    )
+                continue
 
-    def _confirm_account_login(self) -> None:
-        """Click Có once after visually anchoring the confirmation dialog."""
+        if not confirmed_login:
+            raise RuntimeError(
+                "Timed out waiting for the account-login confirmation dialog; "
+                "no unverified button was clicked"
+            )
+
+    @staticmethod
+    def _find_login_confirmation_yes(
+        frame: Any,
+    ) -> tuple[tuple[int, int, int, int], float, float] | None:
+        """Return (yes_bounds, title_score, yes_score) if the login modal is open."""
 
         title_template = cv2.imread(
             str(_LOGIN_CONFIRMATION_TITLE),
@@ -583,63 +706,49 @@ class AccountSwitcher:
         if title_template is None or yes_template is None:
             raise RuntimeError("Missing login confirmation templates")
 
-        deadline = time.monotonic() + 12.0
-        attempts = 0
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
-            attempts += 1
-            screenshot, frame = self._capture()
-            frame_height, frame_width = frame.shape[:2]
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # Search only the centered modal region at realistic scales so the
-            # top NHÂN VẬT window title bar cannot be mistaken for this dialog.
-            title_left = round(frame_width * 0.28)
-            title_top = round(frame_height * 0.12)
-            title_crop = gray[
-                title_top : round(frame_height * 0.35),
-                title_left : round(frame_width * 0.72),
-            ]
-            yes_left = round(frame_width * 0.48)
-            yes_top = round(frame_height * 0.58)
-            yes_crop = gray[
-                yes_top : round(frame_height * 0.82),
-                yes_left : round(frame_width * 0.80),
-            ]
-            title_score, _ = ScreenDetector._best_scale_match(
-                title_crop,
-                title_template,
-                minimum_scale=0.75,
-                maximum_scale=1.20,
-            )
-            yes_score, yes_match = ScreenDetector._best_scale_match(
-                yes_crop,
-                yes_template,
-                minimum_scale=0.75,
-                maximum_scale=1.20,
-            )
-            if title_score >= 0.80 and yes_score >= 0.78:
-                yes_height, yes_width = ScreenDetector._scaled_size(
-                    yes_template,
-                    yes_match[2],
-                )
-                button_bounds = (
-                    yes_left + yes_match[0],
-                    yes_top + yes_match[1],
-                    yes_width,
-                    yes_height,
-                )
-                self._log(
-                    f"Login confirmation dialog detected "
-                    f"(title={title_score:.3f}, yes={yes_score:.3f}); "
-                    "clicking Có and waiting for game load"
-                )
-                self.game.click(button_bounds, screenshot)
-                return
-            self.game.wait(_ACTION_RETRY_DELAY)
-
-        raise RuntimeError(
-            "Timed out waiting for the account-login confirmation dialog; "
-            "no unverified button was clicked"
+        frame_height, frame_width = frame.shape[:2]
+        gray = (
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if frame.ndim == 3
+            else frame
         )
+        title_left = round(frame_width * 0.28)
+        title_top = round(frame_height * 0.12)
+        title_crop = gray[
+            title_top : round(frame_height * 0.35),
+            title_left : round(frame_width * 0.72),
+        ]
+        yes_left = round(frame_width * 0.48)
+        yes_top = round(frame_height * 0.58)
+        yes_crop = gray[
+            yes_top : round(frame_height * 0.82),
+            yes_left : round(frame_width * 0.80),
+        ]
+        title_score, _ = ScreenDetector._best_scale_match(
+            title_crop,
+            title_template,
+            minimum_scale=0.75,
+            maximum_scale=1.20,
+        )
+        yes_score, yes_match = ScreenDetector._best_scale_match(
+            yes_crop,
+            yes_template,
+            minimum_scale=0.75,
+            maximum_scale=1.20,
+        )
+        if title_score >= 0.80 and yes_score >= 0.78:
+            yes_height, yes_width = ScreenDetector._scaled_size(
+                yes_template,
+                yes_match[2],
+            )
+            button_bounds = (
+                yes_left + yes_match[0],
+                yes_top + yes_match[1],
+                yes_width,
+                yes_height,
+            )
+            return button_bounds, title_score, yes_score
+        return None
 
     def _wait_for_text(self, keyword: str) -> None:
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
@@ -1083,10 +1192,18 @@ class AccountSwitcher:
     def _wait_for_game(self, expected_name: str) -> None:
         deadline = time.monotonic() + _ACCOUNT_LOAD_TIMEOUT
         next_progress_log = time.monotonic() + 15.0
-        opened_world_map = False
+        city_map_clicks = 0
         reported_character_list = False
         while time.monotonic() < deadline:
-            screenshot = self.game.screenshot()
+            screenshot, frame = self._capture()
+            login_yes = self._find_login_confirmation_yes(frame)
+            if login_yes is not None:
+                yes_bounds, _title_score, _yes_score = login_yes
+                self._log("Login confirmation dialog still open; clicking Có again")
+                self.game.click(yes_bounds, screenshot)
+                self.game.wait(0.40)
+                continue
+
             if self._character_list_is_open(screenshot):
                 if not reported_character_list:
                     self._log(
@@ -1102,7 +1219,10 @@ class AccountSwitcher:
                 read_account=False,
                 candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
             )
-            if detection.state is ScreenState.CITY and not opened_world_map:
+            if (
+                detection.state is ScreenState.CITY
+                and city_map_clicks < _MAX_ACTION_ATTEMPTS
+            ):
                 hit = self.detector.locate_template(
                     screenshot,
                     _CITY_MAP_BUTTON,
@@ -1110,7 +1230,8 @@ class AccountSwitcher:
                 )
                 if hit is not None:
                     self.game.click(hit.bounds, screenshot)
-                    opened_world_map = True
+                    city_map_clicks += 1
+                    self.game.wait(0.50)
                 else:
                     self.game.wait(max(0.20, self.game.timing.poll_interval))
                 continue
