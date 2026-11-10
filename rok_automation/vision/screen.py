@@ -100,6 +100,110 @@ _TEMPLATES = (
 _TEMPLATE_CACHE: dict[Path, Any] = {}
 # (frame size, template identity) -> scale step (percent) of a confident match.
 _SCALE_CACHE: dict[tuple[int, ...], int] = {}
+# (frame_h, frame_w, template_name, context_key) -> (x, y, w, h, scale_step)
+_POSITION_CACHE: dict[tuple[int, int, str, Any], tuple[int, int, int, int, int]] = {}
+# In-memory decoded screenshot cache: Path -> (mtime_ns, size, bgr_frame, gray_frame)
+_FRAME_CACHE: dict[Path, tuple[int, int, Any, Any]] = {}
+
+# Normalized (left, top, right, bottom) search regions for static UI controls.
+_TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
+    "world_search_button.png": (0.00, 0.56, 0.16, 0.88),
+    "city_map_button.png": (0.00, 0.74, 0.16, 1.00),
+    "world_city_button.png": (0.00, 0.74, 0.16, 1.00),
+    "gather_button.png": (0.45, 0.44, 0.95, 0.86),
+    "new_troops_button.png": (0.50, 0.30, 0.96, 0.88),
+    "march_button.png": (0.50, 0.64, 0.98, 0.98),
+    "resource_food.png": (0.14, 0.62, 0.98, 0.99),
+    "resource_wood.png": (0.14, 0.62, 0.98, 0.99),
+    "resource_stone.png": (0.14, 0.62, 0.98, 0.99),
+    "resource_gold.png": (0.14, 0.62, 0.98, 0.99),
+    "submit_button.png": (0.16, 0.22, 0.98, 0.70),
+    "level_plus.png": (0.16, 0.14, 0.98, 0.60),
+    "level_minus.png": (0.16, 0.14, 0.98, 0.60),
+    "settings_button.png": (0.65, 0.62, 0.98, 0.98),
+    "character_menu_button.png": (0.10, 0.18, 0.90, 0.86),
+}
+# Search-popup controls sit directly above whichever resource icon is selected.
+_RESOURCE_DEPENDENT_TEMPLATES = frozenset({
+    "submit_button.png",
+    "level_plus.png",
+    "level_minus.png",
+})
+_RESOURCE_ICON_NAMES: dict[Resource, str] = {
+    Resource.GOLD: "resource_gold.png",
+    Resource.STONE: "resource_stone.png",
+    Resource.FOOD: "resource_food.png",
+    Resource.WOOD: "resource_wood.png",
+}
+# Look-alike cyan buttons whose inner text strip disambiguates them without OCR.
+_BLUE_TEXT_TEMPLATES = frozenset({
+    "gather_button.png",
+    "new_troops_button.png",
+    "submit_button.png",
+})
+
+
+def cache_captured_frame(path: str | Path, bgr_frame: Any) -> None:
+    """Store a freshly captured BGR frame in memory to avoid disk re-reads."""
+
+    resolved = Path(path).resolve()
+    try:
+        stat = resolved.stat()
+        mtime_ns, size = stat.st_mtime_ns, stat.st_size
+    except OSError:
+        mtime_ns, size = -1, -1
+    gray_frame = (
+        cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+        if bgr_frame.ndim == 3
+        else bgr_frame
+    )
+    if len(_FRAME_CACHE) >= 6:
+        _FRAME_CACHE.clear()
+    _FRAME_CACHE[resolved] = (mtime_ns, size, bgr_frame, gray_frame)
+
+
+def load_color_frame(path: str | Path) -> Any:
+    """Load a BGR screenshot, serving from memory when unchanged on disk."""
+
+    resolved = Path(path).resolve()
+    try:
+        stat = resolved.stat()
+        mtime_ns, size = stat.st_mtime_ns, stat.st_size
+    except OSError:
+        mtime_ns, size = -2, -2
+    cached = _FRAME_CACHE.get(resolved)
+    if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+        return cached[2]
+    bgr = cv2.imread(str(resolved), cv2.IMREAD_COLOR)
+    if bgr is None:
+        return None
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if len(_FRAME_CACHE) >= 6:
+        _FRAME_CACHE.clear()
+    _FRAME_CACHE[resolved] = (mtime_ns, size, bgr, gray)
+    return bgr
+
+
+def load_gray_frame(path: str | Path) -> Any:
+    """Load a grayscale screenshot, serving from memory when unchanged on disk."""
+
+    resolved = Path(path).resolve()
+    try:
+        stat = resolved.stat()
+        mtime_ns, size = stat.st_mtime_ns, stat.st_size
+    except OSError:
+        mtime_ns, size = -2, -2
+    cached = _FRAME_CACHE.get(resolved)
+    if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+        return cached[3]
+    bgr = cv2.imread(str(resolved), cv2.IMREAD_COLOR)
+    if bgr is None:
+        return None
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if len(_FRAME_CACHE) >= 6:
+        _FRAME_CACHE.clear()
+    _FRAME_CACHE[resolved] = (mtime_ns, size, bgr, gray)
+    return gray
 
 
 def _load_gray_template(path: Path) -> Any:
@@ -128,6 +232,7 @@ class ScreenDetector:
         expected_resource_level: int | None = None,
         read_account: bool = True,
         candidate_states: set[ScreenState] | None = None,
+        context_key: Any = None,
     ) -> ScreenDetection:
         """Classify an image and attach the active level to a found result.
 
@@ -145,7 +250,7 @@ class ScreenDetector:
             )
 
         image_path = Path(screenshot_path)
-        frame = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(image_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {image_path}")
 
@@ -159,18 +264,21 @@ class ScreenDetector:
             )
         )
         for template in templates:
-            image_template = _load_gray_template(template.path)
-
-            score, bounds = self._best_scale_match(frame, image_template)
-            if score > best.confidence:
-                height, width = self._scaled_size(image_template, bounds[2])
+            hit = self._locate_in_frame(
+                frame,
+                template.path,
+                confidence_threshold=0.0,
+                context_key=context_key,
+                maximum_scale=1.10,
+            )
+            if hit is not None and hit.confidence > best.confidence:
                 best = ScreenDetection(
                     template.state,
-                    score,
+                    hit.confidence,
                     template.name,
-                    (bounds[0], bounds[1], width, height),
+                    hit.bounds,
                 )
-                if score >= 0.92 and len(templates) == 1:
+                if hit.confidence >= 0.90 and len(templates) == 1:
                     break
 
         if best.confidence < self.confidence_threshold:
@@ -193,7 +301,7 @@ class ScreenDetector:
                 level,
             )
         if best.state is ScreenState.RESOURCE_FOUND:
-            color_frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            color_frame = load_color_frame(image_path)
             if color_frame is None:
                 raise FileNotFoundError(f"Could not read screenshot: {image_path}")
             green_route = detect_green_incoming_route(color_frame)
@@ -220,7 +328,7 @@ class ScreenDetector:
                 resource_coordinates=resource_coordinates,
             )
         if best.state is ScreenState.WORLD_MAP and read_account:
-            color_frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            color_frame = load_color_frame(image_path)
             if color_frame is None:
                 raise FileNotFoundError(f"Could not read screenshot: {image_path}")
             account_name, preferred_resource = read_account_label(color_frame)
@@ -280,24 +388,154 @@ class ScreenDetector:
         template_path: str | Path,
         *,
         confidence_threshold: float = 0.68,
+        context_key: Any = None,
     ) -> TemplateHit | None:
         """Locate a supplied visual control in a screenshot for safe clicking."""
 
-        frame = cv2.imread(str(screenshot_path), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
-        image_template = _load_gray_template(Path(template_path))
-
-        score, match = cls._best_scale_match(
+        return cls._locate_in_frame(
             frame,
-            image_template,
-            minimum_scale=0.45,
+            Path(template_path),
+            confidence_threshold=confidence_threshold,
+            context_key=context_key,
             maximum_scale=1.35,
         )
+
+    @classmethod
+    def _locate_in_frame(
+        cls,
+        frame: Any,
+        template_path: Path,
+        *,
+        confidence_threshold: float,
+        context_key: Any = None,
+        maximum_scale: float = 1.35,
+    ) -> TemplateHit | None:
+        """Fast ROI + pinned-position template matcher for static UI buttons."""
+
+        image_template = _load_gray_template(template_path)
+        template_name = template_path.name
+        frame_h, frame_w = frame.shape[:2]
+        is_resource_dep = template_name in _RESOURCE_DEPENDENT_TEMPLATES
+        effective_context = context_key if is_resource_dep else None
+
+        # 1. Fast path: check pinned (x, y, w, h, scale_step) if already known.
+        candidate_contexts: tuple[Any, ...] = (
+            (effective_context,)
+            if (not is_resource_dep or effective_context is not None)
+            else (*Resource, None)
+        )
+        for cand_ctx in candidate_contexts:
+            pinned = _POSITION_CACHE.get(
+                (frame_h, frame_w, template_name, cand_ctx)
+            )
+            if pinned is None:
+                continue
+            px, py, pw, ph, p_step = pinned
+            pad = 24
+            x0 = max(0, px - pad)
+            y0 = max(0, py - pad)
+            x1 = min(frame_w, px + pw + pad)
+            y1 = min(frame_h, py + ph + pad)
+            crop = frame[y0:y1, x0:x1]
+            score, loc = cls._match_at_scale(crop, image_template, p_step)
+            if score >= max(confidence_threshold, 0.72):
+                hit_x, hit_y = x0 + loc[0], y0 + loc[1]
+                if template_name in _BLUE_TEXT_TEMPLATES and not cls._verify_blue_button_text(
+                    frame, image_template, (hit_x, hit_y, pw, ph)
+                ):
+                    continue
+                return TemplateHit(score, (hit_x, hit_y, pw, ph))
+
+        # 2. ROI scan: crop to the control's static region (narrowed above the
+        # selected resource icon for Tìm kiếm / + / - when that icon's position
+        # is already cached).
+        roi = _TEMPLATE_ROIS.get(template_name)
+        if roi is not None:
+            left_f, top_f, right_f, bottom_f = roi
+            if is_resource_dep and isinstance(effective_context, Resource):
+                icon_name = _RESOURCE_ICON_NAMES.get(effective_context)
+                icon_pinned = (
+                    _POSITION_CACHE.get((frame_h, frame_w, icon_name, None))
+                    if icon_name is not None
+                    else None
+                )
+                if icon_pinned is not None:
+                    ix, _iy, iw, _ih, _istep = icon_pinned
+                    center_x = (ix + iw / 2) / frame_w
+                    left_f = max(left_f, center_x - 0.20)
+                    right_f = min(right_f, center_x + 0.20)
+            rx0 = max(0, round(frame_w * left_f))
+            ry0 = max(0, round(frame_h * top_f))
+            rx1 = min(frame_w, round(frame_h and frame_w * right_f))
+            ry1 = min(frame_h, round(frame_h * bottom_f))
+        else:
+            rx0, ry0, rx1, ry1 = 0, 0, frame_w, frame_h
+
+        roi_frame = frame[ry0:ry1, rx0:rx1]
+        score, match = cls._best_scale_match(
+            roi_frame,
+            image_template,
+            minimum_scale=0.45,
+            maximum_scale=maximum_scale,
+            frame_key_shape=(frame_h, frame_w),
+        )
+        height, width = cls._scaled_size(image_template, match[2])
+        hit_bounds = (rx0 + match[0], ry0 + match[1], width, height)
+
+        if score >= confidence_threshold and template_name in _BLUE_TEXT_TEMPLATES:
+            if not cls._verify_blue_button_text(frame, image_template, hit_bounds):
+                score = 0.0
+
         if score < confidence_threshold:
             return None
-        height, width = cls._scaled_size(image_template, match[2])
-        return TemplateHit(score, (match[0], match[1], width, height))
+
+        if score >= 0.78 and template_name in _TEMPLATE_ROIS:
+            scale_step = round(match[2] * 100)
+            _POSITION_CACHE[
+                (frame_h, frame_w, template_name, effective_context)
+            ] = (hit_bounds[0], hit_bounds[1], width, height, scale_step)
+        return TemplateHit(score, hit_bounds)
+
+    @staticmethod
+    def _verify_blue_button_text(
+        frame: Any,
+        template: Any,
+        bounds: tuple[int, int, int, int],
+    ) -> bool:
+        """Verify the inner label strip of a cyan button in ~0.05ms without OCR."""
+
+        x, y, width, height = bounds
+        if width <= 8 or height <= 8:
+            return False
+        patch = frame[
+            max(0, y) : min(frame.shape[0], y + height),
+            max(0, x) : min(frame.shape[1], x + width),
+        ]
+        if patch.size == 0:
+            return False
+        tpl_h, tpl_w = template.shape[:2]
+        resized_patch = cv2.resize(
+            patch,
+            (tpl_w, tpl_h),
+            interpolation=cv2.INTER_AREA if width < tpl_w else cv2.INTER_LINEAR,
+        )
+        y0, y1 = int(tpl_h * 0.22), int(tpl_h * 0.78)
+        x0, x1 = int(tpl_w * 0.14), int(tpl_w * 0.86)
+        inner_tpl = template[y0:y1, x0:x1]
+        search_patch = resized_patch[
+            max(0, y0 - 4) : min(tpl_h, y1 + 4),
+            max(0, x0 - 4) : min(tpl_w, x1 + 4),
+        ]
+        if (
+            search_patch.shape[0] < inner_tpl.shape[0]
+            or search_patch.shape[1] < inner_tpl.shape[1]
+        ):
+            return False
+        res = cv2.matchTemplate(search_patch, inner_tpl, cv2.TM_CCOEFF_NORMED)
+        return float(res.max()) >= 0.56
 
     @staticmethod
     def _read_search_level(
@@ -370,12 +608,17 @@ class ScreenDetector:
         *,
         minimum_scale: float = 0.45,
         maximum_scale: float = 1.10,
+        frame_key_shape: tuple[int, int] | None = None,
     ) -> tuple[float, tuple[int, int, float]]:
         best_score = -1.0
         best_match = (0, 0, 1.0)
         scale_start = round(minimum_scale * 100)
         scale_end = round(maximum_scale * 100)
-        cache_key = cls._scale_cache_key(frame, template)
+        cache_key = cls._scale_cache_key(
+            frame,
+            template,
+            frame_key_shape=frame_key_shape,
+        )
         cached_step = _SCALE_CACHE.get(cache_key)
         if cached_step is not None and scale_start <= cached_step <= scale_end:
             # The emulator resolution is fixed during a run, so once a control
@@ -389,9 +632,9 @@ class ScreenDetector:
                 if score > best_score:
                     best_score = score
                     best_match = (location[0], location[1], scale_step / 100.0)
-                if scale_step == cached_step and score >= 0.90:
+                if scale_step == cached_step and score >= 0.85:
                     break
-            if best_score >= 0.90:
+            if best_score >= 0.85:
                 _SCALE_CACHE[cache_key] = round(best_match[2] * 100)
             return max(0.0, best_score), best_match
 
@@ -416,19 +659,29 @@ class ScreenDetector:
             if max_score > best_score:
                 best_score = max_score
                 best_match = (max_location[0], max_location[1], scale)
-            if index + 1 == len(primary_steps) and best_score >= 0.90:
+            if index + 1 == len(primary_steps) and best_score >= 0.88:
                 break
 
-        if best_score >= 0.90:
+        if best_score >= 0.85:
             _SCALE_CACHE[cache_key] = round(best_match[2] * 100)
         return max(0.0, best_score), best_match
 
     @staticmethod
-    def _scale_cache_key(frame: Any, template: Any) -> tuple[int, ...]:
+    def _scale_cache_key(
+        frame: Any,
+        template: Any,
+        *,
+        frame_key_shape: tuple[int, int] | None = None,
+    ) -> tuple[int, ...]:
+        fh, fw = (
+            frame_key_shape
+            if frame_key_shape is not None
+            else (frame.shape[0], frame.shape[1])
+        )
         sample = template[:: max(1, template.shape[0] // 16), :: max(1, template.shape[1] // 16)]
         return (
-            frame.shape[0],
-            frame.shape[1],
+            fh,
+            fw,
             template.shape[0],
             template.shape[1],
             int(sample.sum()),

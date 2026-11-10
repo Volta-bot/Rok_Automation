@@ -29,7 +29,12 @@ from rok_automation.logic.resource_selector import (
     search_plan,
 )
 from rok_automation.vision.account_label import read_text_region
-from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState
+from rok_automation.vision.screen import (
+    ScreenDetection,
+    ScreenDetector,
+    ScreenState,
+    load_color_frame,
+)
 
 
 class FarmingError(RuntimeError):
@@ -78,12 +83,16 @@ _DISPATCH_BUTTON_TEXT = {
     ScreenState.RESOURCE_SEARCH: ("timkiem", "timk"),
 }
 _DISPATCH_BUTTON_CONFIDENCE = 0.78
-# "Quân mới" scores ~0.86 on the "Thu thập" button (vs ~0.94 for the real
-# template), so scores closer than this are confirmed with OCR.
 _DISPATCH_AMBIGUITY_MARGIN = 0.12
 _DISPATCH_TIMEOUT = 20.0
 _STEP_CHANGE_TIMEOUT = 2.5
-_FALLBACK_CONFIRM_SECONDS = 1.0
+_STEP_SETTLE_DELAY = 0.05
+_FALLBACK_CONFIRM_SECONDS = 0.45
+_NEXT_DISPATCH_STATE: dict[ScreenState, ScreenState] = {
+    ScreenState.RESOURCE_FOUND: ScreenState.NEW_TROOPS_PROMPT,
+    ScreenState.NEW_TROOPS_PROMPT: ScreenState.TROOP_COMPOSITION,
+    ScreenState.TROOP_COMPOSITION: ScreenState.WORLD_MAP,
+}
 # Recovery: how many failed steps / unreadable screens one army may hit
 # before the run stops safely.
 _MAX_RECOVERY_ATTEMPTS = 5
@@ -114,6 +123,7 @@ class FarmingController:
         self.rng = rng or random.Random()
         self.log = log
         self.context = FarmContext()
+        self._selected_resource: Resource | None = None
 
     def run(self) -> FarmContext:
         """Farm each linked RoK character once, then stop at the list end."""
@@ -458,9 +468,7 @@ class FarmingController:
                         _SEARCH_TEMPLATES / "submit_button.png",
                         expected_state=ScreenState.RESOURCE_SEARCH,
                     )
-                    before_search = cv2.imread(
-                        str(before_search_path), cv2.IMREAD_COLOR
-                    )
+                    before_search = load_color_frame(before_search_path)
                     if before_search is None:
                         raise FarmingError("Could not read the pre-search screenshot")
                     _result_path, result = self._wait_for_search_result(before_search)
@@ -590,20 +598,28 @@ class FarmingController:
             f"last error: {last_error}"
         )
 
-    def _read_screen(self) -> tuple[Path, ScreenDetection]:
-        """Identify the current farming screen from two matching captures.
-
-        Overlay panels (search menu, resource panel, Quân mới, Hành quân)
-        take priority over the city/world-map HUD that stays visible behind
-        them. Look-alike blue buttons are confirmed with OCR.
-        """
+    def _read_screen(
+        self,
+        *,
+        expected_states: tuple[ScreenState, ...] | None = None,
+    ) -> tuple[Path, ScreenDetection]:
+        """Identify the current farming screen using fast ROI/pinned checks."""
 
         deadline = time.monotonic() + _SCREEN_READ_TIMEOUT
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
         while True:
-            detection, ambiguous = self._classify_dispatch_screen(screenshot)
+            detection, ambiguous = self._classify_dispatch_screen(
+                screenshot,
+                expected_states=expected_states,
+            )
+            if (
+                detection.state is not ScreenState.UNKNOWN
+                and not ambiguous
+                and detection.confidence >= 0.80
+            ):
+                return screenshot, detection
             stable = (
                 previous is not None
                 and previous.state is detection.state
@@ -639,6 +655,7 @@ class FarmingController:
             screenshot,
             template_path,
             confidence_threshold=confidence_threshold,
+            context_key=self._selected_resource,
         )
         if hit is None:
             raise FarmingError(
@@ -647,10 +664,18 @@ class FarmingController:
             )
         self._log(f"Clicking {template_path.stem} (match={hit.confidence:.3f})")
         self.game.click(hit.bounds, screenshot)
+        next_expected = (
+            (ScreenState.RESOURCE_SEARCH,)
+            if template_path.name == "world_search_button.png"
+            else (ScreenState.WORLD_MAP,)
+            if template_path.name == "city_map_button.png"
+            else None
+        )
         self._wait_for_dispatch_change(
             screen.state,
             screen.bounds,
             timeout=change_timeout,
+            expected_states=next_expected,
         )
 
     def _set_search_level(self, desired_level: int) -> None:
@@ -704,6 +729,7 @@ class FarmingController:
                 screenshot,
                 read_account=False,
                 candidate_states={ScreenState.RESOURCE_SEARCH},
+                context_key=self._selected_resource,
             )
             last_state = detection.state
             if (
@@ -732,12 +758,9 @@ class FarmingController:
     ) -> bool:
         """Drive Thu thập → Quân mới → Hành quân by re-reading the screen.
 
-        Every step identifies the current screen from a fresh, stable capture
-        and presses the button that belongs to *that* screen, then waits for
-        the screen to actually change. Returns ``True`` once Hành quân was
-        pressed and the world map is back. Returns ``False`` when the flow
-        fell back to the world map or search menu before marching (e.g. a
-        missed click closed the panel) so the caller can search again.
+        Uses fast ROI/pinned-position checks and checks the expected next step
+        in the chain first while preserving full fallback recovery if a click
+        misses and lands on another screen.
         """
 
         self._transition(
@@ -747,33 +770,30 @@ class FarmingController:
         deadline = time.monotonic() + _DISPATCH_TIMEOUT
         clicks = {state: 0 for state in _DISPATCH_BUTTONS}
         marched = False
-        previous: ScreenDetection | None = None
         fallback_since: float | None = None
         last_state = ScreenState.UNKNOWN
+        expected_next: tuple[ScreenState, ...] = (ScreenState.RESOURCE_FOUND,)
+        pending_frame: tuple[Path, ScreenDetection, bool] | None = None
 
         while time.monotonic() < deadline:
-            screenshot = self.game.screenshot()
-            detection, ambiguous = self._classify_dispatch_screen(screenshot)
+            if pending_frame is not None:
+                screenshot, detection, ambiguous = pending_frame
+                pending_frame = None
+            else:
+                screenshot = self.game.screenshot()
+                detection, ambiguous = self._classify_dispatch_screen(
+                    screenshot,
+                    expected_states=expected_next,
+                )
             last_state = detection.state
-            stable = (
-                previous is not None
-                and previous.state is detection.state
-                and self._bounds_close(previous.bounds, detection.bounds)
-            )
-            previous = detection
 
-            if not stable or detection.state is ScreenState.UNKNOWN:
-                # Only act on a screen that looks the same in two captures in
-                # a row, so a panel that is still animating is never clicked.
-                if detection.state is ScreenState.UNKNOWN:
-                    fallback_since = None
+            if detection.state is ScreenState.UNKNOWN:
+                fallback_since = None
                 self.game.wait(self.game.timing.poll_interval)
                 continue
 
             state = detection.state
             if ambiguous:
-                # Thu thập, Quân mới and Tìm kiếm are the same blue button, so
-                # confirm the label with OCR before trusting the template.
                 ocr_state = self._read_button_state(screenshot, detection.bounds)
                 if ocr_state is not None:
                     state = ocr_state
@@ -791,8 +811,6 @@ class FarmingController:
                     )
                     return True
                 if not marched:
-                    # Panels animate in and out, so only conclude that the
-                    # gather flow was lost after the fallback screen persists.
                     if fallback_since is None:
                         fallback_since = time.monotonic()
                     elif time.monotonic() - fallback_since >= _FALLBACK_CONFIRM_SECONDS:
@@ -827,8 +845,13 @@ class FarmingController:
             self.game.click(detection.bounds, screenshot)
             if state is ScreenState.TROOP_COMPOSITION:
                 marched = True
-            self._wait_for_dispatch_change(detection.state, detection.bounds)
-            previous = None
+            next_state = _NEXT_DISPATCH_STATE.get(state)
+            expected_next = (next_state,) if next_state is not None else ()
+            pending_frame = self._wait_for_dispatch_change(
+                detection.state,
+                detection.bounds,
+                expected_states=expected_next or None,
+            )
 
         raise FarmingError(
             f"Timed out sending troops to {target.resource.value} "
@@ -838,25 +861,78 @@ class FarmingController:
     def _classify_dispatch_screen(
         self,
         screenshot: Path,
+        *,
+        expected_states: tuple[ScreenState, ...] | None = None,
     ) -> tuple[ScreenDetection, bool]:
         """Identify which gather-flow screen is showing.
 
-        Overlay buttons win over the world-map HUD (which stays visible behind
-        the panels). Returns the detection and whether the best button was
-        close enough to another button's score to need OCR confirmation.
+        Checks ``expected_states`` first so the common happy path only checks
+        a single pinned ROI (< 2ms). Falls back to scanning the remaining
+        buttons and map HUD if the expected state isn't on screen.
         """
+
+        if expected_states:
+            for exp_state in expected_states:
+                if exp_state in _DISPATCH_BUTTONS:
+                    template_name = _DISPATCH_BUTTONS[exp_state]
+                    hit = self.detector.locate_template(
+                        screenshot,
+                        _DISPATCH_TEMPLATE_DIRS[exp_state] / f"{template_name}.png",
+                        confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
+                        context_key=self._selected_resource,
+                    )
+                    if hit is not None:
+                        return (
+                            ScreenDetection(
+                                exp_state,
+                                hit.confidence,
+                                template_name,
+                                hit.bounds,
+                            ),
+                            False,
+                        )
+                elif exp_state is ScreenState.WORLD_MAP:
+                    march_hit = self.detector.locate_template(
+                        screenshot,
+                        _GATHERING_TEMPLATES / "march_button.png",
+                        confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
+                    )
+                    if march_hit is None:
+                        world_hit = self.detector.locate_template(
+                            screenshot,
+                            _NAVIGATION_TEMPLATES / "world_search_button.png",
+                            confidence_threshold=0.75,
+                        )
+                        if world_hit is not None:
+                            return (
+                                ScreenDetection(
+                                    ScreenState.WORLD_MAP,
+                                    world_hit.confidence,
+                                    "world map search button",
+                                    world_hit.bounds,
+                                ),
+                                False,
+                            )
 
         hits: list[tuple[float, ScreenState, Any]] = []
         for state, template_name in _DISPATCH_BUTTONS.items():
             hit = self.detector.locate_template(
                 screenshot,
                 _DISPATCH_TEMPLATE_DIRS[state] / f"{template_name}.png",
-                confidence_threshold=0.0,
+                confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
+                context_key=self._selected_resource,
             )
             if hit is not None:
                 hits.append((hit.confidence, state, hit))
+                if hit.confidence >= 0.85:
+                    # Inner text is already verified in locate_template for
+                    # blue buttons, so a strong hit is unambiguous.
+                    return (
+                        ScreenDetection(state, hit.confidence, template_name, hit.bounds),
+                        False,
+                    )
         hits.sort(key=lambda item: item[0], reverse=True)
-        if hits and hits[0][0] >= _DISPATCH_BUTTON_CONFIDENCE:
+        if hits:
             score, state, hit = hits[0]
             runner_up = hits[1] if len(hits) > 1 else None
             ambiguous = (
@@ -872,8 +948,7 @@ class FarmingController:
         )
         if world.state in {ScreenState.WORLD_MAP, ScreenState.CITY}:
             return world, False
-        best_score = hits[0][0] if hits else 0.0
-        return ScreenDetection(ScreenState.UNKNOWN, best_score, "no gather-flow button"), False
+        return ScreenDetection(ScreenState.UNKNOWN, 0.0, "no gather-flow button"), False
 
     def _read_button_state(
         self,
@@ -884,7 +959,7 @@ class FarmingController:
 
         if bounds is None:
             return None
-        frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+        frame = load_color_frame(screenshot)
         if frame is None:
             return None
         decomposed = unicodedata.normalize(
@@ -907,19 +982,28 @@ class FarmingController:
         clicked_bounds: tuple[int, int, int, int] | None,
         *,
         timeout: float = _STEP_CHANGE_TIMEOUT,
-    ) -> None:
-        """Wait until the clicked button is gone so stale frames aren't reused."""
+        expected_states: tuple[ScreenState, ...] | None = None,
+    ) -> tuple[Path, ScreenDetection, bool] | None:
+        """Wait until the screen advances past ``clicked_state`` and return it."""
 
-        self.game.wait(_ACTION_RETRY_DELAY)
+        self.game.wait(_STEP_SETTLE_DELAY)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             screenshot = self.game.screenshot()
-            detection, _ambiguous = self._classify_dispatch_screen(screenshot)
-            if detection.state is not clicked_state or not self._bounds_close(
-                detection.bounds, clicked_bounds
+            detection, ambiguous = self._classify_dispatch_screen(
+                screenshot,
+                expected_states=expected_states,
+            )
+            if (
+                detection.state is not ScreenState.UNKNOWN
+                and (
+                    detection.state is not clicked_state
+                    or not self._bounds_close(detection.bounds, clicked_bounds)
+                )
             ):
-                return
+                return screenshot, detection, ambiguous
             self.game.wait(self.game.timing.poll_interval)
+        return None
 
     @staticmethod
     def _bounds_close(
@@ -953,31 +1037,35 @@ class FarmingController:
         while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
             attempts += 1
             screenshot = self.game.screenshot()
+            hit = self.detector.locate_template(
+                screenshot,
+                template_path,
+                confidence_threshold=confidence_threshold,
+                context_key=self._selected_resource,
+            )
+            if hit is not None:
+                last_state = expected_state
+                self._log(
+                    f"Clicking {template_path.stem}"
+                    f"{f' {repeat} times' if repeat > 1 else ''} "
+                    f"(match={hit.confidence:.3f})"
+                )
+                for click_index in range(repeat):
+                    self.game.click(hit.bounds, screenshot)
+                    if click_index + 1 < repeat:
+                        self.game.wait(_LEVEL_REPEAT_PAUSE)
+                return screenshot
+
             detection = self.detector.detect(
                 screenshot,
                 read_account=False,
                 candidate_states={expected_state},
+                context_key=self._selected_resource,
             )
             last_state = detection.state
-            if detection.state is expected_state:
-                hit = self.detector.locate_template(
-                    screenshot,
-                    template_path,
-                    confidence_threshold=confidence_threshold,
-                )
-                if hit is not None:
-                    self._log(
-                        f"Clicking {template_path.stem}"
-                        f"{f' {repeat} times' if repeat > 1 else ''} "
-                        f"(match={hit.confidence:.3f})"
-                    )
-                    for click_index in range(repeat):
-                        self.game.click(hit.bounds, screenshot)
-                        if click_index + 1 < repeat:
-                            self.game.wait(_LEVEL_REPEAT_PAUSE)
-                    return screenshot
-            elif (
-                detection.state is not ScreenState.UNKNOWN
+            if (
+                detection.state is not expected_state
+                and detection.state is not ScreenState.UNKNOWN
                 and attempts >= _MAX_ACTION_ATTEMPTS
             ):
                 self._require_state(detection, expected_state)
@@ -1007,15 +1095,20 @@ class FarmingController:
 
         while time.monotonic() < deadline:
             screenshot = self.game.screenshot()
-            submit_button = self.detector.locate_template(
-                screenshot,
-                _SEARCH_TEMPLATES / "submit_button.png",
-                confidence_threshold=0.68,
-            )
             gather_button = self.detector.locate_template(
                 screenshot,
                 _GATHERING_TEMPLATES / "gather_button.png",
                 confidence_threshold=0.68,
+            )
+            submit_button = (
+                None
+                if gather_button is not None and gather_button.confidence >= 0.80
+                else self.detector.locate_template(
+                    screenshot,
+                    _SEARCH_TEMPLATES / "submit_button.png",
+                    confidence_threshold=0.68,
+                    context_key=self._selected_resource,
+                )
             )
             if gather_button is not None and (
                 submit_button is None
@@ -1076,7 +1169,7 @@ class FarmingController:
     ) -> bool:
         """Compare map-only strips, ignoring the search dialog and toast."""
 
-        after = cv2.imread(str(after_path), cv2.IMREAD_COLOR)
+        after = load_color_frame(after_path)
         if after is None or before.shape[:2] != after.shape[:2]:
             return True
 

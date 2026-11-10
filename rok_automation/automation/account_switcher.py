@@ -14,7 +14,12 @@ import numpy as np
 
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
-from rok_automation.vision.screen import ScreenDetector, ScreenState
+from rok_automation.vision.screen import (
+    ScreenDetector,
+    ScreenState,
+    load_color_frame,
+    load_gray_frame,
+)
 
 
 _OPEN_MENU_TIMEOUT = 15.0
@@ -1329,7 +1334,7 @@ class AccountSwitcher:
     def _character_list_is_open(cls, screenshot: Path) -> bool:
         """Check the distinctive starred-accounts bar in its screen region."""
 
-        frame = cv2.imread(str(screenshot), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(screenshot)
         if frame is None:
             raise RuntimeError("Could not read the starred-accounts header images")
         return cls._starred_accounts_header_bounds(frame) is not None
@@ -1338,14 +1343,14 @@ class AccountSwitcher:
     def _regular_accounts_section_is_visible(cls, screenshot: Path) -> bool:
         """Use the next section header to confirm the starred list has ended."""
 
-        frame = cv2.imread(str(screenshot), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(screenshot)
         if frame is None:
             raise RuntimeError("Could not read the regular-accounts header images")
         return cls._regular_accounts_header_bounds(frame) is not None
 
     def _capture(self) -> tuple[Path, Any]:
         screenshot = self.game.screenshot()
-        frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+        frame = load_color_frame(screenshot)
         if frame is None:
             raise RuntimeError(f"Could not read screenshot: {screenshot}")
         return screenshot, frame

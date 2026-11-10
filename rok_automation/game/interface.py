@@ -16,6 +16,7 @@ from rok_automation.game.ldplayer import (
     click_ldplayer_point,
     drag_ldplayer_points,
 )
+from rok_automation.vision.screen import load_gray_frame
 
 
 class GameInterface(Protocol):
@@ -72,7 +73,7 @@ class LDPlayerInterface:
         bounds: tuple[int, int, int, int],
         screenshot_path: str | Path,
     ) -> None:
-        frame = cv2.imread(str(screenshot_path), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
         x, y, width, height = bounds
@@ -92,7 +93,7 @@ class LDPlayerInterface:
         end: tuple[int, int],
         screenshot_path: str | Path,
     ) -> None:
-        frame = cv2.imread(str(screenshot_path), cv2.IMREAD_GRAYSCALE)
+        frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
         drag_ldplayer_points(self.window, start, end, frame.shape)

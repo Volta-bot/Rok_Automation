@@ -287,14 +287,21 @@ def capture_ldplayer_window(window: EmulatorWindow, output_path: Path) -> Path:
 
     destination = output_path.expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    resolved = destination.resolve()
     try:
+        import cv2
+        import numpy as np
+        from rok_automation.vision.screen import cache_captured_frame
+
         with mss.MSS() as screen:
             shot = screen.grab(region)
-            mss.tools.to_png(shot.rgb, shot.size, output=str(destination))
+            bgr = np.asarray(shot)[:, :, :3].copy()
+            cv2.imwrite(str(resolved), bgr)
+            cache_captured_frame(resolved, bgr)
     except Exception as exc:
         raise RuntimeError(f"Desktop capture failed: {exc}") from exc
 
-    return destination.resolve()
+    return resolved
 
 
 def click_ldplayer_point(
