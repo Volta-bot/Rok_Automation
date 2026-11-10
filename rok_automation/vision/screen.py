@@ -113,13 +113,13 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "gather_button.png": (0.45, 0.44, 0.95, 0.86),
     "new_troops_button.png": (0.50, 0.30, 0.96, 0.88),
     "march_button.png": (0.50, 0.64, 0.98, 0.98),
-    "resource_food.png": (0.14, 0.62, 0.98, 0.99),
-    "resource_wood.png": (0.14, 0.62, 0.98, 0.99),
-    "resource_stone.png": (0.14, 0.62, 0.98, 0.99),
-    "resource_gold.png": (0.14, 0.62, 0.98, 0.99),
-    "submit_button.png": (0.16, 0.22, 0.98, 0.70),
-    "level_plus.png": (0.16, 0.14, 0.98, 0.60),
-    "level_minus.png": (0.16, 0.14, 0.98, 0.60),
+    "resource_food.png": (0.25, 0.72, 0.46, 0.99),
+    "resource_wood.png": (0.40, 0.72, 0.60, 0.99),
+    "resource_stone.png": (0.55, 0.72, 0.75, 0.99),
+    "resource_gold.png": (0.70, 0.72, 0.90, 0.99),
+    "submit_button.png": (0.12, 0.25, 0.98, 0.82),
+    "level_plus.png": (0.12, 0.18, 0.98, 0.72),
+    "level_minus.png": (0.12, 0.18, 0.98, 0.72),
     "settings_button.png": (0.65, 0.62, 0.98, 0.98),
     "character_menu_button.png": (0.10, 0.18, 0.90, 0.86),
 }
@@ -453,6 +453,7 @@ class ScreenDetector:
         # selected resource icon for Tìm kiếm / + / - when that icon's position
         # is already cached).
         roi = _TEMPLATE_ROIS.get(template_name)
+        narrowed_roi = False
         if roi is not None:
             left_f, top_f, right_f, bottom_f = roi
             if is_resource_dep and isinstance(effective_context, Resource):
@@ -465,11 +466,12 @@ class ScreenDetector:
                 if icon_pinned is not None:
                     ix, _iy, iw, _ih, _istep = icon_pinned
                     center_x = (ix + iw / 2) / frame_w
-                    left_f = max(left_f, center_x - 0.20)
-                    right_f = min(right_f, center_x + 0.20)
+                    left_f = max(left_f, center_x - 0.22)
+                    right_f = min(right_f, center_x + 0.22)
+                    narrowed_roi = True
             rx0 = max(0, round(frame_w * left_f))
             ry0 = max(0, round(frame_h * top_f))
-            rx1 = min(frame_w, round(frame_h and frame_w * right_f))
+            rx1 = min(frame_w, round(frame_w * right_f))
             ry1 = min(frame_h, round(frame_h * bottom_f))
         else:
             rx0, ry0, rx1, ry1 = 0, 0, frame_w, frame_h
@@ -488,6 +490,26 @@ class ScreenDetector:
         if score >= confidence_threshold and template_name in _BLUE_TEXT_TEMPLATES:
             if not cls._verify_blue_button_text(frame, image_template, hit_bounds):
                 score = 0.0
+
+        if score < confidence_threshold and narrowed_roi and roi is not None:
+            left_f, top_f, right_f, bottom_f = roi
+            rx0 = max(0, round(frame_w * left_f))
+            ry0 = max(0, round(frame_h * top_f))
+            rx1 = min(frame_w, round(frame_w * right_f))
+            ry1 = min(frame_h, round(frame_h * bottom_f))
+            roi_frame = frame[ry0:ry1, rx0:rx1]
+            score, match = cls._best_scale_match(
+                roi_frame,
+                image_template,
+                minimum_scale=0.45,
+                maximum_scale=maximum_scale,
+                frame_key_shape=(frame_h, frame_w),
+            )
+            height, width = cls._scaled_size(image_template, match[2])
+            hit_bounds = (rx0 + match[0], ry0 + match[1], width, height)
+            if score >= confidence_threshold and template_name in _BLUE_TEXT_TEMPLATES:
+                if not cls._verify_blue_button_text(frame, image_template, hit_bounds):
+                    score = 0.0
 
         if score < confidence_threshold:
             return None
