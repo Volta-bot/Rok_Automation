@@ -120,7 +120,7 @@ class AccountSwitcher:
 
         self._open_character_list()
         screenshot, frame, top_down_cards, active_position = (
-            self._read_page_and_active_position(traversal)
+            self._read_page_and_active_position(traversal, max_attempts=1)
         )
         total = traversal.total_accounts
         page_size = len(top_down_cards)
@@ -174,6 +174,7 @@ class AccountSwitcher:
                             traversal,
                             toward_list_end=True,
                             until_check_gone=False,
+                            initial=(screenshot, frame, top_down_cards),
                         )
                     )
                     (
@@ -233,6 +234,32 @@ class AccountSwitcher:
                 bottom_idx = max(0, total - page_size) + active_position
                 if bottom_idx != traversal.skipped_index:
                     traversal.current_index = bottom_idx
+            elif active_position is None and (at_top or not at_bottom):
+                # Green tick is not in the first 6 accounts: scroll down
+                # immediately and scan for the green tick in the last 6 accounts.
+                screenshot, frame, top_down_cards = self._scroll_all_the_way(
+                    traversal,
+                    toward_list_end=True,
+                    until_check_gone=False,
+                    initial=(screenshot, frame, top_down_cards),
+                )
+                (
+                    screenshot,
+                    frame,
+                    top_down_cards,
+                    active_position,
+                ) = self._read_page_and_active_position(
+                    traversal,
+                    initial=(screenshot, frame, top_down_cards),
+                )
+                total = traversal.total_accounts
+                page_size = len(top_down_cards)
+                at_top = False
+                at_bottom = True
+                if active_position is not None and total is not None:
+                    bottom_idx = max(0, total - page_size) + active_position
+                    if bottom_idx != traversal.skipped_index:
+                        traversal.current_index = bottom_idx
             target_index = traversal.next_target_index()
 
         if target_index is None:
@@ -254,6 +281,7 @@ class AccountSwitcher:
                     traversal,
                     toward_list_end=False,
                     until_check_gone=(active_position is not None),
+                    initial=(screenshot, frame, top_down_cards),
                 )
             card_offset = target_index
         else:
@@ -267,6 +295,7 @@ class AccountSwitcher:
                     until_check_gone=(
                         active_position is not None and at_top
                     ),
+                    initial=(screenshot, frame, top_down_cards),
                 )
                 total = traversal.total_accounts
                 page_size = len(top_down_cards)
@@ -309,20 +338,21 @@ class AccountSwitcher:
             tuple[Path, Any, list[tuple[str, tuple[int, int, int, int]]]]
             | None
         ) = None,
+        max_attempts: int = _MAX_ACTION_ATTEMPTS,
     ) -> tuple[
         Path,
         Any,
         list[tuple[str, tuple[int, int, int, int]]],
         int | None,
     ]:
-        """Check up to 5 times with a small delay to locate the green tick."""
+        """Locate the green tick on the current page."""
 
         screenshot, frame, top_down_cards = (
             initial
             if initial is not None
             else self._read_visible_page(traversal)
         )
-        for attempt in range(_MAX_ACTION_ATTEMPTS):
+        for attempt in range(max(1, max_attempts)):
             active_bounds = self._selected_account_bounds(
                 screenshot,
                 frame,
@@ -335,7 +365,7 @@ class AccountSwitcher:
             )
             if active_position is not None:
                 return screenshot, frame, top_down_cards, active_position
-            if attempt + 1 < _MAX_ACTION_ATTEMPTS:
+            if attempt + 1 < max_attempts:
                 self.game.wait(_ACTION_RETRY_DELAY)
                 screenshot, frame, top_down_cards = self._read_visible_page(
                     traversal
@@ -379,10 +409,18 @@ class AccountSwitcher:
         *,
         toward_list_end: bool,
         until_check_gone: bool,
+        initial: (
+            tuple[Path, Any, list[tuple[str, tuple[int, int, int, int]]]]
+            | None
+        ) = None,
     ) -> tuple[Path, Any, list[tuple[str, tuple[int, int, int, int]]]]:
         """Scroll all the way to the bottom or top until settled."""
 
-        screenshot, frame, top_down_cards = self._read_visible_page(traversal)
+        screenshot, frame, top_down_cards = (
+            initial
+            if initial is not None
+            else self._read_visible_page(traversal)
+        )
         for _ in range(8):
             at_top = self._starred_accounts_header_bounds(frame) is not None
             at_bottom = self._regular_accounts_header_bounds(frame) is not None
@@ -539,7 +577,7 @@ class AccountSwitcher:
         if (
             self._starred_accounts_header_bounds(frame) is not None
             or self._regular_accounts_header_bounds(frame) is not None
-        ) and self._read_account_cards(frame):
+        ):
             return "character_list", None, 1.0
 
         char_hit = self.detector.locate_template(
