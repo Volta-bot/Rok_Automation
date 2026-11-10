@@ -440,7 +440,7 @@ class FarmingController:
                         screenshot,
                         screen,
                         _NAVIGATION_TEMPLATES / "world_search_button.png",
-                        confidence_threshold=0.75,
+                        confidence_threshold=0.65,
                         change_timeout=1.5,
                     )
                     continue
@@ -600,7 +600,7 @@ class FarmingController:
                             fresh_path,
                             result,
                             _NAVIGATION_TEMPLATES / "world_search_button.png",
-                            confidence_threshold=0.75,
+                            confidence_threshold=0.65,
                             change_timeout=1.5,
                         )
                         continue

@@ -269,7 +269,7 @@ class ScreenDetector:
                 template.path,
                 confidence_threshold=0.0,
                 context_key=context_key,
-                maximum_scale=1.10,
+                maximum_scale=1.35,
             )
             if hit is not None and hit.confidence > best.confidence:
                 best = ScreenDetection(
@@ -486,7 +486,7 @@ class ScreenDetector:
         score, match = cls._best_scale_match(
             roi_frame,
             image_template,
-            minimum_scale=0.45,
+            minimum_scale=0.35,
             maximum_scale=maximum_scale,
             frame_key_shape=(frame_h, frame_w),
         )
@@ -507,7 +507,7 @@ class ScreenDetector:
             score, match = cls._best_scale_match(
                 roi_frame,
                 image_template,
-                minimum_scale=0.45,
+                minimum_scale=0.35,
                 maximum_scale=maximum_scale,
                 frame_key_shape=(frame_h, frame_w),
             )
