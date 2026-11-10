@@ -45,12 +45,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
 _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
-_SEARCH_SETTLE_SECONDS = 0.35
-_SEARCH_SUBMIT_DELAY = 0.12
+_SEARCH_SETTLE_SECONDS = 0.25
+_SEARCH_SUBMIT_DELAY = 0.04
 _SEARCH_MENU_READY_TIMEOUT = 2.5
 _CONTROL_READY_TIMEOUT = 2.5
-_LEVEL_REPEAT_PAUSE = 0.12
-_LEVEL_SETTLE_DELAY = 0.18
+_LEVEL_REPEAT_PAUSE = 0.08
+_LEVEL_SETTLE_DELAY = 0.12
 _MAX_ACTION_ATTEMPTS = 5
 _ACTION_RETRY_DELAY = 0.20
 _UNCHANGED_SEARCH_FRAMES = 2
@@ -124,6 +124,7 @@ class FarmingController:
         self.log = log
         self.context = FarmContext()
         self._selected_resource: Resource | None = None
+        self._resource_levels: dict[Resource, int] = {}
 
     def run(self) -> FarmContext:
         """Farm each linked RoK character once, then stop at the list end."""
@@ -316,6 +317,7 @@ class FarmingController:
         # The search dialog retains its resource choice after it is closed.
         # Remember that choice for this run and only click a different type.
         self._selected_resource = None
+        self._resource_levels = {}
         # A failed level stays unavailable for later armies in this run.
         highest_candidate_level = {
             resource: RESOURCE_LEVELS[0] for resource in Resource
@@ -374,6 +376,7 @@ class FarmingController:
         ))
         target_index = 0
         pending_result: ScreenDetection | None = None
+        pending_screen: tuple[Path, ScreenDetection] | None = None
         recoveries = 0
         unknown_reads = 0
         last_error = "none"
@@ -400,6 +403,9 @@ class FarmingController:
                 if pending_result is not None:
                     # A search just opened a result; handle it directly.
                     screenshot, screen = None, pending_result
+                elif pending_screen is not None:
+                    screenshot, screen = pending_screen
+                    pending_screen = None
                 else:
                     screenshot, screen = self._read_screen()
                 state = screen.state
@@ -418,7 +424,7 @@ class FarmingController:
 
                 if state is ScreenState.CITY:
                     self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
-                    self._press_and_wait(
+                    pending_screen = self._press_and_wait(
                         screenshot,
                         screen,
                         _NAVIGATION_TEMPLATES / "city_map_button.png",
@@ -429,7 +435,7 @@ class FarmingController:
 
                 if state is ScreenState.WORLD_MAP:
                     self._transition(FarmState.OPEN_SEARCH, "Opening resource search")
-                    self._press_and_wait(
+                    pending_screen = self._press_and_wait(
                         screenshot,
                         screen,
                         _NAVIGATION_TEMPLATES / "world_search_button.png",
@@ -448,25 +454,31 @@ class FarmingController:
                         f"Army {army_number}/5: selecting "
                         f"{target.resource.value} Lv{target.level}",
                     )
-                    if self._selected_resource is not target.resource:
+                    switched_resource = self._selected_resource is not target.resource
+                    if switched_resource:
                         self._click_template(
                             _RESOURCE_BUTTONS[target.resource],
                             expected_state=ScreenState.RESOURCE_SEARCH,
                             confidence_threshold=0.62,
+                            initial_screenshot=screenshot,
                         )
                         self._selected_resource = target.resource
-                    self._set_search_level(target.level)
+                        screenshot = None
+                    screenshot = self._set_search_level(
+                        target.level,
+                        initial_screenshot=screenshot,
+                    )
 
                     self._transition(
                         FarmState.SEARCH_RESOURCE,
                         f"Searching {target.resource.value} Lv{target.level}",
                     )
-                    # Let the search panel finish applying a newly selected
-                    # level before submitting the search.
-                    self.game.wait(_SEARCH_SUBMIT_DELAY)
+                    if screenshot is None:
+                        self.game.wait(_SEARCH_SUBMIT_DELAY)
                     before_search_path = self._click_template(
                         _SEARCH_TEMPLATES / "submit_button.png",
                         expected_state=ScreenState.RESOURCE_SEARCH,
+                        initial_screenshot=screenshot,
                     )
                     before_search = load_color_frame(before_search_path)
                     if before_search is None:
@@ -551,7 +563,7 @@ class FarmingController:
                         target_index += 1
                         self._transition(FarmState.OPEN_SEARCH, "Opening resource search")
                         fresh_path = self.game.screenshot()
-                        self._press_and_wait(
+                        pending_screen = self._press_and_wait(
                             fresh_path,
                             result,
                             _NAVIGATION_TEMPLATES / "world_search_button.png",
@@ -583,10 +595,12 @@ class FarmingController:
                 raise FarmingError(f"No farming step for screen {state.value}")
             except FarmingError as error:
                 pending_result = None
+                pending_screen = None
                 recoveries += 1
                 last_error = str(error)
                 # The resource choice may or may not have been applied.
                 self._selected_resource = None
+                self._resource_levels.clear()
                 self._log(
                     f"Step failed ({error}); checking which screen is showing "
                     f"and continuing from there ({recoveries}/{_MAX_RECOVERY_ATTEMPTS})"
@@ -646,7 +660,7 @@ class FarmingController:
         *,
         confidence_threshold: float,
         change_timeout: float = _STEP_CHANGE_TIMEOUT,
-    ) -> None:
+    ) -> tuple[Path, ScreenDetection] | None:
         """Click a navigation button and wait until the screen moves on."""
 
         if screenshot is None:
@@ -671,24 +685,63 @@ class FarmingController:
             if template_path.name == "city_map_button.png"
             else None
         )
-        self._wait_for_dispatch_change(
+        changed = self._wait_for_dispatch_change(
             screen.state,
             screen.bounds,
             timeout=change_timeout,
             expected_states=next_expected,
         )
+        if changed is not None:
+            next_screenshot, next_detection, ambiguous = changed
+            if not ambiguous and next_detection.confidence >= 0.80:
+                return next_screenshot, next_detection
+        return None
 
-    def _set_search_level(self, desired_level: int) -> None:
+    def _set_search_level(
+        self,
+        desired_level: int,
+        *,
+        initial_screenshot: Path | None = None,
+    ) -> Path | None:
         if desired_level not in RESOURCE_LEVELS:
             raise FarmingError(f"Unsupported resource level: {desired_level}")
 
+        resource = self._selected_resource
+        cached_level = (
+            self._resource_levels.get(resource)
+            if resource is not None
+            else None
+        )
+        if cached_level == desired_level:
+            return initial_screenshot
+
+        if cached_level is not None and resource is not None:
+            direction = "plus" if cached_level < desired_level else "minus"
+            click_count = abs(desired_level - cached_level)
+            self._log(f"Changing search level {cached_level} → {desired_level}")
+            self._click_template(
+                _SEARCH_TEMPLATES / f"level_{direction}.png",
+                expected_state=ScreenState.RESOURCE_SEARCH,
+                confidence_threshold=0.60,
+                repeat=click_count,
+                initial_screenshot=initial_screenshot,
+            )
+            self._resource_levels[resource] = desired_level
+            return None
+
+        screenshot_hint = initial_screenshot
         for _attempt in range(_MAX_ACTION_ATTEMPTS):
-            _screenshot, detection = self._wait_for_search_menu_level()
+            screenshot, detection = self._wait_for_search_menu_level(
+                initial_screenshot=screenshot_hint
+            )
+            screenshot_hint = None
             current_level = detection.resource_level
             if current_level is None:
                 raise FarmingError("Could not read the level shown in the search menu")
+            if resource is not None:
+                self._resource_levels[resource] = current_level
             if current_level == desired_level:
-                return
+                return screenshot
 
             direction = "plus" if current_level < desired_level else "minus"
             click_count = abs(desired_level - current_level)
@@ -698,33 +751,49 @@ class FarmingController:
                 expected_state=ScreenState.RESOURCE_SEARCH,
                 confidence_threshold=0.60,
                 repeat=click_count,
+                initial_screenshot=screenshot,
             )
             self.game.wait(_LEVEL_SETTLE_DELAY)
 
             # Check up to 5 times with a small delay so the slider/label update
             # is detected before deciding another click is needed.
             for _verify in range(_MAX_ACTION_ATTEMPTS):
-                _screenshot, verify_detection = self._wait_for_search_menu_level()
+                verify_screenshot, verify_detection = self._wait_for_search_menu_level()
+                if verify_detection.resource_level is not None and resource is not None:
+                    self._resource_levels[resource] = verify_detection.resource_level
                 if verify_detection.resource_level == desired_level:
-                    return
+                    return verify_screenshot
                 self.game.wait(_ACTION_RETRY_DELAY)
 
-        _screenshot, final_detection = self._wait_for_search_menu_level()
+        final_screenshot, final_detection = self._wait_for_search_menu_level()
         if final_detection.resource_level != desired_level:
             raise FarmingError(
                 f"Could not set search level {desired_level}; "
                 f"menu shows {final_detection.resource_level}"
             )
+        if resource is not None:
+            self._resource_levels[resource] = desired_level
+        return final_screenshot
 
-    def _wait_for_search_menu_level(self) -> tuple[Path, ScreenDetection]:
+    def _wait_for_search_menu_level(
+        self,
+        *,
+        initial_screenshot: Path | None = None,
+    ) -> tuple[Path, ScreenDetection]:
         """Wait briefly for the resource menu to finish opening or updating."""
 
         deadline = time.monotonic() + _SEARCH_MENU_READY_TIMEOUT
         last_state = ScreenState.UNKNOWN
         attempts = 0
+        next_screenshot = initial_screenshot
         while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
             attempts += 1
-            screenshot = self.game.screenshot()
+            screenshot = (
+                next_screenshot
+                if next_screenshot is not None
+                else self.game.screenshot()
+            )
+            next_screenshot = None
             detection = self.detector.detect(
                 screenshot,
                 read_account=False,
@@ -1025,6 +1094,7 @@ class FarmingController:
         expected_state: ScreenState,
         confidence_threshold: float = 0.68,
         repeat: int = 1,
+        initial_screenshot: Path | None = None,
     ) -> Path:
         if repeat < 1:
             raise ValueError("repeat must be at least 1")
@@ -1034,9 +1104,15 @@ class FarmingController:
         deadline = time.monotonic() + _CONTROL_READY_TIMEOUT
         last_state = ScreenState.UNKNOWN
         attempts = 0
+        next_screenshot = initial_screenshot
         while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
             attempts += 1
-            screenshot = self.game.screenshot()
+            screenshot = (
+                next_screenshot
+                if next_screenshot is not None
+                else self.game.screenshot()
+            )
+            next_screenshot = None
             hit = self.detector.locate_template(
                 screenshot,
                 template_path,

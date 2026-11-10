@@ -611,10 +611,10 @@ class ScreenDetector:
             for character in decomposed
             if not unicodedata.category(character).startswith("M")
         ).replace("đ", "d")
-        # RapidOCR occasionally drops the small accented "á" and returns
-        # "Cp: 8"; accept that label variant while still requiring the C/p
-        # prefix next to the level digit.
-        return re.search(r"\bc(?:a)?p\s*[:：]?\s*([5-8])\b", folded)
+        # RapidOCR occasionally drops or misreads the small accented "ấ" in
+        # "Cấp: 8" as "Cp: 8" or "CEp.8"; accept those variants while still
+        # requiring the C/p prefix next to the level digit.
+        return re.search(r"\bc(?:[aei])?p\s*[:：.]?\s*([5-8])\b", folded)
 
     @staticmethod
     def _scaled_size(template: Any, scale: float) -> tuple[int, int]:
