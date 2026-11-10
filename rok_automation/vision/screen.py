@@ -642,33 +642,32 @@ class ScreenDetector:
             frame_key_shape=frame_key_shape,
         )
         cached_step = _SCALE_CACHE.get(cache_key)
+        checked_steps: set[int] = set()
         if cached_step is not None and scale_start <= cached_step <= scale_end:
-            # The emulator resolution is fixed during a run, so once a control
-            # has been matched confidently its on-screen scale is known. Only
-            # check that scale and its neighbours instead of all ~20 scales;
-            # a missing control then fails fast instead of taking ~0.4s.
             for scale_step in (cached_step, cached_step - 5, cached_step + 5):
                 if not scale_start <= scale_step <= scale_end:
                     continue
+                checked_steps.add(scale_step)
                 score, location = cls._match_at_scale(frame, template, scale_step)
                 if score > best_score:
                     best_score = score
                     best_match = (location[0], location[1], scale_step / 100.0)
                 if scale_step == cached_step and score >= 0.85:
                     break
-            if best_score >= 0.85:
+            if best_score >= 0.78:
                 _SCALE_CACHE[cache_key] = round(best_match[2] * 100)
-            return max(0.0, best_score), best_match
+                return max(0.0, best_score), best_match
 
         all_steps = range(scale_start, scale_end + 1, 5)
-        # Check scales closest to 1.0 first so standard-resolution hits
-        # short-circuit immediately without scanning all ~20 scales.
+        # Check scales closest to 1.0 (and 0.65/0.85 for popups) first.
         primary_steps = tuple(
-            step for step in (100, 95, 105, 90, 110)
-            if scale_start <= step <= scale_end
+            step for step in (100, 95, 105, 90, 110, 65, 85, 70, 60)
+            if scale_start <= step <= scale_end and step not in checked_steps
         )
         remaining_steps = tuple(
-            step for step in all_steps if step not in primary_steps
+            step
+            for step in all_steps
+            if step not in primary_steps and step not in checked_steps
         )
         for index, scale_step in enumerate((*primary_steps, *remaining_steps)):
             scale = scale_step / 100.0
