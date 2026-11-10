@@ -46,7 +46,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
 _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
-_SEARCH_SETTLE_SECONDS = 0.25
+_SEARCH_SETTLE_SECONDS = 0.85
 _SEARCH_SUBMIT_DELAY = 0.04
 _SEARCH_MENU_READY_TIMEOUT = 2.5
 _CONTROL_READY_TIMEOUT = 2.5
@@ -54,7 +54,7 @@ _LEVEL_REPEAT_PAUSE = 0.08
 _LEVEL_SETTLE_DELAY = 0.12
 _MAX_ACTION_ATTEMPTS = 5
 _ACTION_RETRY_DELAY = 0.20
-_UNCHANGED_SEARCH_FRAMES = 2
+_UNCHANGED_SEARCH_FRAMES = 3
 _RESOURCE_BUTTONS = {
     Resource.GOLD: _SEARCH_TEMPLATES / "resource_gold.png",
     Resource.STONE: _SEARCH_TEMPLATES / "resource_stone.png",
@@ -445,6 +445,22 @@ class FarmingController:
                     continue
 
                 if state is ScreenState.RESOURCE_SEARCH:
+                    # Guard: If gather_button (THU THẬP) is already visible on screen
+                    # (e.g. from an earlier search pan), handle it as RESOURCE_FOUND immediately.
+                    if screenshot is not None:
+                        gather_hit = self.detector.locate_template(
+                            screenshot,
+                            _GATHERING_TEMPLATES / "gather_button.png",
+                            confidence_threshold=0.75,
+                        )
+                        if gather_hit is not None:
+                            pending_result = self.detector.detect(
+                                screenshot,
+                                read_account=False,
+                                candidate_states={ScreenState.RESOURCE_FOUND},
+                            )
+                            continue
+
                     skip_unavailable_targets()
                     if target_index >= len(target_list):
                         return False
