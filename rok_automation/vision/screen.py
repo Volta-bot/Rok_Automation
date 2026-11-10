@@ -98,6 +98,8 @@ _TEMPLATES = (
     ),
 )
 _TEMPLATE_CACHE: dict[Path, Any] = {}
+# (frame size, template identity) -> scale step (percent) of a confident match.
+_SCALE_CACHE: dict[tuple[int, ...], int] = {}
 
 
 def _load_gray_template(path: Path) -> Any:
@@ -373,6 +375,26 @@ class ScreenDetector:
         best_match = (0, 0, 1.0)
         scale_start = round(minimum_scale * 100)
         scale_end = round(maximum_scale * 100)
+        cache_key = cls._scale_cache_key(frame, template)
+        cached_step = _SCALE_CACHE.get(cache_key)
+        if cached_step is not None and scale_start <= cached_step <= scale_end:
+            # The emulator resolution is fixed during a run, so once a control
+            # has been matched confidently its on-screen scale is known. Only
+            # check that scale and its neighbours instead of all ~20 scales;
+            # a missing control then fails fast instead of taking ~0.4s.
+            for scale_step in (cached_step, cached_step - 5, cached_step + 5):
+                if not scale_start <= scale_step <= scale_end:
+                    continue
+                score, location = cls._match_at_scale(frame, template, scale_step)
+                if score > best_score:
+                    best_score = score
+                    best_match = (location[0], location[1], scale_step / 100.0)
+                if scale_step == cached_step and score >= 0.90:
+                    break
+            if best_score >= 0.90:
+                _SCALE_CACHE[cache_key] = round(best_match[2] * 100)
+            return max(0.0, best_score), best_match
+
         all_steps = range(scale_start, scale_end + 1, 5)
         # Check scales closest to 1.0 first so standard-resolution hits
         # short-circuit immediately without scanning all ~20 scales.
@@ -390,21 +412,48 @@ class ScreenDetector:
             if width > frame.shape[1] or height > frame.shape[0]:
                 continue
 
-            resized = (
-                template
-                if scale_step == 100
-                else cv2.resize(
-                    template,
-                    (width, height),
-                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
-                )
-            )
-            result = cv2.matchTemplate(frame, resized, cv2.TM_CCOEFF_NORMED)
-            _min_score, max_score, _min_location, max_location = cv2.minMaxLoc(result)
+            max_score, max_location = cls._match_at_scale(frame, template, scale_step)
             if max_score > best_score:
                 best_score = max_score
                 best_match = (max_location[0], max_location[1], scale)
             if index + 1 == len(primary_steps) and best_score >= 0.90:
                 break
 
+        if best_score >= 0.90:
+            _SCALE_CACHE[cache_key] = round(best_match[2] * 100)
         return max(0.0, best_score), best_match
+
+    @staticmethod
+    def _scale_cache_key(frame: Any, template: Any) -> tuple[int, ...]:
+        sample = template[:: max(1, template.shape[0] // 16), :: max(1, template.shape[1] // 16)]
+        return (
+            frame.shape[0],
+            frame.shape[1],
+            template.shape[0],
+            template.shape[1],
+            int(sample.sum()),
+        )
+
+    @staticmethod
+    def _match_at_scale(
+        frame: Any,
+        template: Any,
+        scale_step: int,
+    ) -> tuple[float, tuple[int, int]]:
+        scale = scale_step / 100.0
+        width = max(1, round(template.shape[1] * scale))
+        height = max(1, round(template.shape[0] * scale))
+        if width > frame.shape[1] or height > frame.shape[0]:
+            return -1.0, (0, 0)
+        resized = (
+            template
+            if scale_step == 100
+            else cv2.resize(
+                template,
+                (width, height),
+                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+            )
+        )
+        result = cv2.matchTemplate(frame, resized, cv2.TM_CCOEFF_NORMED)
+        _min_score, max_score, _min_location, max_location = cv2.minMaxLoc(result)
+        return float(max_score), (int(max_location[0]), int(max_location[1]))

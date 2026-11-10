@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import random
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import cv2
 
@@ -26,6 +27,7 @@ from rok_automation.logic.resource_selector import (
     resource_for_account,
     search_plan,
 )
+from rok_automation.vision.account_label import read_text_region
 from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState
 
 
@@ -52,6 +54,35 @@ _RESOURCE_BUTTONS = {
     Resource.FOOD: _SEARCH_TEMPLATES / "resource_food.png",
     Resource.WOOD: _SEARCH_TEMPLATES / "resource_wood.png",
 }
+# Gather flow: each screen is recognised by its button, and the button that
+# belongs to the recognised screen is the one pressed next.
+_DISPATCH_BUTTONS = {
+    ScreenState.RESOURCE_FOUND: "gather_button",
+    ScreenState.NEW_TROOPS_PROMPT: "new_troops_button",
+    ScreenState.TROOP_COMPOSITION: "march_button",
+    ScreenState.RESOURCE_SEARCH: "submit_button",
+}
+_DISPATCH_TEMPLATE_DIRS = {
+    ScreenState.RESOURCE_FOUND: _GATHERING_TEMPLATES,
+    ScreenState.NEW_TROOPS_PROMPT: _GATHERING_TEMPLATES,
+    ScreenState.TROOP_COMPOSITION: _GATHERING_TEMPLATES,
+    ScreenState.RESOURCE_SEARCH: _SEARCH_TEMPLATES,
+}
+# Diacritic-free, space-free OCR labels of each button.
+_DISPATCH_BUTTON_TEXT = {
+    ScreenState.RESOURCE_FOUND: ("thuthap",),
+    ScreenState.NEW_TROOPS_PROMPT: ("quanmoi",),
+    ScreenState.TROOP_COMPOSITION: ("hanhquan",),
+    ScreenState.RESOURCE_SEARCH: ("timkiem",),
+}
+_DISPATCH_BUTTON_CONFIDENCE = 0.78
+# "Quân mới" scores ~0.86 on the "Thu thập" button (vs ~0.94 for the real
+# template), so scores closer than this are confirmed with OCR.
+_DISPATCH_AMBIGUITY_MARGIN = 0.12
+_DISPATCH_TIMEOUT = 20.0
+_STEP_CHANGE_TIMEOUT = 2.5
+_FALLBACK_CONFIRM_SECONDS = 1.0
+_MAX_DISPATCH_RETRIES = 3
 
 
 class FarmingController:
@@ -244,12 +275,16 @@ class FarmingController:
             total_army_number = self.context.starting_armies_out + army_number
             self._open_search_if_needed()
             dispatched = False
-            targets: Iterable[SearchTarget] = search_plan(
+            target_list: list[SearchTarget] = list(search_plan(
                 self.context.preferred_resource,
                 rng=self.rng,
-            )
+            ))
+            dispatch_failures = 0
+            target_index = 0
 
-            for target in targets:
+            while target_index < len(target_list):
+                target = target_list[target_index]
+                target_index += 1
                 if target.level > highest_candidate_level[target.resource]:
                     continue
 
@@ -284,7 +319,7 @@ class FarmingController:
                 )
                 if before_search is None:
                     raise FarmingError("Could not read the pre-search screenshot")
-                result_path, result = self._wait_for_search_result(before_search)
+                _result_path, result = self._wait_for_search_result(before_search)
                 self._transition(FarmState.PROCESS_RESULT)
 
                 if result.state is ScreenState.NO_RESULT:
@@ -352,12 +387,19 @@ class FarmingController:
                     self._open_search_if_needed()
                     continue
 
-                self._dispatch_army(
-                    target,
-                    total_army_number,
-                    result_path=result_path,
-                    result_detection=result,
-                )
+                if not self._dispatch_army(target, total_army_number):
+                    # A click missed and the game fell back to the world map
+                    # (or search menu) before marching: search again for the
+                    # same target instead of stopping.
+                    dispatch_failures += 1
+                    if dispatch_failures > _MAX_DISPATCH_RETRIES:
+                        raise FarmingError(
+                            f"Gather flow failed {dispatch_failures} times for "
+                            f"army {total_army_number}/5; stopping safely"
+                        )
+                    self._open_search_if_needed()
+                    target_index -= 1
+                    continue
                 if coordinates is not None:
                     seen_resource_coordinates.add(coordinates)
                 dispatched = True
@@ -498,45 +540,206 @@ class FarmingController:
         self,
         target: SearchTarget,
         army_number: int,
-        *,
-        result_path: Path | None = None,
-        result_detection: ScreenDetection | None = None,
-    ) -> None:
+    ) -> bool:
+        """Drive Thu thập → Quân mới → Hành quân by re-reading the screen.
+
+        Every step identifies the current screen from a fresh, stable capture
+        and presses the button that belongs to *that* screen, then waits for
+        the screen to actually change. Returns ``True`` once Hành quân was
+        pressed and the world map is back. Returns ``False`` when the flow
+        fell back to the world map or search menu before marching (e.g. a
+        missed click closed the panel) so the caller can search again.
+        """
+
         self._transition(
             FarmState.SEND_TROOPS,
             f"Found {target.resource.value} Lv{target.level}; opening gather",
         )
-        if (
-            result_path is not None
-            and result_detection is not None
-            and result_detection.state is ScreenState.RESOURCE_FOUND
-            and result_detection.bounds is not None
-        ):
-            self._log("Clicking gather_button (already verified)")
-            self.game.click(result_detection.bounds, result_path)
-        else:
-            self._click_template(
-                _GATHERING_TEMPLATES / "gather_button.png",
-                expected_state=ScreenState.RESOURCE_FOUND,
+        deadline = time.monotonic() + _DISPATCH_TIMEOUT
+        clicks = {state: 0 for state in _DISPATCH_BUTTONS}
+        marched = False
+        previous: ScreenDetection | None = None
+        fallback_since: float | None = None
+        last_state = ScreenState.UNKNOWN
+
+        while time.monotonic() < deadline:
+            screenshot = self.game.screenshot()
+            detection, ambiguous = self._classify_dispatch_screen(screenshot)
+            last_state = detection.state
+            stable = (
+                previous is not None
+                and previous.state is detection.state
+                and self._bounds_close(previous.bounds, detection.bounds)
             )
-        self._wait_for_states({ScreenState.NEW_TROOPS_PROMPT})
+            previous = detection
 
-        self._click_template(
-            _GATHERING_TEMPLATES / "new_troops_button.png",
-            expected_state=ScreenState.NEW_TROOPS_PROMPT,
-        )
-        self._wait_for_states({ScreenState.TROOP_COMPOSITION})
+            if not stable or detection.state is ScreenState.UNKNOWN:
+                # Only act on a screen that looks the same in two captures in
+                # a row, so a panel that is still animating is never clicked.
+                if detection.state is ScreenState.UNKNOWN:
+                    fallback_since = None
+                self.game.wait(self.game.timing.poll_interval)
+                continue
 
-        self._transition(FarmState.VERIFY_GATHERING, "Checking the march screen")
-        self._click_template(
-            _GATHERING_TEMPLATES / "march_button.png",
-            expected_state=ScreenState.TROOP_COMPOSITION,
+            state = detection.state
+            if ambiguous:
+                # Thu thập, Quân mới and Tìm kiếm are the same blue button, so
+                # confirm the label with OCR before trusting the template.
+                ocr_state = self._read_button_state(screenshot, detection.bounds)
+                if ocr_state is None:
+                    previous = None
+                    self.game.wait(_ACTION_RETRY_DELAY)
+                    continue
+                state = ocr_state
+
+            if state in {ScreenState.WORLD_MAP, ScreenState.RESOURCE_SEARCH}:
+                if marched and state is ScreenState.WORLD_MAP:
+                    self.context.armies_dispatched += 1
+                    self._log(
+                        f"Army {army_number}/5 dispatched to "
+                        f"{target.resource.value} Lv{target.level}"
+                    )
+                    return True
+                if not marched:
+                    # Panels animate in and out, so only conclude that the
+                    # gather flow was lost after the fallback screen persists.
+                    if fallback_since is None:
+                        fallback_since = time.monotonic()
+                    elif time.monotonic() - fallback_since >= _FALLBACK_CONFIRM_SECONDS:
+                        expected = (
+                            "Quân mới / Hành quân"
+                            if any(clicks.values())
+                            else "Thu thập"
+                        )
+                        self._log(
+                            f"Gather flow failed: expected the {expected} screen "
+                            f"but landed on {state.value}; searching for another node"
+                        )
+                        return False
+                self.game.wait(self.game.timing.poll_interval)
+                continue
+            fallback_since = None
+
+            clicks[state] += 1
+            template_name = _DISPATCH_BUTTONS[state]
+            if clicks[state] > _MAX_ACTION_ATTEMPTS:
+                raise FarmingError(
+                    f"{template_name} did not respond after "
+                    f"{_MAX_ACTION_ATTEMPTS} clicks"
+                )
+            if state is ScreenState.TROOP_COMPOSITION and not marched:
+                self._transition(FarmState.VERIFY_GATHERING, "Checking the march screen")
+            retry_note = f" (retry {clicks[state] - 1})" if clicks[state] > 1 else ""
+            self._log(
+                f"Clicking {template_name} (match={detection.confidence:.3f})"
+                f"{retry_note}"
+            )
+            self.game.click(detection.bounds, screenshot)
+            if state is ScreenState.TROOP_COMPOSITION:
+                marched = True
+            self._wait_for_dispatch_change(detection.state, detection.bounds)
+            previous = None
+
+        raise FarmingError(
+            f"Timed out sending troops to {target.resource.value} "
+            f"Lv{target.level}; last detected screen was {last_state.value}"
         )
-        self._wait_for_states({ScreenState.WORLD_MAP})
-        self.context.armies_dispatched += 1
-        self._log(
-            f"Army {army_number}/5 dispatched to "
-            f"{target.resource.value} Lv{target.level}"
+
+    def _classify_dispatch_screen(
+        self,
+        screenshot: Path,
+    ) -> tuple[ScreenDetection, bool]:
+        """Identify which gather-flow screen is showing.
+
+        Overlay buttons win over the world-map HUD (which stays visible behind
+        the panels). Returns the detection and whether the best button was
+        close enough to another button's score to need OCR confirmation.
+        """
+
+        hits: list[tuple[float, ScreenState, Any]] = []
+        for state, template_name in _DISPATCH_BUTTONS.items():
+            hit = self.detector.locate_template(
+                screenshot,
+                _DISPATCH_TEMPLATE_DIRS[state] / f"{template_name}.png",
+                confidence_threshold=0.0,
+            )
+            if hit is not None:
+                hits.append((hit.confidence, state, hit))
+        hits.sort(key=lambda item: item[0], reverse=True)
+        if hits and hits[0][0] >= _DISPATCH_BUTTON_CONFIDENCE:
+            score, state, hit = hits[0]
+            runner_up = hits[1] if len(hits) > 1 else None
+            ambiguous = (
+                runner_up is not None
+                and score - runner_up[0] < _DISPATCH_AMBIGUITY_MARGIN
+            )
+            return ScreenDetection(state, score, _DISPATCH_BUTTONS[state], hit.bounds), ambiguous
+
+        world = self.detector.detect(
+            screenshot,
+            read_account=False,
+            candidate_states={ScreenState.WORLD_MAP},
+        )
+        if world.state is ScreenState.WORLD_MAP:
+            return world, False
+        best_score = hits[0][0] if hits else 0.0
+        return ScreenDetection(ScreenState.UNKNOWN, best_score, "no gather-flow button"), False
+
+    def _read_button_state(
+        self,
+        screenshot: Path,
+        bounds: tuple[int, int, int, int] | None,
+    ) -> ScreenState | None:
+        """OCR a blue button's label to tell Thu thập / Quân mới / Tìm kiếm apart."""
+
+        if bounds is None:
+            return None
+        frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        decomposed = unicodedata.normalize(
+            "NFD", " ".join(read_text_region(frame, bounds, upscale=1.5)).casefold()
+        )
+        folded = "".join(
+            character
+            for character in decomposed
+            if not unicodedata.category(character).startswith("M")
+            and not character.isspace()
+        ).replace("đ", "d")
+        for state, keywords in _DISPATCH_BUTTON_TEXT.items():
+            if any(keyword in folded for keyword in keywords):
+                return state
+        return None
+
+    def _wait_for_dispatch_change(
+        self,
+        clicked_state: ScreenState,
+        clicked_bounds: tuple[int, int, int, int] | None,
+    ) -> None:
+        """Wait until the clicked button is gone so stale frames aren't reused."""
+
+        self.game.wait(_ACTION_RETRY_DELAY)
+        deadline = time.monotonic() + _STEP_CHANGE_TIMEOUT
+        while time.monotonic() < deadline:
+            screenshot = self.game.screenshot()
+            detection, _ambiguous = self._classify_dispatch_screen(screenshot)
+            if detection.state is not clicked_state or not self._bounds_close(
+                detection.bounds, clicked_bounds
+            ):
+                return
+            self.game.wait(self.game.timing.poll_interval)
+
+    @staticmethod
+    def _bounds_close(
+        first: tuple[int, int, int, int] | None,
+        second: tuple[int, int, int, int] | None,
+        tolerance: int = 12,
+    ) -> bool:
+        if first is None or second is None:
+            return first is second
+        return (
+            abs((first[0] + first[2] / 2) - (second[0] + second[2] / 2)) <= tolerance
+            and abs((first[1] + first[3] / 2) - (second[1] + second[3] / 2)) <= tolerance
         )
 
     def _click_template(
