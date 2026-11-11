@@ -39,9 +39,7 @@ class TestROKAutomationApp(unittest.TestCase):
 
         # Planned options should default to False
         self.assertFalse(self.app.opt_daily_reward.get())
-        self.assertFalse(self.app.opt_vip_chest.get())
         self.assertFalse(self.app.opt_alliance.get())
-        self.assertFalse(self.app.opt_tavern.get())
         self.assertFalse(self.app.opt_train_troops.get())
 
         self.assertFalse(self.app._is_running)
@@ -84,9 +82,9 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertIn("Collect Daily Rewards set to ENABLED", content)
 
         # Trigger planned action test button
-        self.app.trigger_planned_feature_test("Collect VIP Chest")
+        self.app.trigger_planned_feature_test("Collect Daily Rewards (incl. Daily VIP Chest)")
         content2 = self.app.txt_console.get("1.0", tk.END)
-        self.assertIn("Collect VIP Chest", content2)
+        self.assertIn("Collect Daily Rewards", content2)
         self.assertIn("planned", content2.lower())
 
     def test_copy_console_log(self) -> None:

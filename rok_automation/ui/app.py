@@ -89,9 +89,7 @@ class ROKAutomationApp:
 
         # Temporary / Planned options (not yet implemented)
         self.opt_daily_reward = tk.BooleanVar(value=False)
-        self.opt_vip_chest = tk.BooleanVar(value=False)
         self.opt_alliance = tk.BooleanVar(value=False)
-        self.opt_tavern = tk.BooleanVar(value=False)
         self.opt_train_troops = tk.BooleanVar(value=False)
 
         # Console controls
@@ -484,22 +482,12 @@ class ROKAutomationApp:
             (
                 "Collect Daily Rewards",
                 self.opt_daily_reward,
-                "Claim daily VIP points, login gifts, and daily quest chests",
-            ),
-            (
-                "Collect VIP Free Chest",
-                self.opt_vip_chest,
-                "Claim free daily VIP chest & exclusive governor points",
+                "Claim daily login gifts, quest rewards, and daily VIP points & free chest",
             ),
             (
                 "Alliance Help & Tech",
                 self.opt_alliance,
                 "Auto-click alliance help hand and donate to recommended technology",
-            ),
-            (
-                "Tavern Free Chests",
-                self.opt_tavern,
-                "Open available free Silver and Gold recruitment chests in Tavern",
             ),
             (
                 "Auto Train Troops",
@@ -550,8 +538,7 @@ class ROKAutomationApp:
         quick_actions_box.pack(fill=tk.X)
 
         test_buttons = [
-            ("🎁 Daily Reward", "Collect Daily Reward"),
-            ("⭐ VIP Chest", "Collect VIP Chest"),
+            ("🎁 Daily Rewards", "Collect Daily Rewards (incl. Daily VIP Chest)"),
             ("🤝 Alliance Help", "Alliance Help"),
             ("⚔️ Train Troops", "Auto Train Troops"),
         ]
@@ -830,13 +817,9 @@ class ROKAutomationApp:
         # Check planned options and notify user in log
         planned_enabled = []
         if self.opt_daily_reward.get():
-            planned_enabled.append("Collect Daily Rewards")
-        if self.opt_vip_chest.get():
-            planned_enabled.append("Collect VIP Chest")
+            planned_enabled.append("Collect Daily Rewards (incl. VIP Chest)")
         if self.opt_alliance.get():
             planned_enabled.append("Alliance Help & Tech")
-        if self.opt_tavern.get():
-            planned_enabled.append("Tavern Free Chests")
         if self.opt_train_troops.get():
             planned_enabled.append("Auto Train Troops")
 

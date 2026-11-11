@@ -152,7 +152,7 @@ python -m rok_automation --gui
 The graphical user interface features:
 - **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`).
 - **Core Automation Options:** Easily toggle automatic resource farming, multi-Gmail switching, and rotation resetting.
-- **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards*, *Collect VIP Chest*, *Alliance Help & Tech*, *Tavern Free Chests*, and *Auto Train Troops*.
+- **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards* (claims daily gifts, quest chests, and VIP points & free chest), *Alliance Help & Tech*, and *Auto Train Troops*.
 - **Integrated Live Output Console:** Monospace console stream underneath with real-time log coloring, auto-scroll, log copying, and clearing.
 - **Diagnostic Quick Tools:** Instant one-click buttons for LDPlayer screen capture, screen classification, and window hierarchy diagnostics.
 
