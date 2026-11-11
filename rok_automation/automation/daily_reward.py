@@ -828,23 +828,23 @@ class DailyRewardClaimer:
         # First press: closes Chinh phạt -> returns to Chiến dịch
         self._log("Pressing Back button (1/2) to exit Chinh phạt...")
         self.game.click(back_bounds, screenshot)
-        self.game.wait(0.4)
+        self.game.wait(0.8)
 
         # Second press at the same position: closes Chiến dịch -> returns to City
         self._log("Pressing Back button (2/2) to exit Chiến dịch...")
         self.game.click(back_bounds, self.game.screenshot())
-        self.game.wait(0.6)
+        self.game.wait(1.0)
 
         # Verify return to City
         returned = self._wait_for_condition(
             condition=lambda f: self.detector.detect(self.game.screenshot()).state is ScreenState.CITY,
-            timeout=3.0,
+            timeout=4.0,
             retry_action=lambda: self.game.click(back_bounds, self.game.screenshot()),
         )
         if returned:
             self._log("Successfully returned to City view.")
         else:
-            self._log("Back to City transition completed.")
+            self._log("Warning: Could not confirm City view after closing campaign menus.")
 
     def _locate_back_button(
         self,

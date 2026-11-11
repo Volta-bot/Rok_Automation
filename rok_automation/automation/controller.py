@@ -332,11 +332,29 @@ class FarmingController:
                 log=self._log,
             )
             claimer.claim_all()
+            # Allow extra time for UI animations to settle after closing
+            # campaign menus and returning to City view.
+            self.game.wait(1.5)
             screenshot, detection = self._read_screen()
-            for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
+            # Menu close animations after daily rewards may take longer
+            # than a normal screen transition, so allow up to 8 retries
+            # (~1.6 s extra beyond the initial 1.5 s wait).
+            for _attempt in range(8):
                 if detection.state is not ScreenState.UNKNOWN:
                     break
                 self.game.wait(_ACTION_RETRY_DELAY)
+                screenshot, detection = self._read_screen()
+            # Daily rewards end at City view.  If the screen is still
+            # unrecognised (residual animation / expanded bottom menu),
+            # explicitly recover to City so the next block can navigate
+            # to the World Map.
+            if detection.state is ScreenState.UNKNOWN:
+                self._log(
+                    "Screen unrecognised after daily rewards; "
+                    "recovering to City view..."
+                )
+                claimer.ensure_city_view()
+                self.game.wait(1.0)
                 screenshot, detection = self._read_screen()
 
         if detection.state is ScreenState.CITY:
