@@ -33,6 +33,32 @@ from rok_automation.logic.resource_selector import (
 )
 
 
+def hide_console_window() -> None:
+    """Hide the Windows console window if one is attached to this process."""
+    if os.environ.get("ROK_SHOW_CONSOLE") == "1":
+        return
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                # SW_HIDE = 0
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+        except Exception:
+            pass
+
+
+def _get_python_cli_executable() -> str:
+    """Return path to python.exe (rather than pythonw.exe) for worker subprocesses."""
+    exe = sys.executable
+    if exe.lower().endswith("pythonw.exe"):
+        candidate = exe[:-9] + "python.exe"
+        if os.path.isfile(candidate):
+            return candidate
+    return exe
+
+
 class ModernColors:
     """Dark palette theme colors for the UI."""
 
@@ -68,8 +94,14 @@ class ModernColors:
 class ROKAutomationApp:
     """Main Application Window for ROKauto."""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
+    ) -> None:
+        hide_console_window()
         self.root = root
+        self.session_summary_path = session_summary_path
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         self.root.geometry("880x720")
         self.root.minsize(760, 560)
@@ -803,6 +835,11 @@ class ROKAutomationApp:
 
         self._session_targets.clear()
         self.lbl_session_farmed.config(text="")
+        if self.session_summary_path and self.session_summary_path.is_file():
+            try:
+                self.session_summary_path.unlink()
+            except OSError:
+                pass
 
         # Check options
         if not self.opt_farm.get():
@@ -830,7 +867,7 @@ class ROKAutomationApp:
                 tag="planned",
             )
 
-        cmd = [sys.executable, "-u", "-m", "rok_automation"]
+        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
         if self.opt_farm.get():
             cmd.append("--farm")
         if not self.opt_switch_gmail.get():
@@ -853,7 +890,7 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [sys.executable, "-u", "-m", "rok_automation", "--screenshot"]
+        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--screenshot"]
         self.log_info("Executing screenshot test...")
         self._launch_utility_command(cmd)
 
@@ -862,7 +899,7 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [sys.executable, "-u", "-m", "rok_automation", "--detect-screen"]
+        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--detect-screen"]
         self.log_info("Executing screen detection diagnostic...")
         self._launch_utility_command(cmd)
 
@@ -871,7 +908,7 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [sys.executable, "-u", "-m", "rok_automation", "--diagnose-window"]
+        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--diagnose-window"]
         self.log_info("Diagnosing LDPlayer window structure...")
         self._launch_utility_command(cmd)
 
@@ -1009,10 +1046,10 @@ class ROKAutomationApp:
         targets = list(self._session_targets)
 
         # Check if disk session_summary.json has recorded targets
-        if DEFAULT_SESSION_SUMMARY_PATH.is_file():
+        if self.session_summary_path and self.session_summary_path.is_file():
             try:
                 data = json.loads(
-                    DEFAULT_SESSION_SUMMARY_PATH.read_text(encoding="utf-8")
+                    self.session_summary_path.read_text(encoding="utf-8")
                 )
                 disk_targets = [
                     SearchTarget(resource=Resource(t["resource"]), level=t["level"])
@@ -1109,8 +1146,10 @@ class ROKAutomationApp:
             self.root.destroy()
 
 
-def launch_gui() -> int:
+def launch_gui(hide_console: bool = True) -> int:
     """Entry point to launch the graphical user interface."""
+    if hide_console:
+        hide_console_window()
     root = tk.Tk()
     app = ROKAutomationApp(root)
     root.mainloop()

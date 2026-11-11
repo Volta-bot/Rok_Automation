@@ -81,11 +81,16 @@ def main() -> int:
         action="store_true",
         help="launch the graphical user interface (ROKauto Control Center)",
     )
+    parser.add_argument(
+        "--show-console",
+        action="store_true",
+        help="keep the terminal console visible when launching GUI",
+    )
     args = parser.parse_args()
 
     if args.gui:
         from rok_automation.ui.app import launch_gui
-        return launch_gui()
+        return launch_gui(hide_console=not args.show_console)
 
     window = find_ldplayer_window()
     if window is None:

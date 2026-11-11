@@ -28,8 +28,13 @@ if /i "%CHOICE%"=="y" goto run_cli
 
 :run_gui
 echo Starting Graphical User Interface...
-python -m rok_automation --gui
-goto menu
+where pythonw >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    start "" pythonw -m rok_automation --gui
+) else (
+    start "" python -m rok_automation --gui
+)
+exit /b 0
 
 :run_cli
 echo Starting Rise of Kingdoms Farming Automation...

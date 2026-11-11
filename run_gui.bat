@@ -1,10 +1,14 @@
 @echo off
 setlocal
-chcp 65001 >nul
+cd /d "%~dp0"
+
 set PYTHONUTF8=1
 set PYTHONUNBUFFERED=1
 
-cd /d "%~dp0"
-
-echo Starting ROKauto GUI...
-python -m rok_automation --gui %*
+where pythonw >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    start "" pythonw -m rok_automation --gui %*
+) else (
+    start "" python -m rok_automation --gui %*
+)
+exit

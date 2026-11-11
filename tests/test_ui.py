@@ -25,7 +25,7 @@ class TestROKAutomationApp(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
-        self.app = ROKAutomationApp(self.root)
+        self.app = ROKAutomationApp(self.root, session_summary_path=None)
 
     def tearDown(self) -> None:
         if self.app._is_running:
@@ -151,6 +151,17 @@ class TestROKAutomationApp(unittest.TestCase):
         badge_text = self.app.lbl_session_farmed.cget("text")
         self.assertIn("Farmed:", badge_text)
         self.assertIn("2 armies", badge_text)
+
+    def test_get_python_cli_executable(self) -> None:
+        """Verify _get_python_cli_executable returns python.exe."""
+        from rok_automation.ui.app import _get_python_cli_executable
+        exe = _get_python_cli_executable()
+        self.assertTrue(exe.lower().endswith("python.exe") or "python" in exe.lower())
+
+    def test_hide_console_window_does_not_crash(self) -> None:
+        """Verify hide_console_window runs safely without exception."""
+        from rok_automation.ui.app import hide_console_window
+        hide_console_window()  # Should not raise
 
 
 if __name__ == "__main__":

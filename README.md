@@ -90,7 +90,8 @@ ROKauto/
 │       └── green_route.py          # HSV + morphological detector for incoming green march routes
 ├── templates/                      # UI reference templates (navigation, search, gathering, profile)
 ├── run.bat                         # Interactive Windows CLI launcher
-├── run_gui.bat                     # One-click Graphical User Interface launcher
+├── run_gui.bat                     # One-click Graphical User Interface launcher (auto-closes console)
+├── run_gui.vbs                     # Completely silent GUI launcher (no console window)
 └── pyproject.toml                  # Package metadata and dependencies
 ```
 
@@ -140,14 +141,11 @@ cd Rok_Automation
 python -m pip install -e .
 ```
 
-### Graphical User Interface (`run_gui.bat`)
-Launch the ROKauto Control Center GUI by double-clicking `run_gui.bat` or via terminal:
-
-```powershell
-.\run_gui.bat
-# or
-python -m rok_automation --gui
-```
+### Graphical User Interface (`run_gui.vbs` / `run_gui.bat`)
+Launch the ROKauto Control Center GUI cleanly without any background command prompt window:
+- **`run_gui.vbs` (Recommended):** Completely silent launch with zero console window.
+- **`run_gui.bat`:** Standard launcher that launches detached `pythonw` and closes its command prompt automatically.
+- **CLI / Terminal:** `python -m rok_automation --gui` (automatically hides attached console; pass `--show-console` to keep it).
 
 The graphical user interface features:
 - **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`).
