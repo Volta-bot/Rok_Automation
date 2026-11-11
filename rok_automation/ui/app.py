@@ -7,8 +7,10 @@ output in an integrated console.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -20,7 +22,15 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Any
 
+from rok_automation.automation.controller import DEFAULT_SESSION_SUMMARY_PATH
 from rok_automation.game.ldplayer import find_ldplayer_window
+from rok_automation.logic.resource_selector import (
+    Resource,
+    SearchTarget,
+    calculate_farmed_resources,
+    format_resource_amount,
+    resource_node_yield,
+)
 
 
 class ModernColors:
@@ -70,6 +80,7 @@ class ROKAutomationApp:
         self._worker_thread: threading.Thread | None = None
         self._output_queue: queue.Queue[str | None] = queue.Queue()
         self._is_running = False
+        self._session_targets: list[SearchTarget] = []
 
         # Options state
         self.opt_farm = tk.BooleanVar(value=True)
@@ -267,6 +278,15 @@ class ROKAutomationApp:
             fg=ModernColors.TEXT_MUTED,
         )
         self.lbl_run_state.pack(side=tk.RIGHT)
+
+        self.lbl_session_farmed = tk.Label(
+            header_row,
+            text="",
+            font=("Segoe UI", 9, "bold"),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.ACCENT_GREEN,
+        )
+        self.lbl_session_farmed.pack(side=tk.RIGHT, padx=(0, 10))
 
         # Big Action Buttons Row (Start / Stop)
         btn_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
@@ -794,6 +814,9 @@ class ROKAutomationApp:
             self.log_warning("Automation is already running.")
             return
 
+        self._session_targets.clear()
+        self.lbl_session_farmed.config(text="")
+
         # Check options
         if not self.opt_farm.get():
             # If user unchecked farm, let them know or ask
@@ -938,17 +961,43 @@ class ROKAutomationApp:
                     self.check_emulator_connection()
                 else:
                     self.log(line)
+                    # Live tracking of dispatched resource armies
+                    match = re.search(
+                        r"Army\s+(\d+)/5\s+dispatched\s+to\s+(Food|Wood|Stone|Gold)\s+Lv(\d+)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if match:
+                        res_name = match.group(2).capitalize()
+                        lvl = int(match.group(3))
+                        try:
+                            target = SearchTarget(
+                                resource=Resource(res_name), level=lvl
+                            )
+                            self._session_targets.append(target)
+                            totals = calculate_farmed_resources(
+                                self._session_targets
+                            )
+                            grand_total = sum(totals.values())
+                            self.lbl_session_farmed.config(
+                                text=(
+                                    f"Farmed: {format_resource_amount(grand_total)} "
+                                    f"({len(self._session_targets)} armies)"
+                                )
+                            )
+                        except Exception:
+                            pass
         except queue.Empty:
             pass
 
         self.root.after(50, self._poll_output_queue)
 
     def stop_automation(self) -> None:
-        """Gracefully stop or terminate the running automation process."""
-        if not self._is_running or self._current_process is None:
+        """Gracefully stop or terminate the running automation process and display farmed resources."""
+        if not self._is_running and self._current_process is None:
             return
 
-        self.log_warning("Stopping automation requested by user...")
+        self.log_warning("Stopping automation requested by user (force stop)...")
         self.lbl_run_state.config(text="● Stopping...", fg=ModernColors.ACCENT_AMBER)
 
         proc = self._current_process
@@ -968,6 +1017,85 @@ class ROKAutomationApp:
 
         self.log_info("Automation stopped.")
         self._set_running_state(False)
+
+        # Show how much resources were farmed before force stop!
+        self._display_farmed_resources_summary(stopped_early=True)
+
+    def _display_farmed_resources_summary(self, *, stopped_early: bool = True) -> None:
+        """Display full breakdown of all resources farmed up to this moment."""
+        targets = list(self._session_targets)
+
+        # Check if disk session_summary.json has recorded targets
+        if DEFAULT_SESSION_SUMMARY_PATH.is_file():
+            try:
+                data = json.loads(
+                    DEFAULT_SESSION_SUMMARY_PATH.read_text(encoding="utf-8")
+                )
+                disk_targets = [
+                    SearchTarget(resource=Resource(t["resource"]), level=t["level"])
+                    for t in data.get("targets", [])
+                    if "resource" in t and "level" in t
+                ]
+                if len(disk_targets) >= len(targets):
+                    targets = disk_targets
+            except Exception:
+                pass
+
+        if not targets:
+            self.log_info(
+                "Force stop completed: No resource nodes were gathered before stopping."
+            )
+            return
+
+        totals = calculate_farmed_resources(targets)
+        grand_total = sum(totals.values())
+        army_counts = {
+            r: sum(1 for t in targets if t.resource == r)
+            for r in Resource
+        }
+
+        resource_labels = {
+            Resource.FOOD: "Food (Ngô)",
+            Resource.WOOD: "Wood (Gỗ)",
+            Resource.STONE: "Stone (Đá)",
+            Resource.GOLD: "Gold (Vàng)",
+        }
+
+        title = (
+            "TOTAL RESOURCES FARMED BEFORE FORCE STOP"
+            if stopped_early
+            else "TOTAL RESOURCES FARMED THIS RUN"
+        )
+
+        self.log_raw("\n")
+        self.log_raw("=" * 66 + "\n", tag="warning")
+        self.log_raw(f"  {title}\n", tag="warning")
+        self.log_raw("=" * 66 + "\n", tag="warning")
+        for resource in (Resource.FOOD, Resource.WOOD, Resource.STONE, Resource.GOLD):
+            amount = totals[resource]
+            armies = army_counts[resource]
+            formatted = format_resource_amount(amount)
+            self.log_raw(
+                f"  • {resource_labels[resource]:<14}: {formatted:<18} "
+                f"across {armies} arm{'y' if armies == 1 else 'ies'}\n",
+                tag="normal",
+            )
+        self.log_raw("-" * 66 + "\n", tag="warning")
+        self.log_raw(
+            f"  GRAND TOTAL    : {format_resource_amount(grand_total)} "
+            f"gathered across {len(targets)} armies\n",
+            tag="success",
+        )
+        if stopped_early:
+            self.log_raw(
+                f"  Status         : Force stopped by user after {len(targets)} armies\n",
+                tag="warning",
+            )
+        self.log_raw("=" * 66 + "\n\n", tag="warning")
+
+        self.lbl_session_farmed.config(
+            text=f"Farmed: {format_resource_amount(grand_total)} ({len(targets)} armies) [Stopped]"
+        )
 
     def _set_running_state(self, is_running: bool) -> None:
         """Toggle UI controls based on active running state."""

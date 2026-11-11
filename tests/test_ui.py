@@ -110,6 +110,50 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertIn("Subprocess output line 2", content)
         self.assertFalse(self.app._is_running)
 
+    def test_force_stop_summary_with_farmed_resources(self) -> None:
+        """Verify force stop displays the detailed resource summary table."""
+        from rok_automation.logic.resource_selector import Resource, SearchTarget
+
+        self.app.clear_console()
+        self.app._session_targets = [
+            SearchTarget(resource=Resource.FOOD, level=6),
+            SearchTarget(resource=Resource.GOLD, level=8),
+        ]
+        self.app._display_farmed_resources_summary(stopped_early=True)
+
+        content = self.app.txt_console.get("1.0", tk.END)
+        self.assertIn("TOTAL RESOURCES FARMED BEFORE FORCE STOP", content)
+        self.assertIn("Food (Ngô)", content)
+        self.assertIn("Gold (Vàng)", content)
+        self.assertIn("GRAND TOTAL", content)
+        self.assertIn("Force stopped by user after 2 armies", content)
+
+    def test_force_stop_summary_with_zero_armies(self) -> None:
+        """Verify force stop with zero armies logs clear informative message."""
+        self.app.clear_console()
+        self.app._session_targets.clear()
+        self.app._display_farmed_resources_summary(stopped_early=True)
+
+        content = self.app.txt_console.get("1.0", tk.END)
+        self.assertIn("No resource nodes were gathered", content)
+
+    def test_queue_parses_dispatched_armies(self) -> None:
+        """Verify output queue lines update session targets and farmed badge."""
+        self.app.clear_console()
+        self.app._session_targets.clear()
+        self.app._output_queue.put(
+            "[19:50:12] Army 1/5 dispatched to Food Lv6 (+1,260,000 resources)"
+        )
+        self.app._output_queue.put(
+            "[19:50:30] Army 2/5 dispatched to Gold Lv8 (+525,000 resources)"
+        )
+
+        self.app._poll_output_queue()
+        self.assertEqual(len(self.app._session_targets), 2)
+        badge_text = self.app.lbl_session_farmed.cget("text")
+        self.assertIn("Farmed:", badge_text)
+        self.assertIn("2 armies", badge_text)
+
 
 if __name__ == "__main__":
     unittest.main()

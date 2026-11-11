@@ -162,12 +162,16 @@ def main() -> int:
 
     if args.farm:
         try:
-            context = FarmingController(
+            controller = FarmingController(
                 LDPlayerInterface(window),
                 switch_gmail=not args.no_switch_gmail,
                 reset_gmail_run=args.reset_gmail_run,
                 gmail_state_path=args.gmail_state,
-            ).run()
+            )
+            context = controller.run()
+        except KeyboardInterrupt:
+            print("\n[!] Force stop requested by user.")
+            return 1
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"Farming stopped safely: {exc}")
             return 1

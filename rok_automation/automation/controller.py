@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import time
 import unicodedata
@@ -50,6 +51,7 @@ class FarmingError(RuntimeError):
     """Raised when the current screen cannot be handled safely."""
 
 
+DEFAULT_SESSION_SUMMARY_PATH = Path("state/session_summary.json")
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
@@ -126,6 +128,7 @@ class FarmingController:
         switch_gmail: bool = True,
         gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
         reset_gmail_run: bool = False,
+        session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
     ) -> None:
         if not 1 <= max_armies <= 5:
             raise ValueError("max_armies must be between 1 and 5")
@@ -137,6 +140,9 @@ class FarmingController:
         self.switch_gmail = switch_gmail
         self.gmail_state_path = gmail_state_path
         self.reset_gmail_run = reset_gmail_run
+        self.session_summary_path = (
+            session_summary_path or DEFAULT_SESSION_SUMMARY_PATH
+        )
         self.context = FarmContext()
         self._selected_resource: Resource | None = None
         self._resource_levels: dict[Resource, int] = {}
@@ -168,64 +174,84 @@ class FarmingController:
         total_dispatched = 0
         total_characters = 0
         gmail_accounts = 0
-        while True:
-            context, characters, dispatched = self._farm_linked_characters()
-            total_dispatched += dispatched
-            total_characters += characters
-            if context.last_error:
-                context.armies_dispatched = total_dispatched
-                context.dispatched_targets = list(self.session_targets)
-                if self.session_targets:
+        self._save_session_summary(status="running")
+        try:
+            while True:
+                context, characters, dispatched = self._farm_linked_characters()
+                total_dispatched += dispatched
+                total_characters += characters
+                if context.last_error:
+                    context.armies_dispatched = total_dispatched
+                    context.dispatched_targets = list(self.session_targets)
+                    self._save_session_summary(status="error")
+                    if self.session_targets:
+                        self._log_resource_summary(
+                            total_characters=total_characters,
+                            gmail_accounts=gmail_accounts or 1,
+                        )
+                    return context
+                gmail_accounts += 1
+
+                if rotation is None:
+                    context.armies_dispatched = total_dispatched
+                    context.dispatched_targets = list(self.session_targets)
+                    self._save_session_summary(status="complete")
+                    self._transition(
+                        FarmState.COMPLETE,
+                        f"Finished {characters} RoK account(s) linked to this Gmail account",
+                    )
                     self._log_resource_summary(
                         total_characters=total_characters,
-                        gmail_accounts=gmail_accounts or 1,
+                        gmail_accounts=1,
                     )
-                return context
-            gmail_accounts += 1
+                    return context
 
-            if rotation is None:
-                context.armies_dispatched = total_dispatched
-                context.dispatched_targets = list(self.session_targets)
                 self._transition(
-                    FarmState.COMPLETE,
-                    f"Finished {characters} RoK account(s) linked to this Gmail account",
+                    FarmState.SWITCH_GMAIL,
+                    f"Finished {characters} RoK account(s) in this Gmail; "
+                    "switching Gmail account",
                 )
+                result = GmailSwitcher(
+                    self.game,
+                    self.detector,
+                    log=self._log,
+                ).switch_to_next(rotation)
+                if result.run_complete:
+                    context.armies_dispatched = total_dispatched
+                    context.dispatched_targets = list(self.session_targets)
+                    context.last_error = None
+                    self._save_session_summary(status="complete")
+                    self._transition(
+                        FarmState.COMPLETE,
+                        f"Gmail run complete: {len(rotation.farmed)} Gmail account(s) "
+                        f"farmed in total; {total_characters} RoK account(s) and "
+                        f"{total_dispatched} armies this session",
+                    )
+                    self._log_resource_summary(
+                        total_characters=total_characters,
+                        gmail_accounts=len(rotation.farmed),
+                    )
+                    return context
+                self._log(
+                    f"Switched to Gmail {result.identity.label()}; "
+                    f"farming its RoK accounts ({gmail_accounts + 1} Gmail "
+                    "account(s) this session)"
+                )
+        except KeyboardInterrupt:
+            self._log("Force stop requested by user (KeyboardInterrupt).")
+            self.context.armies_dispatched = total_dispatched
+            self.context.dispatched_targets = list(self.session_targets)
+            self.context.last_error = "Force stopped by user"
+            self._save_session_summary(status="stopped_by_user")
+            if self.session_targets:
                 self._log_resource_summary(
                     total_characters=total_characters,
-                    gmail_accounts=1,
+                    gmail_accounts=gmail_accounts or 1,
+                    stopped_early=True,
                 )
-                return context
-
-            self._transition(
-                FarmState.SWITCH_GMAIL,
-                f"Finished {characters} RoK account(s) in this Gmail; "
-                "switching Gmail account",
-            )
-            result = GmailSwitcher(
-                self.game,
-                self.detector,
-                log=self._log,
-            ).switch_to_next(rotation)
-            if result.run_complete:
-                context.armies_dispatched = total_dispatched
-                context.dispatched_targets = list(self.session_targets)
-                context.last_error = None
-                self._transition(
-                    FarmState.COMPLETE,
-                    f"Gmail run complete: {len(rotation.farmed)} Gmail account(s) "
-                    f"farmed in total; {total_characters} RoK account(s) and "
-                    f"{total_dispatched} armies this session",
-                )
-                self._log_resource_summary(
-                    total_characters=total_characters,
-                    gmail_accounts=len(rotation.farmed),
-                )
-                return context
-            self._log(
-                f"Switched to Gmail {result.identity.label()}; "
-                f"farming its RoK accounts ({gmail_accounts + 1} Gmail "
-                "account(s) this session)"
-            )
+            else:
+                self._log("No resource armies were dispatched before force stop.")
+            return self.context
 
     def _farm_linked_characters(self) -> tuple[FarmContext, int, int]:
         """Farm each RoK character in the current Gmail, then stop at the end.
@@ -1005,6 +1031,7 @@ class FarmingController:
                     self.context.armies_dispatched += 1
                     self.context.dispatched_targets.append(target)
                     self.session_targets.append(target)
+                    self._save_session_summary(status="running")
                     node_yield = resource_node_yield(target.resource, target.level)
                     self._log(
                         f"Army {army_number}/5 dispatched to "
@@ -1486,11 +1513,42 @@ class FarmingController:
         self.context.current_state = state
         self._log(message or f"State: {state.value}")
 
+    def _save_session_summary(self, *, status: str = "running") -> None:
+        """Write current session yield to a JSON file for live tracking & force stop recovery."""
+        if self.session_summary_path is None:
+            return
+        try:
+            self.session_summary_path.parent.mkdir(parents=True, exist_ok=True)
+            totals = calculate_farmed_resources(self.session_targets)
+            grand_total = sum(totals.values())
+            data = {
+                "status": status,
+                "timestamp": datetime.now().isoformat(),
+                "armies_dispatched": len(self.session_targets),
+                "targets": [
+                    {
+                        "resource": t.resource.value,
+                        "level": t.level,
+                        "yield": resource_node_yield(t.resource, t.level),
+                    }
+                    for t in self.session_targets
+                ],
+                "totals": {r.value: totals[r] for r in Resource},
+                "grand_total": grand_total,
+                "grand_total_formatted": format_resource_amount(grand_total),
+            }
+            temp_path = self.session_summary_path.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_path.replace(self.session_summary_path)
+        except Exception:
+            pass
+
     def _log_resource_summary(
         self,
         *,
         total_characters: int,
         gmail_accounts: int,
+        stopped_early: bool = False,
     ) -> None:
         """Log a formatted breakdown and grand total of all resources gathered."""
         totals = calculate_farmed_resources(self.session_targets)
@@ -1507,8 +1565,14 @@ class FarmingController:
             Resource.GOLD: "Gold (Vàng)",
         }
 
+        header_title = (
+            "TOTAL RESOURCES FARMED BEFORE FORCE STOP"
+            if stopped_early
+            else "TOTAL RESOURCES FARMED THIS RUN"
+        )
+
         self._log("=" * 62)
-        self._log("TOTAL RESOURCES FARMED THIS RUN")
+        self._log(header_title)
         self._log("=" * 62)
         for resource in (Resource.FOOD, Resource.WOOD, Resource.STONE, Resource.GOLD):
             amount = totals[resource]
@@ -1523,10 +1587,16 @@ class FarmingController:
             f"  GRAND TOTAL    : {format_resource_amount(grand_total)} "
             f"gathered across {len(self.session_targets)} armies"
         )
-        self._log(
-            f"  Accounts cleared: {total_characters} RoK character(s) "
-            f"across {gmail_accounts} Gmail account(s)"
-        )
+        if stopped_early:
+            self._log(
+                f"  Status         : Force stopped by user after {total_characters} "
+                f"RoK character(s)"
+            )
+        else:
+            self._log(
+                f"  Accounts cleared: {total_characters} RoK character(s) "
+                f"across {gmail_accounts} Gmail account(s)"
+            )
         self._log("=" * 62)
 
     def _log(self, message: str) -> None:
