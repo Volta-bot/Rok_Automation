@@ -19,6 +19,7 @@ Instead of relying on blind delays or fixed coordinate clicks, the automation co
   - **Coordinate Deduplication:** Reads the node's `X: ... Y: ...` coordinates from the resource popup and skips nodes already visited during the current account's session.
   - **Map-Change Detection:** Compares map margin strips before and after pressing `Tìm kiếm` to detect when no node was found (`Không tìm thấy...`) without waiting for toast animations to fade.
 - **Active March Slot Detection:** Reads the `x/5` march counter on the right side of the World Map (treating an absent counter as `0/5`) and only dispatches armies for the remaining free slots.
+- **Total Resources Farmed Calculation:** Tracks every dispatched army's resource type and node level (Lv8–Lv5), calculating yields according to official node capacities (Food/Wood: Lv8 1.575M, Lv7 1.418M, Lv6 1.26M, Lv5 945k; Stone: Lv8 1.181M, Lv7 1.063M, Lv6 945k, Lv5 709k; Gold: Lv8 525k, Lv7 472k, Lv6 420k, Lv5 336k) and logging a detailed per-resource and grand total summary upon completing the run.
 
 ### 2. Multi-Account Character Switching (`Nhân vật`)
 Once all 5 army slots are marching (or all resource levels are exhausted), the automation switches to the next starred character:
@@ -32,7 +33,17 @@ Once all 5 army slots are marching (or all resource levels are exhausted), the a
   - If the green checkmark is not in the first 6 accounts upon opening `Nhân vật`, it scrolls down immediately to scan the last 6 accounts.
   - If started mid-list, it jumps to the nearest list end (`1/12` or `12/12`) and traverses sequentially in one clean pass (`top-to-bottom` or `bottom-to-top`), skipping the already-farmed starting account.
 
-### 3. High-Speed Vision Optimizations
+### 3. Multi-Gmail Account Switching (`Tài khoản / Trung Tâm Người Dùng`)
+After farming all RoK characters in the current Gmail account, the automation automatically cycles to the next Gmail account until every logged-in Gmail account has been farmed:
+
+`Governor Portrait` → `Cài đặt` → `Tài khoản` → `Trung Tâm Người Dùng` → `Chuyển tài khoản` → `Expand Dropdown` → `Scroll to Bottom` → `Select Bottom Account` → `Đăng nhập` → `Game Load`
+
+- **Bottom-Most LRU Rotation:** Lilith's account switcher lists logged-in Gmail accounts by recency. By scrolling all the way to the bottom and selecting the least-recently used account, the automation cycles through every Gmail account in sequence.
+- **Run Completion Tracking:** Remembers the starting Gmail account and every account farmed (`state/gmail_rotation.json`). When all other accounts have been farmed and the rotation returns to the starting account, the run is complete.
+- **Fault-Tolerant & Resumable:** Progress is written atomically after every switch; if interrupted, restarting `--farm` resumes from the last active Gmail account without refarming previously cleared accounts.
+- **In-Game Modal Recovery:** Automatically detects and confirms in-game dialogs ("Xác nhận", "Đồng ý", "Có") during game reload.
+
+### 4. High-Speed Vision Optimizations
 - **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
 - **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
 - **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
@@ -58,10 +69,14 @@ Once all 5 army slots are marching (or all resource levels are exhausted), the a
 ```text
 ROKauto/
 ├── rok_automation/
-│   ├── __main__.py                 # CLI entry point (--farm, --detect-screen, --screenshot, --diagnose-window)
+│   ├── __main__.py                 # CLI entry point (--gui, --farm, --detect-screen, --screenshot, --diagnose-window)
+│   ├── ui/                         # Graphical User Interface (Control Center & Live Console)
+│   │   ├── app.py                  # Tkinter UI application, process worker, and live console stream
+│   │   └── __init__.py
 │   ├── automation/
 │   │   ├── controller.py           # State-driven farming loop, search level caching, & army dispatch
 │   │   ├── account_switcher.py     # State-driven profile/settings/character switcher & list scroller
+│   │   ├── gmail_switcher.py       # Multi-Gmail account switcher & LRU rotation tracker
 │   │   ├── context.py              # Per-account runtime context (armies out, target, errors)
 │   │   └── states.py               # Farming state enum definitions
 │   ├── game/
@@ -74,7 +89,8 @@ ROKauto/
 │       ├── account_label.py        # RapidOCR wrapper for governor labels & x/5 march counter
 │       └── green_route.py          # HSV + morphological detector for incoming green march routes
 ├── templates/                      # UI reference templates (navigation, search, gathering, profile)
-├── run.bat                         # One-click interactive Windows launcher
+├── run.bat                         # Interactive Windows CLI launcher
+├── run_gui.bat                     # One-click Graphical User Interface launcher
 └── pyproject.toml                  # Package metadata and dependencies
 ```
 
@@ -124,7 +140,23 @@ cd Rok_Automation
 python -m pip install -e .
 ```
 
-### Quick Start (`run.bat`)
+### Graphical User Interface (`run_gui.bat`)
+Launch the ROKauto Control Center GUI by double-clicking `run_gui.bat` or via terminal:
+
+```powershell
+.\run_gui.bat
+# or
+python -m rok_automation --gui
+```
+
+The graphical user interface features:
+- **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`).
+- **Core Automation Options:** Easily toggle automatic resource farming, multi-Gmail switching, and rotation resetting.
+- **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards*, *Collect VIP Chest*, *Alliance Help & Tech*, *Tavern Free Chests*, and *Auto Train Troops*.
+- **Integrated Live Output Console:** Monospace console stream underneath with real-time log coloring, auto-scroll, log copying, and clearing.
+- **Diagnostic Quick Tools:** Instant one-click buttons for LDPlayer screen capture, screen classification, and window hierarchy diagnostics.
+
+### Interactive CLI Launcher (`run.bat`)
 Double-click `run.bat` or run it from a terminal:
 
 ```powershell
@@ -134,9 +166,17 @@ Press `y` when prompted to start farming across all starred accounts.
 
 ### CLI Commands
 
-- **Run full multi-account farming automation:**
+- **Run full multi-account farming automation across all Gmail logins:**
   ```powershell
   python -m rok_automation --farm
+  ```
+- **Farm characters in the current Gmail account only (disable Gmail switching):**
+  ```powershell
+  python -m rok_automation --farm --no-switch-gmail
+  ```
+- **Reset saved Gmail rotation progress and start a fresh run:**
+  ```powershell
+  python -m rok_automation --farm --reset-gmail-run
   ```
 - **Detect and classify the current LDPlayer screen (read-only):**
   ```powershell

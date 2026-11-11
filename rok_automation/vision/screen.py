@@ -120,7 +120,7 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "submit_button.png": (0.12, 0.25, 0.98, 0.82),
     "level_plus.png": (0.12, 0.18, 0.98, 0.72),
     "level_minus.png": (0.12, 0.18, 0.98, 0.72),
-    "settings_button.png": (0.65, 0.62, 0.98, 0.98),
+    "settings_button.png": (0.65, 0.60, 1.0, 1.0),
     "character_menu_button.png": (0.10, 0.18, 0.90, 0.86),
 }
 # Search-popup controls sit directly above whichever resource icon is selected.

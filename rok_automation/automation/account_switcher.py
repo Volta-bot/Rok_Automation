@@ -601,14 +601,15 @@ class AccountSwitcher:
             frame,
             (
                 round(width * 0.70),
-                round(height * 0.70),
-                round(width * 0.26),
-                round(height * 0.25),
+                round(height * 0.65),
+                round(width * 0.30),
+                height - round(height * 0.65),
             ),
             upscale=2.0,
         )
         for text, bounds, _score in detections:
-            if "cai dat" in _fold(text):
+            folded = _fold(text)
+            if any(k in folded for k in ("cai dat", "cai dt", "cai d")):
                 return "governor_profile", bounds, 0.0
 
         detection = self.detector.detect(
@@ -791,6 +792,31 @@ class AccountSwitcher:
                 yes_height,
             )
             return button_bounds, title_score, yes_score
+        return None
+
+    @staticmethod
+    def _find_dialog_confirmation(
+        frame: Any,
+    ) -> tuple[int, int, int, int] | None:
+        """Find generic in-game modal confirmation buttons (Xác nhận, Đồng ý, Có, OK)."""
+
+        height, width = frame.shape[:2]
+        detections = read_text_detections(
+            frame,
+            (
+                round(width * 0.30),
+                round(height * 0.45),
+                round(width * 0.40),
+                round(height * 0.35),
+            ),
+            upscale=1.8,
+        )
+        for text, bounds, score in detections:
+            if score < 0.35:
+                continue
+            compact = "".join(char for char in _fold(text) if char.isalnum())
+            if compact in {"xacnhan", "xacnhn", "dongy", "dngy", "co", "ok", "tieptuc"}:
+                return bounds
         return None
 
     def _wait_for_text(self, keyword: str) -> None:
@@ -1245,6 +1271,13 @@ class AccountSwitcher:
                 self._log("Login confirmation dialog still open; clicking Có again")
                 self.game.click(yes_bounds, screenshot)
                 self.game.wait(0.40)
+                continue
+
+            dialog_confirm = self._find_dialog_confirmation(frame)
+            if dialog_confirm is not None:
+                self._log("In-game confirmation dialog detected; clicking confirm")
+                self.game.click(dialog_confirm, screenshot)
+                self.game.wait(0.50)
                 continue
 
             if self._character_list_is_open(screenshot):

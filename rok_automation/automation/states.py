@@ -13,5 +13,6 @@ class FarmState(str, Enum):
     PROCESS_RESULT = "process_result"
     SEND_TROOPS = "send_troops"
     VERIFY_GATHERING = "verify_gathering"
+    SWITCH_GMAIL = "switch_gmail"
     COMPLETE = "complete"
     STOPPED = "stopped"

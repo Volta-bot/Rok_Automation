@@ -50,9 +50,25 @@ def main() -> int:
         "--farm",
         action="store_true",
         help=(
-            "farm each linked RoK character in the current Gmail login, "
+            "farm each linked RoK character across all logged-in Gmail accounts, "
             "dispatching up to five armies per character"
         ),
+    )
+    parser.add_argument(
+        "--no-switch-gmail",
+        action="store_true",
+        help="farm characters in the current Gmail only (do not switch Gmail accounts)",
+    )
+    parser.add_argument(
+        "--reset-gmail-run",
+        action="store_true",
+        help="clear saved Gmail rotation progress and start a fresh full run",
+    )
+    parser.add_argument(
+        "--gmail-state",
+        type=Path,
+        metavar="PATH",
+        help="custom path for Gmail rotation progress JSON",
     )
     parser.add_argument(
         "--search-level",
@@ -60,7 +76,16 @@ def main() -> int:
         choices=RESOURCE_LEVELS,
         help="known active level from controller context for a found resource",
     )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="launch the graphical user interface (ROKauto Control Center)",
+    )
     args = parser.parse_args()
+
+    if args.gui:
+        from rok_automation.ui.app import launch_gui
+        return launch_gui()
 
     window = find_ldplayer_window()
     if window is None:
@@ -137,7 +162,12 @@ def main() -> int:
 
     if args.farm:
         try:
-            context = FarmingController(LDPlayerInterface(window)).run()
+            context = FarmingController(
+                LDPlayerInterface(window),
+                switch_gmail=not args.no_switch_gmail,
+                reset_gmail_run=args.reset_gmail_run,
+                gmail_state_path=args.gmail_state,
+            ).run()
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"Farming stopped safely: {exc}")
             return 1

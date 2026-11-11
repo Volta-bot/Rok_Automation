@@ -17,6 +17,11 @@ from rok_automation.automation.account_switcher import (
     AccountSwitcher,
     AccountTraversal,
 )
+from rok_automation.automation.gmail_switcher import (
+    DEFAULT_GMAIL_STATE_PATH,
+    GmailRotation,
+    GmailSwitcher,
+)
 from rok_automation.automation.states import FarmState
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
@@ -24,8 +29,11 @@ from rok_automation.logic.resource_selector import (
     Resource,
     SearchTarget,
     account_name_without_guild,
+    calculate_farmed_resources,
+    format_resource_amount,
     random_preferred_resource,
     resource_for_account,
+    resource_node_yield,
     search_plan,
 )
 from rok_automation.vision.account_label import read_text_region
@@ -115,6 +123,9 @@ class FarmingController:
         max_armies: int = 5,
         rng: random.Random | None = None,
         log=print,
+        switch_gmail: bool = True,
+        gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
+        reset_gmail_run: bool = False,
     ) -> None:
         if not 1 <= max_armies <= 5:
             raise ValueError("max_armies must be between 1 and 5")
@@ -123,12 +134,105 @@ class FarmingController:
         self.max_armies = max_armies
         self.rng = rng or random.Random()
         self.log = log
+        self.switch_gmail = switch_gmail
+        self.gmail_state_path = gmail_state_path
+        self.reset_gmail_run = reset_gmail_run
         self.context = FarmContext()
         self._selected_resource: Resource | None = None
         self._resource_levels: dict[Resource, int] = {}
+        self.session_targets: list[SearchTarget] = []
 
     def run(self) -> FarmContext:
-        """Farm each linked RoK character once, then stop at the list end."""
+        """Farm every RoK character in every logged-in Gmail account.
+
+        Characters of the current Gmail are farmed first; then the Gmail
+        switcher logs into the bottom-most Gmail in the account popup and the
+        cycle repeats until the rotation returns to the run's first Gmail.
+        """
+
+        rotation: GmailRotation | None = None
+        if self.switch_gmail:
+            rotation = GmailRotation.load(
+                self.gmail_state_path,
+                reset=self.reset_gmail_run,
+            )
+            if rotation.is_resumed:
+                self._log(
+                    f"Resuming Gmail run started from {rotation.first.label()}; "
+                    f"already farmed: "
+                    + ", ".join(identity.label() for identity in rotation.farmed)
+                )
+            else:
+                self._log("Starting a new Gmail run")
+
+        total_dispatched = 0
+        total_characters = 0
+        gmail_accounts = 0
+        while True:
+            context, characters, dispatched = self._farm_linked_characters()
+            total_dispatched += dispatched
+            total_characters += characters
+            if context.last_error:
+                context.armies_dispatched = total_dispatched
+                context.dispatched_targets = list(self.session_targets)
+                if self.session_targets:
+                    self._log_resource_summary(
+                        total_characters=total_characters,
+                        gmail_accounts=gmail_accounts or 1,
+                    )
+                return context
+            gmail_accounts += 1
+
+            if rotation is None:
+                context.armies_dispatched = total_dispatched
+                context.dispatched_targets = list(self.session_targets)
+                self._transition(
+                    FarmState.COMPLETE,
+                    f"Finished {characters} RoK account(s) linked to this Gmail account",
+                )
+                self._log_resource_summary(
+                    total_characters=total_characters,
+                    gmail_accounts=1,
+                )
+                return context
+
+            self._transition(
+                FarmState.SWITCH_GMAIL,
+                f"Finished {characters} RoK account(s) in this Gmail; "
+                "switching Gmail account",
+            )
+            result = GmailSwitcher(
+                self.game,
+                self.detector,
+                log=self._log,
+            ).switch_to_next(rotation)
+            if result.run_complete:
+                context.armies_dispatched = total_dispatched
+                context.dispatched_targets = list(self.session_targets)
+                context.last_error = None
+                self._transition(
+                    FarmState.COMPLETE,
+                    f"Gmail run complete: {len(rotation.farmed)} Gmail account(s) "
+                    f"farmed in total; {total_characters} RoK account(s) and "
+                    f"{total_dispatched} armies this session",
+                )
+                self._log_resource_summary(
+                    total_characters=total_characters,
+                    gmail_accounts=len(rotation.farmed),
+                )
+                return context
+            self._log(
+                f"Switched to Gmail {result.identity.label()}; "
+                f"farming its RoK accounts ({gmail_accounts + 1} Gmail "
+                "account(s) this session)"
+            )
+
+    def _farm_linked_characters(self) -> tuple[FarmContext, int, int]:
+        """Farm each RoK character in the current Gmail, then stop at the end.
+
+        Returns the last context, the number of characters farmed, and the
+        number of armies dispatched.
+        """
 
         traversal = AccountTraversal()
         farmed_accounts = 0
@@ -145,8 +249,7 @@ class FarmingController:
                 == "No available resource location found in the search plan"
             )
             if context.last_error and not exhausted_resources:
-                context.armies_dispatched = total_dispatched
-                return context
+                return context, farmed_accounts, total_dispatched
             if exhausted_resources:
                 self._log(
                     f"No resource location was available for {context.account_name}; "
@@ -161,13 +264,8 @@ class FarmingController:
             )
 
             if not traversal.has_more_accounts():
-                context.armies_dispatched = total_dispatched
                 context.last_error = None
-                self._transition(
-                    FarmState.COMPLETE,
-                    f"Finished {farmed_accounts} RoK account(s) linked to this Gmail account",
-                )
-                return context
+                return context, farmed_accounts, total_dispatched
 
             next_name = AccountSwitcher(
                 self.game,
@@ -175,13 +273,8 @@ class FarmingController:
                 log=self._log,
             ).switch_to_next(traversal)
             if next_name is None:
-                context.armies_dispatched = total_dispatched
                 context.last_error = None
-                self._transition(
-                    FarmState.COMPLETE,
-                    f"Finished {farmed_accounts} RoK account(s) linked to this Gmail account",
-                )
-                return context
+                return context, farmed_accounts, total_dispatched
             expected_account_name = next_name
             self._log(f"Selected {next_name}; starting its farming run")
 
@@ -343,9 +436,11 @@ class FarmingController:
                 )
                 return self.context
 
+        acc_total = self.context.grand_total_farmed
+        yield_str = f" (+{acc_total:,} resources)" if acc_total > 0 else ""
         self._transition(
             FarmState.COMPLETE,
-            f"Dispatched {self.context.armies_dispatched} new armies; "
+            f"Dispatched {self.context.armies_dispatched} new armies{yield_str}; "
             f"started with {self.context.starting_armies_out}/5 already marching",
         )
         return self.context
@@ -908,9 +1003,13 @@ class FarmingController:
             }:
                 if marched and state is ScreenState.WORLD_MAP:
                     self.context.armies_dispatched += 1
+                    self.context.dispatched_targets.append(target)
+                    self.session_targets.append(target)
+                    node_yield = resource_node_yield(target.resource, target.level)
                     self._log(
                         f"Army {army_number}/5 dispatched to "
-                        f"{target.resource.value} Lv{target.level}"
+                        f"{target.resource.value} Lv{target.level} "
+                        f"(+{node_yield:,} resources)"
                     )
                     return True
                 if not marched:
@@ -1386,6 +1485,49 @@ class FarmingController:
     def _transition(self, state: FarmState, message: str | None = None) -> None:
         self.context.current_state = state
         self._log(message or f"State: {state.value}")
+
+    def _log_resource_summary(
+        self,
+        *,
+        total_characters: int,
+        gmail_accounts: int,
+    ) -> None:
+        """Log a formatted breakdown and grand total of all resources gathered."""
+        totals = calculate_farmed_resources(self.session_targets)
+        grand_total = sum(totals.values())
+        army_counts = {
+            r: sum(1 for t in self.session_targets if t.resource == r)
+            for r in Resource
+        }
+
+        resource_labels = {
+            Resource.FOOD: "Food (Ngô)",
+            Resource.WOOD: "Wood (Gỗ)",
+            Resource.STONE: "Stone (Đá)",
+            Resource.GOLD: "Gold (Vàng)",
+        }
+
+        self._log("=" * 62)
+        self._log("TOTAL RESOURCES FARMED THIS RUN")
+        self._log("=" * 62)
+        for resource in (Resource.FOOD, Resource.WOOD, Resource.STONE, Resource.GOLD):
+            amount = totals[resource]
+            armies = army_counts[resource]
+            formatted = format_resource_amount(amount)
+            self._log(
+                f"  • {resource_labels[resource]:<14}: {formatted:<18} "
+                f"across {armies} arm{'y' if armies == 1 else 'ies'}"
+            )
+        self._log("-" * 62)
+        self._log(
+            f"  GRAND TOTAL    : {format_resource_amount(grand_total)} "
+            f"gathered across {len(self.session_targets)} armies"
+        )
+        self._log(
+            f"  Accounts cleared: {total_characters} RoK character(s) "
+            f"across {gmail_accounts} Gmail account(s)"
+        )
+        self._log("=" * 62)
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

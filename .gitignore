@@ -16,3 +16,4 @@ ENV/
 
 # Runtime screenshots and captures
 artifacts/
+state/

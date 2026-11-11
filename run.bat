@@ -2,23 +2,37 @@
 setlocal
 chcp 65001 >nul
 set PYTHONUTF8=1
+set PYTHONUNBUFFERED=1
 
 cd /d "%~dp0"
 
-:prompt
-set "CONFIRM="
-set /p "CONFIRM=Enter y to run Rise of Kingdoms Farming Automation: "
-if /i not "%CONFIRM%"=="y" (
-    echo Cancelled.
-    exit /b 0
-)
-
-if "%~1"=="" (
-    echo Starting Rise of Kingdoms Farming Automation...
-    python -m rok_automation --farm
-) else (
+if not "%~1"=="" (
     python -m rok_automation %*
+    exit /b %ERRORLEVEL%
 )
 
+:menu
+echo ========================================================
+echo   Rise of Kingdoms Automation (ROKauto)
+echo ========================================================
+echo  [1] Launch Graphical User Interface (Recommended)
+echo  [2] Run CLI Resource Farming (--farm)
+echo  [Q] Quit
+echo ========================================================
+set "CHOICE="
+set /p "CHOICE=Select an option [1/2/Q] (default: 1): "
+
+if /i "%CHOICE%"=="q" exit /b 0
+if /i "%CHOICE%"=="2" goto run_cli
+if /i "%CHOICE%"=="y" goto run_cli
+
+:run_gui
+echo Starting Graphical User Interface...
+python -m rok_automation --gui
+goto menu
+
+:run_cli
+echo Starting Rise of Kingdoms Farming Automation...
+python -m rok_automation --farm
 echo.
-goto prompt
+goto menu

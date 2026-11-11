@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 rok-automation = "rok_automation.__main__:main"
+rok-gui = "rok_automation.ui.app:launch_gui"
 
 [tool.setuptools.packages.find]
 include = ["rok_automation*"]

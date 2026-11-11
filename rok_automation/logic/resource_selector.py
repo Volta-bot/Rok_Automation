@@ -39,6 +39,53 @@ class SearchTarget:
     level: int
 
 
+RESOURCE_NODE_YIELDS: dict[tuple[Resource, int], int] = {
+    # Food & Wood nodes
+    (Resource.FOOD, 8): 1_575_000,
+    (Resource.FOOD, 7): 1_417_500,
+    (Resource.FOOD, 6): 1_260_000,
+    (Resource.FOOD, 5): 945_000,
+    (Resource.WOOD, 8): 1_575_000,
+    (Resource.WOOD, 7): 1_417_500,
+    (Resource.WOOD, 6): 1_260_000,
+    (Resource.WOOD, 5): 945_000,
+    # Stone nodes
+    (Resource.STONE, 8): 1_181_250,
+    (Resource.STONE, 7): 1_063_125,
+    (Resource.STONE, 6): 945_000,
+    (Resource.STONE, 5): 708_750,
+    # Gold nodes
+    (Resource.GOLD, 8): 525_000,
+    (Resource.GOLD, 7): 472_000,
+    (Resource.GOLD, 6): 420_000,
+    (Resource.GOLD, 5): 336_000,
+}
+
+
+def resource_node_yield(resource: Resource, level: int) -> int:
+    """Return the total resource yield for a gathered node at the given level."""
+    return RESOURCE_NODE_YIELDS.get((resource, level), 0)
+
+
+def calculate_farmed_resources(
+    targets: list[SearchTarget],
+) -> dict[Resource, int]:
+    """Calculate the total resource amount farmed grouped by resource type."""
+    totals = {resource: 0 for resource in Resource}
+    for target in targets:
+        totals[target.resource] += resource_node_yield(target.resource, target.level)
+    return totals
+
+
+def format_resource_amount(amount: int) -> str:
+    """Format resource count with comma separators and human-readable suffix."""
+    if amount >= 1_000_000:
+        return f"{amount:,} ({amount / 1_000_000 + 1e-9:.2f}M)"
+    if amount >= 1_000:
+        return f"{amount:,} ({amount / 1_000 + 1e-9:.1f}k)"
+    return f"{amount:,}"
+
+
 _OCR_RESOURCE_PATTERNS: tuple[tuple[re.Pattern[str], Resource], ...] = (
     (re.compile(r"(?<![a-z])(?:vang|gold)(?![a-z])"), Resource.GOLD),
     (re.compile(r"(?<![a-z])(?:da|d4|stone)(?![a-z])"), Resource.STONE),
