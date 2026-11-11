@@ -5,6 +5,7 @@ from enum import Enum
 
 class FarmState(str, Enum):
     START = "start"
+    CLAIM_DAILY_REWARD = "claim_daily_reward"
     DETECT_ACCOUNT = "detect_account"
     OPEN_WORLD_MAP = "open_world_map"
     OPEN_SEARCH = "open_search"

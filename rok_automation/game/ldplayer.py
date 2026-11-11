@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import random
 import sys
 import time
 from ctypes import wintypes
@@ -308,8 +309,15 @@ def click_ldplayer_point(
     window: EmulatorWindow,
     point: tuple[int, int],
     frame_size: tuple[int, int],
-) -> None:
-    """Click a screenshot-space point inside LDPlayer's visible render child."""
+    *,
+    offset_range: int = 3,
+) -> tuple[int, int]:
+    """Click a screenshot-space point inside LDPlayer's visible render child.
+
+    Applies a small randomized offset (both X and Y) around the reference point
+    before clicking to reduce repetitive clicking patterns while reliably
+    remaining inside the target element.
+    """
 
     if sys.platform != "win32":
         raise RuntimeError("LDPlayer mouse interaction is currently Windows-only")
@@ -353,6 +361,11 @@ def click_ldplayer_point(
     ):
         raise ValueError("The click point is outside the captured game frame")
 
+    # Apply small randomized offset around the reference target coordinates
+    if offset_range > 0:
+        image_x = max(0, min(frame_width - 1, image_x + random.randint(-offset_range, offset_range)))
+        image_y = max(0, min(frame_height - 1, image_y + random.randint(-offset_range, offset_range)))
+
     screen_x = rect.left + round(image_x * render_width / frame_width)
     screen_y = rect.top + round(image_y * render_height / frame_height)
     set_cursor_pos = user32.SetCursorPos
@@ -373,6 +386,7 @@ def click_ldplayer_point(
     mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
     time.sleep(0.025)
     mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+    return (image_x, image_y)
 
 
 def drag_ldplayer_points(

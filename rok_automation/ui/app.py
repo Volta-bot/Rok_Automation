@@ -547,12 +547,13 @@ class ROKAutomationApp:
             )
             cb.pack(side=tk.LEFT)
 
+            is_ready = (title == "Collect Daily Rewards")
             tag = tk.Label(
                 row,
-                text="[Planned]",
+                text="[Ready]" if is_ready else "[Planned]",
                 font=("Segoe UI", 8),
                 bg=ModernColors.BG_CARD,
-                fg=ModernColors.ACCENT_PURPLE,
+                fg=ModernColors.ACCENT_GREEN if is_ready else ModernColors.ACCENT_PURPLE,
             )
             tag.pack(side=tk.LEFT, padx=4)
 
@@ -811,8 +812,16 @@ class ROKAutomationApp:
             return False
 
     def _on_planned_option_toggled(self, title: str, var: tk.BooleanVar) -> None:
-        """Handle toggling of planned / future option."""
+        """Handle toggling of optional / future features."""
         state_str = "ENABLED" if var.get() else "DISABLED"
+        if title == "Collect Daily Rewards":
+            self.log(
+                f"[Option] {title} set to {state_str}. "
+                f"(Daily VIP points, VIP free chest, and Campaign golden chest will be claimed before farming)",
+                tag="info" if var.get() else "warning",
+            )
+            return
+
         self.log(
             f"[Option] {title} set to {state_str}. "
             f"(Note: Feature module is prepared for a future update and will be executed when implemented)",
@@ -821,6 +830,18 @@ class ROKAutomationApp:
 
     def trigger_planned_feature_test(self, feature_name: str) -> None:
         """Handler for the temporary buttons to test/preview planned actions."""
+        if "daily reward" in feature_name.lower():
+            if self._is_running:
+                self.log_warning("Cannot run test while automation is active.")
+                return
+            cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--daily-reward-only"]
+            self.log(
+                "Executing Daily Rewards collection test (VIP & Campaign; planned feature active)...",
+                tag="planned",
+            )
+            self._launch_utility_command(cmd)
+            return
+
         self.log(
             f"[Action Trigger] Testing '{feature_name}': "
             f"Module is planned and currently in design. Stub action simulated successfully.",
@@ -843,18 +864,25 @@ class ROKAutomationApp:
 
         # Check options
         if not self.opt_farm.get():
-            # If user unchecked farm, let them know or ask
-            confirm = messagebox.askyesno(
-                "ROKauto",
-                "Farming option is unchecked. Do you want to run screen diagnostic only?",
-            )
-            if not confirm:
-                return
+            if self.opt_daily_reward.get():
+                self.log_info(
+                    "Farming is unchecked; running Daily Rewards collection only."
+                )
+            else:
+                confirm = messagebox.askyesno(
+                    "ROKauto",
+                    "Farming option is unchecked. Do you want to run screen diagnostic only?",
+                )
+                if not confirm:
+                    return
 
-        # Check planned options and notify user in log
-        planned_enabled = []
         if self.opt_daily_reward.get():
-            planned_enabled.append("Collect Daily Rewards (incl. VIP Chest)")
+            self.log_info(
+                "Daily Rewards active: VIP points, free VIP chest, and Campaign golden chest will be claimed."
+            )
+
+        # Check other planned options and notify user in log
+        planned_enabled = []
         if self.opt_alliance.get():
             planned_enabled.append("Alliance Help & Tech")
         if self.opt_train_troops.get():
@@ -870,6 +898,10 @@ class ROKAutomationApp:
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
         if self.opt_farm.get():
             cmd.append("--farm")
+            if self.opt_daily_reward.get():
+                cmd.append("--daily-reward")
+        elif self.opt_daily_reward.get():
+            cmd.append("--daily-reward-only")
         if not self.opt_switch_gmail.get():
             cmd.append("--no-switch-gmail")
         if self.opt_reset_gmail.get():

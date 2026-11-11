@@ -125,6 +125,7 @@ class FarmingController:
         max_armies: int = 5,
         rng: random.Random | None = None,
         log=print,
+        daily_rewards: bool = False,
         switch_gmail: bool = True,
         gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
         reset_gmail_run: bool = False,
@@ -137,6 +138,7 @@ class FarmingController:
         self.max_armies = max_armies
         self.rng = rng or random.Random()
         self.log = log
+        self.daily_rewards = daily_rewards
         self.switch_gmail = switch_gmail
         self.gmail_state_path = gmail_state_path
         self.reset_gmail_run = reset_gmail_run
@@ -316,6 +318,26 @@ class FarmingController:
                 break
             self.game.wait(_ACTION_RETRY_DELAY)
             screenshot, detection = self._read_screen()
+
+        if detection.state is not ScreenState.UNKNOWN and self.daily_rewards:
+            self._transition(
+                FarmState.CLAIM_DAILY_REWARD,
+                "Claiming daily VIP and campaign rewards",
+            )
+            from rok_automation.automation.daily_reward import DailyRewardClaimer
+
+            claimer = DailyRewardClaimer(
+                self.game,
+                self.detector,
+                log=self._log,
+            )
+            claimer.claim_all()
+            screenshot, detection = self._read_screen()
+            for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
+                if detection.state is not ScreenState.UNKNOWN:
+                    break
+                self.game.wait(_ACTION_RETRY_DELAY)
+                screenshot, detection = self._read_screen()
 
         if detection.state is ScreenState.CITY:
             for _attempt in range(_MAX_ACTION_ATTEMPTS):

@@ -43,7 +43,22 @@ After farming all RoK characters in the current Gmail account, the automation au
 - **Fault-Tolerant & Resumable:** Progress is written atomically after every switch; if interrupted, restarting `--farm` resumes from the last active Gmail account without refarming previously cleared accounts.
 - **In-Game Modal Recovery:** Automatically detects and confirms in-game dialogs ("Xác nhận", "Đồng ý", "Có") during game reload.
 
-### 4. High-Speed Vision Optimizations
+### 4. Daily Reward Collection (VIP & Campaign)
+When enabled, daily rewards are claimed first before any resource farming begins:
+1. **VIP Rewards:**
+   - Detects the VIP badge/text under the governor portrait across any VIP level.
+   - Opens the VIP menu and claims the wooden chest above (daily VIP points) and dismisses the "Thưởng điểm hàng ngày" popup.
+   - Claims the metal chest below via the green "Nhận" button (free daily VIP chest) and dismisses the "Xin chúc mừng" popup.
+   - Closes the VIP menu via the top-right 'X' button.
+2. **Campaign (Chiến dịch / Chinh phạt) Golden Chest:**
+   - Expands the bottom-right menu (3-dots button) if needed and clicks "Chiến dịch".
+   - Selects "Chinh phạt" and clicks the yellow golden chest on the campaign map to claim it.
+   - Confirms and dismisses the reward popup via "Xác nhận".
+   - Presses the `<` back button on the top-left twice at the same position to close Chinh phạt and Chiến dịch menus, cleanly returning to City view to begin farming.
+3. **Session Position Pinning:** Remembers static button locations across accounts to avoid redundant rescanning.
+4. **Resilient Error Recovery:** Detects already-claimed chests, dismisses stuck popups, and recovers safely back to the City view without hanging.
+
+### 5. High-Speed Vision Optimizations
 - **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
 - **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
 - **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
@@ -167,6 +182,14 @@ Press `y` when prompted to start farming across all starred accounts.
 - **Run full multi-account farming automation across all Gmail logins:**
   ```powershell
   python -m rok_automation --farm
+  ```
+- **Claim daily rewards (VIP & Campaign) before farming each account:**
+  ```powershell
+  python -m rok_automation --farm --daily-reward
+  ```
+- **Claim daily rewards on the current account only and exit:**
+  ```powershell
+  python -m rok_automation --daily-reward-only
   ```
 - **Farm characters in the current Gmail account only (disable Gmail switching):**
   ```powershell

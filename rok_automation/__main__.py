@@ -55,6 +55,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--daily-reward",
+        action="store_true",
+        help="claim daily VIP and campaign rewards before farming each account",
+    )
+    parser.add_argument(
+        "--daily-reward-only",
+        action="store_true",
+        help="claim daily VIP and campaign rewards on the current account and exit",
+    )
+    parser.add_argument(
         "--no-switch-gmail",
         action="store_true",
         help="farm characters in the current Gmail only (do not switch Gmail accounts)",
@@ -165,10 +175,17 @@ def main() -> int:
                 else:
                     print("Armies already marching: not recognized")
 
+    if args.daily_reward_only or (args.daily_reward and not args.farm):
+        from rok_automation.automation.daily_reward import DailyRewardClaimer
+        claimer = DailyRewardClaimer(LDPlayerInterface(window))
+        success = claimer.claim_all()
+        return 0 if success else 1
+
     if args.farm:
         try:
             controller = FarmingController(
                 LDPlayerInterface(window),
+                daily_rewards=args.daily_reward,
                 switch_gmail=not args.no_switch_gmail,
                 reset_gmail_run=args.reset_gmail_run,
                 gmail_state_path=args.gmail_state,

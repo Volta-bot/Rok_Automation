@@ -122,6 +122,16 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "level_minus.png": (0.12, 0.18, 0.98, 0.72),
     "settings_button.png": (0.65, 0.60, 1.0, 1.0),
     "character_menu_button.png": (0.10, 0.18, 0.90, 0.86),
+    "vip_shield.png": (0.00, 0.00, 0.25, 0.18),
+    "wooden_chest.png": (0.80, 0.05, 0.98, 0.25),
+    "green_nhan.png": (0.70, 0.40, 0.95, 0.60),
+    "vip_close_x.png": (0.90, 0.00, 1.00, 0.12),
+    "menu_dots.png": (0.88, 0.85, 1.00, 1.00),
+    "chien_dich.png": (0.50, 0.82, 0.65, 1.00),
+    "chinh_phat_card.png": (0.02, 0.10, 0.30, 0.55),
+    "golden_chest.png": (0.02, 0.20, 0.18, 0.45),
+    "xac_nhan.png": (0.35, 0.70, 0.65, 0.95),
+    "back_button.png": (0.00, 0.00, 0.10, 0.12),
 }
 # Search-popup controls sit directly above whichever resource icon is selected.
 _RESOURCE_DEPENDENT_TEMPLATES = frozenset({

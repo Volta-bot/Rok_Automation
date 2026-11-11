@@ -49,6 +49,7 @@ class TimingConfig:
     jitter_max: float = 0.0
     poll_interval: float = 0.040
     transition_timeout: float = 12.0
+    click_offset_max: int = 3
 
 
 class LDPlayerInterface:
@@ -72,15 +73,37 @@ class LDPlayerInterface:
         self,
         bounds: tuple[int, int, int, int],
         screenshot_path: str | Path,
+        *,
+        offset_range: int | None = None,
     ) -> None:
         frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
         x, y, width, height = bounds
+        ref_x = x + width // 2
+        ref_y = y + height // 2
+
+        # Apply a small, randomized offset to target coordinates (both X and Y)
+        # while keeping strictly inside the intended button/element bounds.
+        max_limit = (
+            offset_range
+            if offset_range is not None
+            else self.timing.click_offset_max
+        )
+        max_ox = min(max_limit, max(1, width // 6)) if width > 2 else min(max_limit, 1)
+        max_oy = min(max_limit, max(1, height // 6)) if height > 2 else min(max_limit, 1)
+
+        offset_x = random.randint(-max_ox, max_ox) if max_ox > 0 else 0
+        offset_y = random.randint(-max_oy, max_oy) if max_oy > 0 else 0
+
+        target_x = max(0, min(frame.shape[1] - 1, ref_x + offset_x))
+        target_y = max(0, min(frame.shape[0] - 1, ref_y + offset_y))
+
         click_ldplayer_point(
             self.window,
-            (x + width // 2, y + height // 2),
+            (target_x, target_y),
             frame.shape,
+            offset_range=0,
         )
         self.wait(
             self.timing.click_delay
