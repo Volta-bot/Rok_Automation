@@ -130,6 +130,9 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "chien_dich.png": (0.50, 0.82, 0.65, 1.00),
     "chinh_phat_card.png": (0.02, 0.10, 0.30, 0.55),
     "golden_chest.png": (0.02, 0.20, 0.18, 0.45),
+    "chinh_phat_chest_collected.png": (0.02, 0.20, 0.18, 0.45),
+    "wooden_chest_collected.png": (0.65, 0.05, 0.98, 0.28),
+    "metal_chest_collected.png": (0.55, 0.35, 0.95, 0.75),
     "xac_nhan.png": (0.35, 0.70, 0.65, 0.95),
     "back_button.png": (0.00, 0.00, 0.10, 0.12),
 }

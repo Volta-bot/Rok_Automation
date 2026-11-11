@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import cv2
+import numpy as np
 
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
@@ -41,6 +42,9 @@ NORM_BACK_BUTTON = (0.010, 0.015, 0.045, 0.055)
 # Session-wide cache: (frame_width, frame_height, key) -> (x, y, w, h)
 # Ensures static button locations are scanned once and reused across all accounts.
 _PINNED_COORDINATES: dict[tuple[int, int, str], tuple[int, int, int, int]] = {}
+
+# Countdown timer pattern (e.g. "09:23:34" or "10:38") indicating collected rewards.
+_TIMER_REGEX = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
 
 
 def strip_accents_and_normalize(text: str) -> str:
@@ -208,11 +212,19 @@ class DailyRewardClaimer:
             self._log("VIP menu did not open after retries; skipping VIP rewards.")
             return False
 
-        # 3. Claim Wooden Chest (above) - Daily Points
-        self._claim_wooden_chest(size)
+        # 3. Claim Wooden Chest (above) - Daily Points (or skip if already collected)
+        screenshot, frame, size = self._capture()
+        if self._is_wooden_chest_collected(frame, screenshot):
+            self._log("VIP daily points (wooden chest) already collected today. Skipping.")
+        else:
+            self._claim_wooden_chest(size)
 
-        # 4. Claim Metal Chest (below) - Daily Free Gift
-        self._claim_metal_chest(size)
+        # 4. Claim Metal Chest (below) - Daily Free Gift (or skip if already collected)
+        screenshot, frame, size = self._capture()
+        if self._is_metal_chest_collected(frame, screenshot):
+            self._log("VIP daily free gift (metal chest) already collected today. Skipping.")
+        else:
+            self._claim_metal_chest(size)
 
         # 5. Close VIP menu via 'X' on top right
         self._close_vip_menu(size)
@@ -273,6 +285,25 @@ class DailyRewardClaimer:
             pass
         return False
 
+    def _is_wooden_chest_collected(self, frame: Any, screenshot: Path) -> bool:
+        """Check if VIP wooden chest (daily points) has already been collected."""
+        h, w = frame.shape[:2]
+        roi = (int(0.60 * w), 0, int(0.40 * w), int(0.35 * h))
+        try:
+            dets = read_text_detections(frame, roi)
+            for text, _box, _score in dets:
+                if _TIMER_REGEX.search(text):
+                    return True
+        except Exception:
+            pass
+
+        tpl = _DAILY_REWARD_TEMPLATES / "wooden_chest_collected.png"
+        if tpl.is_file():
+            hit = self.detector.locate_template(screenshot, tpl, confidence_threshold=0.75)
+            if hit is not None:
+                return True
+        return False
+
     def _claim_wooden_chest(self, size: tuple[int, int]) -> None:
         """Click wooden chest above to claim daily points, and dismiss popup."""
         w, h = size
@@ -327,6 +358,40 @@ class DailyRewardClaimer:
                     return True
         except Exception:
             pass
+        return False
+
+    def _is_metal_chest_collected(self, frame: Any, screenshot: Path) -> bool:
+        """Check if VIP metal chest (daily free gift) has already been collected."""
+        h, w = frame.shape[:2]
+        roi = (int(0.40 * w), int(0.35 * h), int(0.60 * w), int(0.60 * h))
+        dets: list[tuple[str, tuple[int, int, int, int], float]] = []
+        try:
+            dets = read_text_detections(frame, roi)
+            for text, _box, _score in dets:
+                if _TIMER_REGEX.search(text):
+                    return True
+        except Exception:
+            pass
+
+        tpl = _DAILY_REWARD_TEMPLATES / "metal_chest_collected.png"
+        if tpl.is_file():
+            hit = self.detector.locate_template(screenshot, tpl, confidence_threshold=0.75)
+            if hit is not None:
+                return True
+
+        # Check absence of green 'Nhận' button and text
+        tpl_nhan = _DAILY_REWARD_TEMPLATES / "green_nhan.png"
+        hit_nhan = None
+        if tpl_nhan.is_file():
+            hit_nhan = self.detector.locate_template(screenshot, tpl_nhan, confidence_threshold=0.70)
+        has_nhan_text = False
+        for text, _b, _s in dets:
+            if "nhan" in strip_accents_and_normalize(text):
+                has_nhan_text = True
+                break
+        if hit_nhan is None and not has_nhan_text:
+            return True
+
         return False
 
     def _claim_metal_chest(self, size: tuple[int, int]) -> None:
@@ -457,8 +522,12 @@ class DailyRewardClaimer:
         # 3. Click 'Chinh phạt' card
         self._open_chinh_phat_screen(size)
 
-        # 4. Click yellow golden chest to claim daily reward
-        self._claim_chinh_phat_chest(size)
+        # 4. Check if golden chest is already claimed, or click to claim
+        screenshot, frame, size = self._capture()
+        if self._is_chinh_phat_chest_collected(frame, screenshot):
+            self._log("Chinh phạt daily golden chest already collected today. Skipping claim.")
+        else:
+            self._claim_chinh_phat_chest(size)
 
         # 5. Press '<' back button twice at the same position to return to City
         self._close_campaign_menus(size)
@@ -645,6 +714,38 @@ class DailyRewardClaimer:
                     return True
         except Exception:
             pass
+        return False
+
+    def _is_chinh_phat_chest_collected(self, frame: Any, screenshot: Path) -> bool:
+        """Check if Chinh phạt campaign daily chest has already been collected."""
+        # 1. If uncollected golden glowing chest is detected, it is definitely not collected.
+        tpl_gold = _DAILY_REWARD_TEMPLATES / "golden_chest.png"
+        if tpl_gold.is_file():
+            hit_gold = self.detector.locate_template(screenshot, tpl_gold, confidence_threshold=0.70)
+            if hit_gold is not None:
+                return False
+
+        # 2. Check for collected (open grey chest) template.
+        tpl_collected = _DAILY_REWARD_TEMPLATES / "chinh_phat_chest_collected.png"
+        if tpl_collected.is_file():
+            hit_col = self.detector.locate_template(screenshot, tpl_collected, confidence_threshold=0.68)
+            if hit_col is not None:
+                return True
+
+        # 3. Check color saturation in the chest dial ROI.
+        h, w = frame.shape[:2]
+        rx = int(0.04 * w)
+        ry = int(0.22 * h)
+        rw = int(0.12 * w)
+        rh = int(0.20 * h)
+        crop = frame[ry : ry + rh, rx : rx + rw]
+        if crop.size > 0:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            sat_mean = float(np.mean(hsv[:, :, 1]))
+            # Glowing golden chest has sat > 70; open grey chest has sat < 40
+            if sat_mean < 45.0:
+                return True
+
         return False
 
     def _claim_chinh_phat_chest(self, size: tuple[int, int]) -> None:

@@ -138,6 +138,9 @@ class TestDailyReward(unittest.TestCase):
 
         # Mock sub-steps to simulate smooth successful progression
         with patch.object(claimer, "_is_vip_menu", side_effect=[True, False]), \
+             patch.object(claimer, "_is_wooden_chest_collected", return_value=False), \
+             patch.object(claimer, "_is_metal_chest_collected", return_value=False), \
+             patch.object(claimer, "_is_chinh_phat_chest_collected", return_value=False), \
              patch.object(claimer, "_is_vip_points_popup", return_value=True), \
              patch.object(claimer, "_is_vip_chest_popup", return_value=True), \
              patch.object(claimer, "_is_chien_dich_menu", return_value=True), \
@@ -218,6 +221,103 @@ class TestDailyReward(unittest.TestCase):
                     context = controller._run_one_account()
                     mock_claim.assert_called_once()
                     self.assertIn(FarmState.CLAIM_DAILY_REWARD, [FarmState.CLAIM_DAILY_REWARD])
+
+    def test_skip_already_collected_rewards(self) -> None:
+        """Verify already collected rewards are skipped cleanly without attempting claim clicks."""
+        game = FakeGame()
+        detector = MagicMock(spec=ScreenDetector)
+        detector.detect.return_value = ScreenDetection(
+            state=ScreenState.CITY,
+            confidence=0.95,
+            evidence="city map button",
+        )
+        detector.locate_template.return_value = None
+
+        claimer = DailyRewardClaimer(game, detector=detector)
+
+        with patch.object(claimer, "_is_vip_menu", side_effect=[True, False]), \
+             patch.object(claimer, "_is_wooden_chest_collected", return_value=True), \
+             patch.object(claimer, "_is_metal_chest_collected", return_value=True), \
+             patch.object(claimer, "_is_chinh_phat_chest_collected", return_value=True), \
+             patch.object(claimer, "_is_chien_dich_menu", return_value=True), \
+             patch.object(claimer, "_is_chinh_phat_screen", return_value=True), \
+             patch.object(claimer, "_claim_wooden_chest") as mock_claim_wood, \
+             patch.object(claimer, "_claim_metal_chest") as mock_claim_metal, \
+             patch.object(claimer, "_claim_chinh_phat_chest") as mock_claim_cp:
+
+            success = claimer.claim_all()
+            self.assertTrue(success)
+            # Verify claiming functions were NOT called because rewards were already collected
+            mock_claim_wood.assert_not_called()
+            mock_claim_metal.assert_not_called()
+            mock_claim_cp.assert_not_called()
+
+            # Navigation clicks still occurred:
+            # 1. VIP button
+            # 2. VIP close X
+            # 3. Menu dots
+            # 4. Chiến dịch
+            # 5. Chinh phạt
+            # 6. Back button 1
+            # 7. Back button 2
+            self.assertGreaterEqual(len(game.clicks), 5)
+            self.assertLess(len(game.clicks), 10)
+
+    def test_is_wooden_chest_collected_timer(self) -> None:
+        """Verify countdown timer text triggers wooden chest collected status."""
+        claimer = DailyRewardClaimer(FakeGame())
+        dummy = np.zeros((600, 1000, 3), dtype=np.uint8)
+        frame_path = _ARTIFACTS_DIR / "test_960.png"
+
+        # With countdown timer present
+        with patch("rok_automation.automation.daily_reward.read_text_detections") as mock_dets:
+            mock_dets.return_value = [("09:23:34", (700, 100, 100, 30), 0.95)]
+            self.assertTrue(claimer._is_wooden_chest_collected(dummy, frame_path))
+
+        # Without timer and template not matching
+        with patch("rok_automation.automation.daily_reward.read_text_detections") as mock_dets, \
+             patch.object(claimer.detector, "locate_template", return_value=None):
+            mock_dets.return_value = [("VIP 16", (700, 100, 100, 30), 0.95)]
+            self.assertFalse(claimer._is_wooden_chest_collected(dummy, frame_path))
+
+    def test_is_metal_chest_collected_timer_and_no_nhan(self) -> None:
+        """Verify metal chest detects timer or absence of green Nhận button."""
+        claimer = DailyRewardClaimer(FakeGame())
+        dummy = np.zeros((600, 1000, 3), dtype=np.uint8)
+        frame_path = _ARTIFACTS_DIR / "test_960.png"
+
+        # 1. With timer present -> True
+        with patch("rok_automation.automation.daily_reward.read_text_detections") as mock_dets:
+            mock_dets.return_value = [("09:23:34", (700, 400, 100, 30), 0.95)]
+            self.assertTrue(claimer._is_metal_chest_collected(dummy, frame_path))
+
+        # 2. Uncollected with green Nhận detected -> False
+        with patch("rok_automation.automation.daily_reward.read_text_detections") as mock_dets, \
+             patch.object(claimer.detector, "locate_template", side_effect=lambda s, tpl, **kw: MagicMock() if "green_nhan" in str(tpl) else None):
+            mock_dets.return_value = [("NHẬN", (750, 450, 80, 40), 0.95)]
+            self.assertFalse(claimer._is_metal_chest_collected(dummy, frame_path))
+
+    def test_is_chinh_phat_chest_collected_saturation_and_template(self) -> None:
+        """Verify Chinh Phạt chest uses golden chest template and desaturation check."""
+        claimer = DailyRewardClaimer(FakeGame())
+        h, w = 600, 1000
+        frame_path = _ARTIFACTS_DIR / "test_960.png"
+
+        # 1. Uncollected: golden chest matches
+        with patch.object(claimer.detector, "locate_template", side_effect=lambda s, tpl, **kw: MagicMock() if "golden_chest" in str(tpl) else None):
+            dummy = np.zeros((h, w, 3), dtype=np.uint8)
+            self.assertFalse(claimer._is_chinh_phat_chest_collected(dummy, frame_path))
+
+        # 2. Collected: golden chest does not match, chest area is desaturated grey (sat < 45)
+        with patch.object(claimer.detector, "locate_template", return_value=None):
+            # Grey frame (B=100, G=100, R=100 has saturation 0)
+            grey_frame = np.full((h, w, 3), 100, dtype=np.uint8)
+            self.assertTrue(claimer._is_chinh_phat_chest_collected(grey_frame, frame_path))
+
+            # Vibrant golden frame (B=0, G=215, R=255 has saturation 255)
+            gold_frame = np.zeros((h, w, 3), dtype=np.uint8)
+            gold_frame[:, :] = (0, 215, 255)
+            self.assertFalse(claimer._is_chinh_phat_chest_collected(gold_frame, frame_path))
 
 
 if __name__ == "__main__":
