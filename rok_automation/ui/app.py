@@ -104,8 +104,10 @@ class ROKAutomationApp:
         self.root = root
         self.session_summary_path = session_summary_path
         self.root.title("Rise of Kingdoms Automation — ROKauto")
-        self.root.geometry("880x720")
-        self.root.minsize(760, 560)
+        # Wide enough for the whole layout: the two option cards side by
+        # side need about 1160px, and the button row needs the rest.
+        self.root.geometry("1200x820")
+        self.root.minsize(880, 640)
         self.root.configure(bg=ModernColors.BG_DARK)
 
         # Process & Thread state

@@ -49,6 +49,22 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertEqual(self.app.btn_start.cget("state"), tk.NORMAL)
         self.assertEqual(self.app.btn_stop.cget("state"), tk.DISABLED)
 
+    def test_default_window_fits_the_content(self) -> None:
+        """The default window must be wide enough to show every control.
+
+        The option cards sit side by side and need about 1160px, so a
+        narrower window cuts off the right-hand card.
+        """
+        self.app.root.update_idletasks()
+        geometry = self.app.root.geometry()
+        width = int(geometry.split("x")[0])
+        self.assertGreaterEqual(
+            width,
+            self.app.root.winfo_reqwidth(),
+            f"default window is {width}px but the content needs "
+            f"{self.app.root.winfo_reqwidth()}px",
+        )
+
     def test_running_state_toggle(self) -> None:
         """Verify widget states switch correctly between idle and running."""
         self.app._set_running_state(True)
