@@ -61,7 +61,7 @@ When enabled, daily rewards are claimed first before any resource farming begins
 ### 5. Resolution-Independent Detection
 - **Canonical Capture Size:** Every screenshot is rescaled to a fixed **1280x720** frame before any detection runs. The UI templates are authored against one resolution, so normalising the capture keeps template matching, OCR regions and the pinned-position cache **identical no matter how large or small the LDPlayer window is**.
   - Without this, the matcher's scale ceiling (`maximum_scale = 1.35`) meant any capture wider than ~1728px could not match the templates at all — the score collapsed from `0.99` to `0.65` on a maximised window.
-  - Measured across window widths from 800px to 1920px on real game frames, the mean template score spread fell from **0.119 to 0.014**.
+  - Measured across window widths from 800px to 1920px on real game frames, the mean template score spread fell from **0.117 to 0.014** (30 of 31 template/frame pairs improved; the remaining one was unchanged at 0.013 → 0.016).
 - **Aspect-Correct Crops:** A window whose aspect is not 16:9 is centre-cropped rather than stretched, so the game content is never distorted.
 - **Bidirectional Interpolation:** Shrinking uses area averaging (best detail retention); growing uses **bilinear** rather than cubic/lanczos, because those ring around sharp edges and the ringing made the OCR read of the small `Cấp: N` label fail at some window sizes.
 - **Correct Click Mapping:** Clicks and drags are mapped back through the same crop and scale the capture used, so a click always lands on the same game pixel regardless of the window size.
