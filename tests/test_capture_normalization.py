@@ -8,6 +8,7 @@ a scale beyond its ceiling whenever the emulator window is large.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import cv2
@@ -224,6 +225,47 @@ class TestClickMappingAfterNormalization(unittest.TestCase):
                     (screen_y - top) / render_height,
                     expected_y,
                     delta=1.5 / render_height,
+                )
+
+
+class TestUpscaleKeepsSmallTextReadable(unittest.TestCase):
+    """Verify the upscale direction does not blur away the small level label.
+
+    A small emulator window means the guest render is downscaled by the
+    emulator and then upscaled back to canonical here. Cubic and Lanczos
+    resampling ring around sharp edges, and that ringing makes the OCR read
+    the "Cấp: N" label fail, so bilinear must be used when growing.
+    """
+
+    SEARCH_FRAME = "artifacts/test_search_960.png"
+
+    def _level_ocr(self, frame) -> int | None:
+        from rok_automation.vision.screen import ScreenDetector
+
+        detector = ScreenDetector()
+        detector.locate_template = lambda *a, **k: None  # type: ignore[method-assign]
+        path = "artifacts/_level_probe.png"
+        cv2.imwrite(path, frame)
+        try:
+            return detector.detect(path, read_account=False).resource_level
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_level_label_is_readable_after_upscaling(self) -> None:
+        source = cv2.imread(self.SEARCH_FRAME)
+        self.assertIsNotNone(source, f"missing test artifact {self.SEARCH_FRAME}")
+        # Emulate the guest 1920x1080 render being scaled down to a small
+        # window and then normalised back to canonical.
+        guest = cv2.resize(source, (1920, 1080), interpolation=cv2.INTER_CUBIC)
+        for width in [1024, 960, 896, 800, 768, 720]:
+            with self.subTest(width=width):
+                height = round(width * 9 / 16)
+                window = cv2.resize(guest, (width, height), interpolation=cv2.INTER_AREA)
+                normalized = normalize_capture(window)
+                self.assertEqual(
+                    self._level_ocr(normalized),
+                    8,
+                    f"level label unreadable after upscaling a {width}px window",
                 )
 
 

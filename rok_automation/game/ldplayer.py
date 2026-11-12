@@ -88,7 +88,10 @@ def normalize_capture(frame: Any) -> Any:
     cropped = frame[top : top + crop_height, left : left + crop_width]
 
     scale = target_width / crop_width
-    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    # Shrinking uses area averaging (best detail retention). Growing uses
+    # bilinear rather than cubic/lanczos: those overshoot around sharp edges
+    # and the ringing confuses the OCR that reads the small level label.
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
     return cv2.resize(
         cropped,
         (target_width, target_height),
