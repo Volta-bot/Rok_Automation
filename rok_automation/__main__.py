@@ -11,6 +11,7 @@ from rok_automation.game.ldplayer import (
     find_ldplayer_window,
 )
 from rok_automation.game.interface import LDPlayerInterface
+from rok_automation.game.ldplayer import CANONICAL_CAPTURE_SIZE
 from rok_automation.vision.screen import ScreenDetector
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
 
@@ -126,6 +127,11 @@ def main() -> int:
             print(f"Screenshot failed: {exc}")
             return 1
         print(f"Screenshot saved: {output_path}")
+        print(
+            "  (normalised to "
+            f"{CANONICAL_CAPTURE_SIZE[0]}x{CANONICAL_CAPTURE_SIZE[1]} "
+            "for resolution-independent detection)"
+        )
 
         if args.detect_screen:
             try:

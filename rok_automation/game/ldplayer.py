@@ -309,9 +309,9 @@ def capture_ldplayer_window(window: EmulatorWindow, output_path: Path) -> Path:
     relative to the current working directory.
 
     The captured frame is normalised to :data:`CANONICAL_CAPTURE_SIZE` so the
-    templates and OCR regions behave identically at every window size. The
-    transform describing that mapping is recorded so clicks and drags are
-    still delivered to the correct render pixel.
+    templates and OCR regions behave identically at every window size. Clicks
+    and drags are mapped back through the same crop and scale the capture
+    used, so they still land on the correct render pixel.
     """
 
     if sys.platform != "win32":
