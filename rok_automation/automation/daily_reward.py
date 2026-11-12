@@ -27,7 +27,9 @@ _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
 # Static normalized coordinates (x, y, w, h) for standard 16:9 resolutions.
 # Used as fast lookups and reliable fallbacks.
 NORM_VIP_BUTTON = (0.075, 0.065, 0.075, 0.045)
-NORM_WOODEN_CHEST = (0.855, 0.100, 0.075, 0.070)
+# The daily-VIP-points reward is claimed with the upper white "Nhận" button,
+# below the chest artwork. Targeting the artwork can land beside the close X.
+NORM_WOODEN_NHAN = (0.820, 0.225, 0.140, 0.055)
 NORM_GREEN_NHAN = (0.771, 0.463, 0.080, 0.056)
 NORM_VIP_CLOSE_X = (0.940, 0.015, 0.045, 0.055)
 NORM_POPUP_DISMISS = (0.500, 0.920, 0.010, 0.010)
@@ -45,6 +47,7 @@ _PINNED_COORDINATES: dict[tuple[int, int, str], tuple[int, int, int, int]] = {}
 
 # Countdown timer pattern (e.g. "09:23:34" or "10:38") indicating collected rewards.
 _TIMER_REGEX = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
+_VIP_REWARD_CLAIM_DELAY = 2.0
 
 
 def strip_accents_and_normalize(text: str) -> str:
@@ -306,45 +309,67 @@ class DailyRewardClaimer:
 
     def _claim_wooden_chest(self, size: tuple[int, int]) -> None:
         """Click wooden chest above to claim daily points, and dismiss popup."""
-        w, h = size
         self._log("Claiming VIP daily points (wooden chest above)...")
         screenshot, frame, _ = self._capture()
 
-        # Locate wooden chest icon
-        chest_bounds = self._locate_wooden_chest(screenshot, size)
-        self.game.click(chest_bounds, screenshot)
-        self.game.wait(0.6)
+        # Claim through the white upper 'Nhận' button, not the chest artwork.
+        nhan_bounds = self._locate_wooden_nhan(frame, size)
+        self.game.click(nhan_bounds, screenshot)
+        self.game.wait(_VIP_REWARD_CLAIM_DELAY)
 
         # Check for 'Thưởng điểm hàng ngày' popup
         _, popup_frame, _ = self._capture()
         if self._is_vip_points_popup(popup_frame):
             self._log("Daily VIP points popup appeared. Dismissing popup...")
-            dismiss_pt = (round(NORM_POPUP_DISMISS[0] * w), round(NORM_POPUP_DISMISS[1] * h), 1, 1)
-            self.game.click(dismiss_pt, self.game.screenshot())
+            self._dismiss_vip_reward_popup(size)
             self.game.wait(0.3)
         else:
             self._log("VIP daily points already claimed today or no popup shown.")
 
-    def _locate_wooden_chest(
+    def _dismiss_vip_reward_popup(self, size: tuple[int, int]) -> None:
+        """Dismiss a VIP reward popup at a fixed point without click jitter."""
+
+        w, h = size
+        dismiss_pt = (
+            round(NORM_POPUP_DISMISS[0] * w),
+            round(NORM_POPUP_DISMISS[1] * h),
+            1,
+            1,
+        )
+        screenshot = self.game.screenshot()
+        try:
+            self.game.click(dismiss_pt, screenshot, offset_range=0)
+        except TypeError:
+            # Lightweight test and alternate game interfaces may not expose
+            # LDPlayerInterface's optional offset_range argument.
+            self.game.click(dismiss_pt, screenshot)
+
+    def _locate_wooden_nhan(
         self,
-        screenshot: Path,
+        frame: Any,
         size: tuple[int, int],
     ) -> tuple[int, int, int, int]:
+        """Locate the white 'Nhận' button for the daily VIP points reward."""
+
         w, h = size
-        cached = _PINNED_COORDINATES.get((w, h, "wooden_chest"))
+        cached = _PINNED_COORDINATES.get((w, h, "wooden_nhan"))
         if cached is not None:
             return cached
 
-        tpl = _DAILY_REWARD_TEMPLATES / "wooden_chest.png"
-        if tpl.is_file():
-            hit = self.detector.locate_template(screenshot, tpl, confidence_threshold=0.70)
-            if hit is not None:
-                self._pin_bounds(size, "wooden_chest", hit.bounds)
-                return hit.bounds
+        # Limit OCR to the upper reward row so it cannot select the lower
+        # green 'Nhận' button for the metal chest.
+        roi = (int(w * 0.78), int(h * 0.18), int(w * 0.20), int(h * 0.14))
+        try:
+            for text, bounds, _score in read_text_detections(frame, roi):
+                if "nhan" in strip_accents_and_normalize(text):
+                    self._pin_bounds(size, "wooden_nhan", bounds)
+                    return bounds
+        except Exception:
+            pass
 
-        fallback = self._get_cached_bounds(size, "wooden_chest", NORM_WOODEN_CHEST)
-        self._pin_bounds(size, "wooden_chest", fallback)
-        return fallback
+        # Do not pin an unverified fallback: a later OCR pass can still
+        # calibrate the button position for this resolution.
+        return self._get_cached_bounds(size, "wooden_nhan", NORM_WOODEN_NHAN)
 
     def _is_vip_points_popup(self, frame: Any) -> bool:
         """Check if 'Thưởng điểm hàng ngày' popup is active."""
@@ -396,20 +421,18 @@ class DailyRewardClaimer:
 
     def _claim_metal_chest(self, size: tuple[int, int]) -> None:
         """Click green 'Nhận' button on metal chest below, and dismiss popup."""
-        w, h = size
         self._log("Claiming VIP daily free chest (metal chest below)...")
         screenshot, frame, _ = self._capture()
 
         nhan_bounds = self._locate_green_nhan(screenshot, frame, size)
         self.game.click(nhan_bounds, screenshot)
-        self.game.wait(0.6)
+        self.game.wait(_VIP_REWARD_CLAIM_DELAY)
 
         # Check for 'Xin chúc mừng' popup
         _, popup_frame, _ = self._capture()
         if self._is_vip_chest_popup(popup_frame):
             self._log("VIP daily gift popup appeared ('Xin chúc mừng'). Dismissing...")
-            dismiss_pt = (round(NORM_POPUP_DISMISS[0] * w), round(NORM_POPUP_DISMISS[1] * h), 1, 1)
-            self.game.click(dismiss_pt, self.game.screenshot())
+            self._dismiss_vip_reward_popup(size)
             self.game.wait(0.3)
         else:
             self._log("VIP daily free chest already claimed today or no popup shown.")
@@ -554,7 +577,7 @@ class DailyRewardClaimer:
         self._log("Opening bottom menu (clicking 3 dots at bottom-right)...")
         dots_bounds = self._locate_menu_dots(screenshot, size)
         self.game.click(dots_bounds, screenshot)
-        self.game.wait(0.4)
+        self.game.wait(0.5)
 
     def _locate_menu_dots(
         self,
@@ -818,7 +841,7 @@ class DailyRewardClaimer:
         return None
 
     def _close_campaign_menus(self, size: tuple[int, int]) -> None:
-        """Press '<' back button twice at the same position to return to City."""
+        """Press '<' back button twice to leave the campaign screens."""
         w, h = size
         self._log("Closing Chinh phạt and Chiến dịch menus (clicking Back button twice)...")
         screenshot, frame, _ = self._capture()
@@ -835,16 +858,7 @@ class DailyRewardClaimer:
         self.game.click(back_bounds, self.game.screenshot())
         self.game.wait(1.0)
 
-        # Verify return to City
-        returned = self._wait_for_condition(
-            condition=lambda f: self.detector.detect(self.game.screenshot()).state is ScreenState.CITY,
-            timeout=4.0,
-            retry_action=lambda: self.game.click(back_bounds, self.game.screenshot()),
-        )
-        if returned:
-            self._log("Successfully returned to City view.")
-        else:
-            self._log("Warning: Could not confirm City view after closing campaign menus.")
+        self._log("Campaign menus closed.")
 
     def _locate_back_button(
         self,

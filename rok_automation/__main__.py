@@ -70,6 +70,11 @@ def main() -> int:
         help="farm characters in the current Gmail only (do not switch Gmail accounts)",
     )
     parser.add_argument(
+        "--current-rok-only",
+        action="store_true",
+        help="farm the currently active RoK character only (do not switch characters)",
+    )
+    parser.add_argument(
         "--reset-gmail-run",
         action="store_true",
         help="clear saved Gmail rotation progress and start a fresh full run",
@@ -187,6 +192,7 @@ def main() -> int:
                 LDPlayerInterface(window),
                 daily_rewards=args.daily_reward,
                 switch_gmail=not args.no_switch_gmail,
+                switch_rok_accounts=not args.current_rok_only,
                 reset_gmail_run=args.reset_gmail_run,
                 gmail_state_path=args.gmail_state,
             )

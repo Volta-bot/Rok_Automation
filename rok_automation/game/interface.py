@@ -30,6 +30,8 @@ class GameInterface(Protocol):
         self,
         bounds: tuple[int, int, int, int],
         screenshot_path: str | Path,
+        *,
+        offset_range: int | None = None,
     ) -> None: ...
 
     def drag(

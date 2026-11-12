@@ -357,6 +357,51 @@ class ROKAutomationApp:
         )
         self.btn_stop.pack(side=tk.RIGHT, fill=tk.X, expand=False)
 
+        scope_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
+        scope_box.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(
+            scope_box,
+            text="Quick Farm Scope:",
+            font=("Segoe UI", 8, "bold"),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.TEXT_MUTED,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_farm_current_gmail = tk.Button(
+            scope_box,
+            text="Farm This Gmail Only",
+            font=("Segoe UI", 8, "bold"),
+            bg=ModernColors.BG_CARD_LIGHT,
+            fg=ModernColors.TEXT_PRIMARY,
+            activebackground=ModernColors.BG_BORDER,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            cursor="hand2",
+            command=lambda: self.start_automation(scope="gmail"),
+            padx=7,
+            pady=3,
+        )
+        self.btn_farm_current_gmail.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_farm_current_rok = tk.Button(
+            scope_box,
+            text="Farm This RoK Account Only",
+            font=("Segoe UI", 8, "bold"),
+            bg=ModernColors.BG_CARD_LIGHT,
+            fg=ModernColors.TEXT_PRIMARY,
+            activebackground=ModernColors.BG_BORDER,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            cursor="hand2",
+            command=lambda: self.start_automation(scope="rok"),
+            padx=7,
+            pady=3,
+        )
+        self.btn_farm_current_rok.pack(side=tk.LEFT)
+
         # Core Options Section
         opts_lbl = tk.Label(
             parent,
@@ -848,11 +893,14 @@ class ROKAutomationApp:
             tag="planned",
         )
 
-    def start_automation(self) -> None:
+    def start_automation(self, scope: str = "all") -> None:
         """Compile selected options and launch the automation worker subprocess."""
         if self._is_running:
             self.log_warning("Automation is already running.")
             return
+
+        if scope not in {"all", "gmail", "rok"}:
+            raise ValueError(f"Unsupported farm scope: {scope}")
 
         self._session_targets.clear()
         self.lbl_session_farmed.config(text="")
@@ -863,7 +911,8 @@ class ROKAutomationApp:
                 pass
 
         # Check options
-        if not self.opt_farm.get():
+        farm_enabled = self.opt_farm.get() or scope != "all"
+        if not farm_enabled:
             if self.opt_daily_reward.get():
                 self.log_info(
                     "Farming is unchecked; running Daily Rewards collection only."
@@ -881,6 +930,11 @@ class ROKAutomationApp:
                 "Daily Rewards active: VIP points, free VIP chest, and Campaign golden chest will be claimed."
             )
 
+        if scope == "gmail":
+            self.log_info("Farming all RoK accounts in the current Gmail only.")
+        elif scope == "rok":
+            self.log_info("Farming the current RoK account only.")
+
         # Check other planned options and notify user in log
         planned_enabled = []
         if self.opt_alliance.get():
@@ -896,15 +950,17 @@ class ROKAutomationApp:
             )
 
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
-        if self.opt_farm.get():
+        if farm_enabled:
             cmd.append("--farm")
             if self.opt_daily_reward.get():
                 cmd.append("--daily-reward")
         elif self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
-        if not self.opt_switch_gmail.get():
+        if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
             cmd.append("--no-switch-gmail")
-        if self.opt_reset_gmail.get():
+        if scope == "rok":
+            cmd.append("--current-rok-only")
+        if scope == "all" and self.opt_reset_gmail.get():
             cmd.append("--reset-gmail-run")
 
         self.log_info(f"Starting automation with command: {' '.join(cmd)}")
@@ -1154,6 +1210,8 @@ class ROKAutomationApp:
         self._is_running = is_running
         if is_running:
             self.btn_start.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
+            self.btn_farm_current_gmail.config(state=tk.DISABLED)
+            self.btn_farm_current_rok.config(state=tk.DISABLED)
             self.btn_stop.config(state=tk.NORMAL, bg=ModernColors.ACCENT_RED)
             self.lbl_run_state.config(
                 text="● Running...", fg=ModernColors.ACCENT_GREEN
@@ -1161,6 +1219,8 @@ class ROKAutomationApp:
             self.console_line_count.config(text="(Active)", fg=ModernColors.ACCENT_GREEN)
         else:
             self.btn_start.config(state=tk.NORMAL, bg=ModernColors.ACCENT_GREEN)
+            self.btn_farm_current_gmail.config(state=tk.NORMAL)
+            self.btn_farm_current_rok.config(state=tk.NORMAL)
             self.btn_stop.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
             self.lbl_run_state.config(text="● Idle", fg=ModernColors.TEXT_MUTED)
             self.console_line_count.config(text="(Ready)", fg=ModernColors.TEXT_MUTED)

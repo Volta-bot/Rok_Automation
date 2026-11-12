@@ -28,7 +28,6 @@ _MAX_SCROLLS = 32
 _MAX_ACTION_ATTEMPTS = 5
 _ACTION_RETRY_DELAY = 0.20
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_CITY_MAP_BUTTON = _PROJECT_ROOT / "templates/navigation/city_map_button.png"
 _SETTINGS_BUTTON = _PROJECT_ROOT / "templates/profile/settings_button.png"
 _CHARACTER_MENU_BUTTON = (
     _PROJECT_ROOT / "templates/profile/character_menu_button.png"
@@ -1261,7 +1260,6 @@ class AccountSwitcher:
     def _wait_for_game(self, expected_name: str) -> None:
         deadline = time.monotonic() + _ACCOUNT_LOAD_TIMEOUT
         next_progress_log = time.monotonic() + 15.0
-        city_map_clicks = 0
         reported_character_list = False
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
@@ -1295,24 +1293,8 @@ class AccountSwitcher:
                 read_account=False,
                 candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
             )
-            if (
-                detection.state is ScreenState.CITY
-                and city_map_clicks < _MAX_ACTION_ATTEMPTS
-            ):
-                hit = self.detector.locate_template(
-                    screenshot,
-                    _CITY_MAP_BUTTON,
-                    confidence_threshold=0.65,
-                )
-                if hit is not None:
-                    self.game.click(hit.bounds, screenshot)
-                    city_map_clicks += 1
-                    self.game.wait(0.50)
-                else:
-                    self.game.wait(max(0.20, self.game.timing.poll_interval))
-                continue
-            if detection.state is ScreenState.WORLD_MAP:
-                self._log(f"RoK world map loaded for {expected_name}")
+            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+                self._log(f"RoK {detection.state.value} loaded for {expected_name}")
                 return
             if time.monotonic() >= next_progress_log:
                 self._log(f"Still waiting for {expected_name} to load")

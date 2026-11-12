@@ -319,6 +319,7 @@ class GmailSwitcher:
         returning_to_first = False
         scroll_settled = False
         scrolls = 0
+        bottom_confirmation_scroll_done = False
         last_signature: tuple[str, ...] | None = None
         last_state = "unknown"
 
@@ -431,11 +432,21 @@ class GmailSwitcher:
                         if len(lilith.entries) >= 2
                         else 0.0
                     )
-                    if (
+                    at_bottom = (
                         (last_signature is not None and signature == last_signature)
                         or span < frame.shape[0] * 0.05
                         or scrolls >= _MAX_DROPDOWN_SCROLLS
-                    ):
+                    )
+                    if at_bottom and not bottom_confirmation_scroll_done:
+                        self._log(
+                            "Confirming the Gmail dropdown bottom with one extra scroll"
+                        )
+                        last_signature = signature
+                        scrolls += 1
+                        bottom_confirmation_scroll_done = True
+                        self._scroll_dropdown(screenshot, frame, lilith.entries)
+                        continue
+                    if at_bottom:
                         scroll_settled = True
                         self._log(
                             "Gmail dropdown is at the bottom; visible accounts: "
@@ -475,6 +486,7 @@ class GmailSwitcher:
                     scroll_settled = False
                     last_signature = None
                     scrolls = 0
+                    bottom_confirmation_scroll_done = False
                     continue
                 self._bump(clicks, "entry", "Gmail dropdown entry")
                 self.game.click(entry.bounds, screenshot)
@@ -517,6 +529,7 @@ class GmailSwitcher:
                 scroll_settled = False
                 last_signature = None
                 scrolls = 0
+                bottom_confirmation_scroll_done = False
                 self._wait_for_state_change("switch_popup")
                 continue
 
@@ -624,13 +637,13 @@ class GmailSwitcher:
                 sum(entry.bounds[0] + entry.bounds[2] / 2 for entry in entries)
                 / len(entries)
             )
-            start_y = max(round(height * 0.62), round(entries[-1].center_y))
-            end_y = min(round(height * 0.46), round(entries[0].center_y - height * 0.05))
+            start_y = max(round(height * 0.68), round(entries[-1].center_y))
+            end_y = min(round(height * 0.40), round(entries[0].center_y - height * 0.05))
             if start_y <= end_y:
-                start_y, end_y = round(height * 0.65), round(height * 0.47)
+                start_y, end_y = round(height * 0.68), round(height * 0.40)
         else:
             center_x = round(width * 0.50)
-            start_y, end_y = round(height * 0.65), round(height * 0.47)
+            start_y, end_y = round(height * 0.68), round(height * 0.40)
 
         self.game.drag((center_x, start_y), (center_x, end_y), screenshot)
         self.game.wait(_SCROLL_SETTLE_DELAY)

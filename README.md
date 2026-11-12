@@ -164,6 +164,7 @@ Launch the ROKauto Control Center GUI cleanly without any background command pro
 
 The graphical user interface features:
 - **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`).
+- **Focused Farming Buttons:** Run every starred RoK character in the current Gmail only, or farm the current RoK character only, without switching Gmail accounts.
 - **Core Automation Options:** Easily toggle automatic resource farming, multi-Gmail switching, and rotation resetting.
 - **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards* (claims daily gifts, quest chests, and VIP points & free chest), *Alliance Help & Tech*, and *Auto Train Troops*.
 - **Integrated Live Output Console:** Monospace console stream underneath with real-time log coloring, auto-scroll, log copying, and clearing.
@@ -194,6 +195,10 @@ Press `y` when prompted to start farming across all starred accounts.
 - **Farm characters in the current Gmail account only (disable Gmail switching):**
   ```powershell
   python -m rok_automation --farm --no-switch-gmail
+  ```
+- **Farm the current RoK character only (disable character and Gmail switching):**
+  ```powershell
+  python -m rok_automation --farm --no-switch-gmail --current-rok-only
   ```
 - **Reset saved Gmail rotation progress and start a fresh run:**
   ```powershell

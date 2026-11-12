@@ -112,6 +112,9 @@ _UNKNOWN_SCREEN_WAIT = 0.5
 _MAX_ARMY_STEPS = 80
 _SCREEN_READ_TIMEOUT = 3.0
 _CITY_TO_MAP_TIMEOUT = 6.0
+_DIRECT_MAP_SETTLE_DELAY = 1.0
+# The City map button is fixed at the lower-left corner of the game view.
+_NORM_CITY_MAP_BUTTON = (0.008, 0.825, 0.085, 0.165)
 
 
 class FarmingController:
@@ -127,6 +130,7 @@ class FarmingController:
         log=print,
         daily_rewards: bool = False,
         switch_gmail: bool = True,
+        switch_rok_accounts: bool = True,
         gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
         reset_gmail_run: bool = False,
         session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
@@ -140,6 +144,7 @@ class FarmingController:
         self.log = log
         self.daily_rewards = daily_rewards
         self.switch_gmail = switch_gmail
+        self.switch_rok_accounts = switch_rok_accounts
         self.gmail_state_path = gmail_state_path
         self.reset_gmail_run = reset_gmail_run
         self.session_summary_path = (
@@ -151,7 +156,7 @@ class FarmingController:
         self.session_targets: list[SearchTarget] = []
 
     def run(self) -> FarmContext:
-        """Farm every RoK character in every logged-in Gmail account.
+        """Farm the configured RoK characters across the configured Gmail scope.
 
         Characters of the current Gmail are farmed first; then the Gmail
         switcher logs into the bottom-most Gmail in the account popup and the
@@ -262,6 +267,25 @@ class FarmingController:
         number of armies dispatched.
         """
 
+        if not self.switch_rok_accounts:
+            self.context = FarmContext()
+            context = self._run_one_account()
+            total_dispatched = context.armies_dispatched
+            exhausted_resources = (
+                context.last_error
+                == "No available resource location found in the search plan"
+            )
+            if context.last_error and not exhausted_resources:
+                return context, 0, total_dispatched
+            if exhausted_resources:
+                self._log(
+                    f"No resource location was available for {context.account_name}; "
+                    "finishing the current RoK account"
+                )
+                context.last_error = None
+            self._log(f"Finished farming {context.account_name}; current RoK account only")
+            return context, 1, total_dispatched
+
         traversal = AccountTraversal()
         farmed_accounts = 0
         total_dispatched = 0
@@ -306,20 +330,40 @@ class FarmingController:
             expected_account_name = next_name
             self._log(f"Selected {next_name}; starting its farming run")
 
-    def _run_one_account(
-        self,
-        *,
-        expected_account_name: str | None = None,
-    ) -> FarmContext:
-        self._transition(FarmState.DETECT_ACCOUNT)
+    def _open_world_map_directly(self) -> tuple[Path, ScreenDetection]:
+        """Press the City map button without classifying the current view first."""
+
+        screenshot = self.game.screenshot()
+        frame = load_gray_frame(screenshot)
+        if frame is None:
+            raise FarmingError("Could not read the game frame before opening the world map")
+        height, width = frame.shape[:2]
+        map_bounds = (
+            round(_NORM_CITY_MAP_BUTTON[0] * width),
+            round(_NORM_CITY_MAP_BUTTON[1] * height),
+            round(_NORM_CITY_MAP_BUTTON[2] * width),
+            round(_NORM_CITY_MAP_BUTTON[3] * height),
+        )
+        self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
+        self._log("Pressing the City map button directly")
+        self.game.click(map_bounds, screenshot)
+        self.game.wait(_DIRECT_MAP_SETTLE_DELAY)
+
         screenshot, detection = self._read_screen()
         for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
             if detection.state is not ScreenState.UNKNOWN:
                 break
             self.game.wait(_ACTION_RETRY_DELAY)
             screenshot, detection = self._read_screen()
+        return screenshot, detection
 
-        if detection.state is not ScreenState.UNKNOWN and self.daily_rewards:
+    def _run_one_account(
+        self,
+        *,
+        expected_account_name: str | None = None,
+    ) -> FarmContext:
+        self._transition(FarmState.DETECT_ACCOUNT)
+        if self.daily_rewards:
             self._transition(
                 FarmState.CLAIM_DAILY_REWARD,
                 "Claiming daily VIP and campaign rewards",
@@ -332,29 +376,16 @@ class FarmingController:
                 log=self._log,
             )
             claimer.claim_all()
-            # Allow extra time for UI animations to settle after closing
-            # campaign menus and returning to City view.
             self.game.wait(1.5)
+            screenshot, detection = self._open_world_map_directly()
+        elif expected_account_name is None:
+            screenshot, detection = self._open_world_map_directly()
+        else:
             screenshot, detection = self._read_screen()
-            # Menu close animations after daily rewards may take longer
-            # than a normal screen transition, so allow up to 8 retries
-            # (~1.6 s extra beyond the initial 1.5 s wait).
-            for _attempt in range(8):
+            for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
                 if detection.state is not ScreenState.UNKNOWN:
                     break
                 self.game.wait(_ACTION_RETRY_DELAY)
-                screenshot, detection = self._read_screen()
-            # Daily rewards end at City view.  If the screen is still
-            # unrecognised (residual animation / expanded bottom menu),
-            # explicitly recover to City so the next block can navigate
-            # to the World Map.
-            if detection.state is ScreenState.UNKNOWN:
-                self._log(
-                    "Screen unrecognised after daily rewards; "
-                    "recovering to City view..."
-                )
-                claimer.ensure_city_view()
-                self.game.wait(1.0)
                 screenshot, detection = self._read_screen()
 
         if detection.state is ScreenState.CITY:
