@@ -14,10 +14,10 @@ from unittest.mock import MagicMock, patch
 import cv2
 import numpy as np
 
-from rok_automation.game.ldplayer import (
+from rok_automation.game.desktop import (
     CANONICAL_CAPTURE_SIZE,
     EmulatorWindow,
-    click_ldplayer_point,
+    click_window_point,
     compute_capture_crop,
     normalize_capture,
 )
@@ -174,10 +174,10 @@ class TestClickMappingAfterNormalization(unittest.TestCase):
     def _click(self, rect, point):
         mock, captured = self._mock_user32(rect)
         with patch(
-            "rok_automation.game.ldplayer._find_render_window_handle",
+            "rok_automation.game.desktop.find_render_window_handle",
             return_value=999,
         ), patch("ctypes.WinDLL", return_value=mock), patch("time.sleep"):
-            click_ldplayer_point(
+            click_window_point(
                 EmulatorWindow(handle=1, title="LDPlayer"),
                 point,
                 CANONICAL_CAPTURE_SIZE[::-1],

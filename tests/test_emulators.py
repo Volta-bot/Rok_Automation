@@ -1,4 +1,4 @@
-"""Unit tests for the native LDPlayer capture backend.
+"""Unit tests for the emulator registry and the native capture backend.
 
 The emulator is not required: the instance list is parsed from recorded
 ``ldconsole.exe list2`` output, and the framebuffer handling is checked
@@ -7,7 +7,9 @@ on synthetic frames.
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -18,11 +20,19 @@ from rok_automation.game.backends import (
     BACKEND_NATIVE,
     create_game_interface,
 )
-from rok_automation.game.ldopengl import (
-    LDOpenGLError,
-    LDPlayerInstance,
-    parse_instance_list,
+from rok_automation.game.emulators import (
+    EmulatorError,
+    EmulatorInstance,
+    families,
+    get_family,
+    load_selection,
+    save_selection,
+    select_family,
     select_instance,
+)
+from rok_automation.game.emulators.ldplayer import (
+    LDOpenGLCapture,
+    parse_instance_list,
     to_image_order,
 )
 
@@ -37,14 +47,12 @@ class TestParseInstanceList(unittest.TestCase):
         instance = instances[0]
         self.assertEqual(instance.index, 0)
         self.assertEqual(instance.name, "LDPlayer")
-        self.assertEqual(instance.top_window, 4523898)
-        self.assertEqual(instance.bind_window, 4327240)
         self.assertTrue(instance.running)
-        self.assertEqual(instance.player_pid, 23400)
-        self.assertEqual(instance.vbox_pid, 2860)
+        self.assertEqual(instance.pid, 23400)
         self.assertEqual(instance.width, 1920)
         self.assertEqual(instance.height, 1080)
-        self.assertEqual(instance.dpi, 280)
+        self.assertEqual(instance.details["top_window"], "4523898")
+        self.assertEqual(instance.details["dpi"], "280")
 
     def test_parses_several_rows(self) -> None:
         output = (
@@ -61,10 +69,9 @@ class TestParseInstanceList(unittest.TestCase):
         instances = parse_instance_list(output)
         self.assertEqual(len(instances), 1)
         self.assertEqual(instances[0].name, "My,Player")
-        self.assertEqual(instances[0].top_window, 4523898)
         self.assertEqual(instances[0].width, 1920)
         self.assertEqual(instances[0].height, 1080)
-        self.assertEqual(instances[0].dpi, 280)
+        self.assertEqual(instances[0].details["dpi"], "280")
 
     def test_skips_malformed_rows(self) -> None:
         output = "garbage\n0,LDPlayer,1,2,1,3,4,1920,1080,280\n"
@@ -78,10 +85,10 @@ class TestParseInstanceList(unittest.TestCase):
 class TestSelectInstance(unittest.TestCase):
     """Verify the emulator instance to drive is picked correctly."""
 
-    def _instances(self) -> list[LDPlayerInstance]:
+    def _instances(self) -> list[EmulatorInstance]:
         return [
-            LDPlayerInstance(0, "A", 1, 2, False, -1, -1, 1920, 1080, 280),
-            LDPlayerInstance(1, "B", 3, 4, True, 23400, 2860, 1920, 1080, 280),
+            EmulatorInstance(0, "A", running=False, pid=-1, width=1920, height=1080),
+            EmulatorInstance(1, "B", running=True, pid=23400, width=1920, height=1080),
         ]
 
     def test_picks_the_running_instance(self) -> None:
@@ -90,22 +97,22 @@ class TestSelectInstance(unittest.TestCase):
 
     def test_honours_an_explicit_index(self) -> None:
         instances = [
-            LDPlayerInstance(0, "A", 1, 2, True, 100, 200, 1920, 1080, 280),
-            LDPlayerInstance(1, "B", 3, 4, True, 300, 400, 1920, 1080, 280),
+            EmulatorInstance(0, "A", running=True, pid=100, width=1920, height=1080),
+            EmulatorInstance(1, "B", running=True, pid=300, width=1920, height=1080),
         ]
         instance = select_instance(instances, index=1)
         self.assertEqual(instance.index, 1)
 
     def test_rejects_an_index_that_does_not_exist(self) -> None:
-        with self.assertRaises(LDOpenGLError):
+        with self.assertRaises(EmulatorError):
             select_instance(self._instances(), index=7)
 
     def test_rejects_an_explicit_index_that_is_not_running(self) -> None:
-        with self.assertRaises(LDOpenGLError):
+        with self.assertRaises(EmulatorError):
             select_instance(self._instances(), index=0)
 
     def test_reports_when_nothing_is_running(self) -> None:
-        with self.assertRaises(LDOpenGLError):
+        with self.assertRaises(EmulatorError):
             select_instance(self._instances()[:1])
 
 
@@ -127,6 +134,53 @@ class TestFrameOrder(unittest.TestCase):
         self.assertIsNot(flipped, frame)
 
 
+class TestEmulatorRegistry(unittest.TestCase):
+    """Verify the emulator family registry behaves."""
+
+    def test_the_built_in_families_are_registered(self) -> None:
+        keys = {family.key for family in families()}
+        self.assertIn("ldplayer", keys)
+        self.assertIn("mumu", keys)
+
+    def test_families_expose_their_window_terms(self) -> None:
+        for family in families():
+            self.assertTrue(family.window_terms, f"{family.key} has no window terms")
+            self.assertTrue(family.label, f"{family.key} has no label")
+
+    def test_get_family_rejects_an_unknown_key(self) -> None:
+        with self.assertRaises(EmulatorError):
+            get_family("not-an-emulator")
+
+    def test_get_family_returns_the_registered_family(self) -> None:
+        self.assertEqual(get_family("ldplayer").key, "ldplayer")
+
+    def test_only_ldplayer_claims_native_capture(self) -> None:
+        # MuMu's capture library has not been verified yet, so it must not
+        # claim support for it.
+        self.assertTrue(get_family("ldplayer").has_native_capture)
+        self.assertFalse(get_family("mumu").has_native_capture)
+
+    def test_selection_round_trips_through_the_state_file(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "emulator.json"
+            save_selection("mumu", index=2, path=path)
+            self.assertEqual(load_selection(path), ("mumu", 2))
+            self.assertEqual(json.loads(path.read_text())["family"], "mumu")
+
+    def test_a_missing_state_file_selects_nothing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "emulator.json"
+            self.assertEqual(load_selection(path), (None, None))
+
+    def test_select_family_prefers_the_requested_family(self) -> None:
+        family, _ = select_family("mumu")
+        self.assertEqual(family.key, "mumu")
+
+
 class TestBackendFallback(unittest.TestCase):
     """Verify the capture backends fall back to each other."""
 
@@ -138,12 +192,12 @@ class TestBackendFallback(unittest.TestCase):
         adb_interface = MagicMock()
         with patch(
             "rok_automation.game.backends._native_interface",
-            side_effect=LDOpenGLError("no capture library"),
+            side_effect=EmulatorError("no capture library"),
         ), patch(
             "rok_automation.game.backends._adb_interface",
             return_value=adb_interface,
         ) as adb_build:
-            result = create_game_interface(BACKEND_NATIVE)
+            result = create_game_interface(BACKEND_NATIVE, emulator="ldplayer")
         self.assertIs(result, adb_interface)
         adb_build.assert_called_once()
 
@@ -151,7 +205,7 @@ class TestBackendFallback(unittest.TestCase):
         desktop_interface = MagicMock()
         with patch(
             "rok_automation.game.backends._native_interface",
-            side_effect=LDOpenGLError("no capture library"),
+            side_effect=EmulatorError("no capture library"),
         ), patch(
             "rok_automation.game.backends._adb_interface",
             side_effect=RuntimeError("no adb"),
@@ -159,7 +213,7 @@ class TestBackendFallback(unittest.TestCase):
             "rok_automation.game.backends._desktop_interface",
             return_value=desktop_interface,
         ):
-            result = create_game_interface(BACKEND_NATIVE)
+            result = create_game_interface(BACKEND_NATIVE, emulator="ldplayer")
         self.assertIs(result, desktop_interface)
 
     def test_adb_backend_does_not_try_native_capture(self) -> None:
@@ -171,7 +225,7 @@ class TestBackendFallback(unittest.TestCase):
             "rok_automation.game.backends._adb_interface",
             return_value=adb_interface,
         ):
-            result = create_game_interface(BACKEND_ADB)
+            result = create_game_interface(BACKEND_ADB, emulator="ldplayer")
         self.assertIs(result, adb_interface)
 
     def test_desktop_backend_is_the_last_resort(self) -> None:
@@ -183,7 +237,7 @@ class TestBackendFallback(unittest.TestCase):
             "rok_automation.game.backends._desktop_interface",
             return_value=desktop_interface,
         ):
-            result = create_game_interface(BACKEND_ADB)
+            result = create_game_interface(BACKEND_ADB, emulator="ldplayer")
         self.assertIs(result, desktop_interface)
 
     def test_reports_when_every_backend_fails(self) -> None:
@@ -195,7 +249,30 @@ class TestBackendFallback(unittest.TestCase):
             side_effect=RuntimeError("no window"),
         ):
             with self.assertRaises(RuntimeError):
-                create_game_interface(BACKEND_ADB)
+                create_game_interface(BACKEND_ADB, emulator="ldplayer")
+
+    def test_an_unusable_emulator_falls_back_to_the_next_one(self) -> None:
+        # MuMu is not installed here, so its native capture must not be
+        # attempted and the ADB backend must take over.
+        desktop_interface = MagicMock()
+        with patch(
+            "rok_automation.game.backends._adb_interface",
+            side_effect=RuntimeError("no adb"),
+        ), patch(
+            "rok_automation.game.backends._desktop_interface",
+            return_value=desktop_interface,
+        ):
+            result = create_game_interface(BACKEND_NATIVE, emulator="mumu")
+        self.assertIs(result, desktop_interface)
+
+
+class TestCaptureLibraryGuards(unittest.TestCase):
+    """Verify the native capture refuses to run without its library."""
+
+    def test_a_missing_library_is_reported(self) -> None:
+        instance = EmulatorInstance(0, "A", running=True, pid=1, width=1920, height=1080)
+        with self.assertRaises(EmulatorError):
+            LDOpenGLCapture(instance, Path("artifacts/_does_not_exist.dll"))
 
 
 if __name__ == "__main__":

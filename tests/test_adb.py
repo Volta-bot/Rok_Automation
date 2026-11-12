@@ -16,6 +16,7 @@ import numpy as np
 
 from rok_automation.game.adb import (
     AdbError,
+    AdbInput,
     AdbInterface,
     find_adb_device,
     parse_screencap,
@@ -135,6 +136,79 @@ class TestAdbInterface(unittest.TestCase):
         tap = next(call for call in calls if "tap" in call)
         # Centre of the bounds is (640, 320) canonical -> (960, 480) guest.
         self.assertEqual(tap[-2:], ["960", "480"])
+
+
+class TestStaleConnectionRecovery(unittest.TestCase):
+    """Verify a stale adb connection is re-established instead of hanging."""
+
+    def _interface(self, serial: str = "emulator-5554") -> AdbInterface:
+        interface = AdbInterface.__new__(AdbInterface)
+        interface.adb_path = "adb"
+        interface.serial = serial
+        interface.timing = TimingConfig()
+        interface.pause_flag_path = None
+        interface.log = None
+        return interface
+
+    def test_the_local_port_is_derived_from_the_serial(self) -> None:
+        self.assertEqual(self._interface("emulator-5554").adb_port(), 5555)
+        self.assertEqual(self._interface("emulator-5556").adb_port(), 5557)
+
+    def test_a_loopback_serial_is_used_as_is(self) -> None:
+        self.assertEqual(self._interface("127.0.0.1:16384").adb_port(), 16384)
+
+    def test_an_unknown_serial_has_no_port(self) -> None:
+        self.assertIsNone(self._interface("something-else").adb_port())
+
+    def test_reconnect_connects_to_the_local_port(self) -> None:
+        interface = self._interface()
+        calls: list[list[str]] = []
+
+        def fake_global(adb_path, args, **kwargs):
+            calls.append(list(args))
+            return b""
+
+        with patch("rok_automation.game.adb._run_global", side_effect=fake_global), \
+             patch("rok_automation.game.adb._run", return_value=b"device"), \
+             patch("rok_automation.game.adb.time.sleep"):
+            interface.reconnect()
+
+        self.assertEqual(calls, [["connect", "127.0.0.1:5555"]])
+
+    def test_a_stale_capture_is_retried_after_reconnecting(self) -> None:
+        interface = self._interface()
+        attempts = {"count": 0}
+
+        def fake_run(adb_path, serial, args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise AdbError("adb command timed out: exec-out screencap")
+            return make_raw_frame(1280, 720, value=90)
+
+        with patch("rok_automation.game.adb._run", side_effect=fake_run), \
+             patch.object(AdbInterface, "reconnect") as reconnect:
+            frame = interface._capture_raw()
+
+        reconnect.assert_called_once()
+        self.assertEqual(frame.shape, (720, 1280, 3))
+
+    def test_a_stale_tap_is_retried_after_reconnecting(self) -> None:
+        interface = self._interface()
+        calls: list[list[str]] = []
+
+        def fake_run(adb_path, serial, args, **kwargs):
+            calls.append(list(args))
+            if len(calls) == 1:
+                raise AdbError("adb command timed out")
+            return b""
+
+        with patch("rok_automation.game.adb._run", side_effect=fake_run), \
+             patch.object(AdbInput, "reconnect") as reconnect, \
+             patch("rok_automation.game.adb.time.sleep"):
+            interface._input(["shell", "input", "tap", "10", "20"])
+
+        reconnect.assert_called_once()
+        self.assertEqual(len(calls), 2)
 
 
 class TestTimeoutScaling(unittest.TestCase):

@@ -1,9 +1,9 @@
 """Choosing how the automation talks to the emulator.
 
-Three backends are available, in increasing order of speed:
+Three capture backends are available, in increasing order of speed:
 
 ``desktop``
-    Captures the visible LDPlayer window from the Windows desktop. No
+    Captures the visible emulator window from the Windows desktop. No
     emulator setup is needed, but the window must stay visible and
     uncovered.
 
@@ -13,12 +13,14 @@ Three backends are available, in increasing order of speed:
     covered, but every frame costs a full transfer over ADB.
 
 ``native``
-    Captures the emulator's rendered framebuffer through LDPlayer's own
-    ``ldopengl64.dll``, which is roughly an order of magnitude faster
+    Captures the emulator's rendered framebuffer through the emulator's
+    own capture library, which is roughly an order of magnitude faster
     than the ADB path, and sends input over ADB as well.
 
-Each backend falls back to the next slower one when it is unavailable,
-so a run never dies just because the preferred backend is missing.
+Which emulator is used is decided by the emulator family, which is
+looked up in :mod:`rok_automation.game.emulators`. Each backend falls
+back to the next slower one when it is unavailable, so a run never dies
+just because the preferred backend is missing.
 """
 
 from __future__ import annotations
@@ -26,6 +28,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from rok_automation.game.emulators import (
+    EmulatorError,
+    EmulatorFamily,
+    select_family,
+    select_instance,
+)
 from rok_automation.game.interface import GameInterface, TimingConfig
 
 BACKEND_DESKTOP = "desktop"
@@ -40,38 +48,34 @@ BACKEND_LABELS = {
     BACKEND_NATIVE: "Native capture (fastest frames, background)",
 }
 
-_SCREENSHOT_PATHS = {
-    BACKEND_DESKTOP: Path("artifacts/ldplayer.png"),
-    BACKEND_ADB: Path("artifacts/ldplayer_adb.png"),
-    BACKEND_NATIVE: Path("artifacts/ldplayer_native.png"),
-}
-
 
 def _desktop_interface(
+    family: EmulatorFamily,
     *,
     timing: TimingConfig,
     log: Callable[[str], None] | None,
 ) -> GameInterface:
-    from rok_automation.game.interface import LDPlayerInterface
-    from rok_automation.game.ldplayer import find_ldplayer_window
+    from rok_automation.game.desktop import capture_emulator_window, find_emulator_window
+    from rok_automation.game.interface import DesktopInterface
 
-    window = find_ldplayer_window()
+    window = find_emulator_window(family.window_terms, family.window_classes)
     if window is None:
-        raise RuntimeError(
-            "No visible LDPlayer window was found. Start the emulator, or "
-            "switch to a background backend."
+        raise EmulatorError(
+            f"No visible {family.label or family.key} window was found. Start "
+            "the emulator, or switch to a background backend."
         )
     if log is not None:
         log(f"Desktop capture attached to {window.title} (handle={window.handle})")
-    return LDPlayerInterface(
+    return DesktopInterface(
         window,
-        screenshot_path=_SCREENSHOT_PATHS[BACKEND_DESKTOP],
+        screenshot_path=Path("artifacts/emulator_desktop.png"),
         timing=timing,
         log=log,
     )
 
 
 def _adb_interface(
+    family: EmulatorFamily,
     *,
     adb_path: str | None,
     serial: str | None,
@@ -83,7 +87,8 @@ def _adb_interface(
     interface = AdbInterface(
         adb_path=adb_path,
         serial=serial,
-        screenshot_path=_SCREENSHOT_PATHS[BACKEND_ADB],
+        emulator=family,
+        screenshot_path=Path("artifacts/emulator_adb.png"),
         timing=timing,
         log=log,
     )
@@ -93,20 +98,32 @@ def _adb_interface(
 
 
 def _native_interface(
+    family: EmulatorFamily,
     *,
+    index: int | None,
     adb_path: str | None,
     serial: str | None,
-    instance_index: int | None,
     timing: TimingConfig,
     log: Callable[[str], None] | None,
 ) -> GameInterface:
-    from rok_automation.game.ldopengl import build_native_interface
+    from rok_automation.game.native import NativeInterface
 
-    return build_native_interface(
+    instances = family.discover()
+    instance = select_instance(instances, index, family=family.label or family.key)
+    source = family.open_capture(instance)
+
+    if log is not None:
+        log(
+            f"Native capture attached to {family.label} '{instance.name}' "
+            f"(index {instance.index}, {instance.width}x{instance.height})"
+        )
+
+    return NativeInterface(
+        source=source,
+        instance=instance,
         adb_path=adb_path,
         serial=serial,
-        instance_index=instance_index,
-        screenshot_path=_SCREENSHOT_PATHS[BACKEND_NATIVE],
+        screenshot_path=Path("artifacts/emulator_native.png"),
         timing=timing,
         log=log,
     )
@@ -115,9 +132,10 @@ def _native_interface(
 def create_game_interface(
     backend: str = BACKEND_NATIVE,
     *,
+    emulator: str | None = None,
+    index: int | None = None,
     adb_path: str | None = None,
     serial: str | None = None,
-    instance_index: int | None = None,
     timing: TimingConfig | None = None,
     pause_flag_path: Path | None = None,
     log: Callable[[str], None] | None = None,
@@ -130,6 +148,9 @@ def create_game_interface(
         )
 
     timing = timing or TimingConfig()
+    family, saved_index = select_family(emulator)
+    if index is None:
+        index = saved_index
 
     attempts: list[tuple[str, Callable[[], GameInterface]]] = []
     if backend == BACKEND_NATIVE:
@@ -137,9 +158,10 @@ def create_game_interface(
             (
                 BACKEND_NATIVE,
                 lambda: _native_interface(
+                    family,
+                    index=index,
                     adb_path=adb_path,
                     serial=serial,
-                    instance_index=instance_index,
                     timing=timing,
                     log=log,
                 ),
@@ -149,6 +171,7 @@ def create_game_interface(
             (
                 BACKEND_ADB,
                 lambda: _adb_interface(
+                    family,
                     adb_path=adb_path,
                     serial=serial,
                     timing=timing,
@@ -161,6 +184,7 @@ def create_game_interface(
             (
                 BACKEND_ADB,
                 lambda: _adb_interface(
+                    family,
                     adb_path=adb_path,
                     serial=serial,
                     timing=timing,
@@ -171,7 +195,7 @@ def create_game_interface(
     attempts.append(
         (
             BACKEND_DESKTOP,
-            lambda: _desktop_interface(timing=timing, log=log),
+            lambda: _desktop_interface(family, timing=timing, log=log),
         )
     )
 
@@ -185,7 +209,7 @@ def create_game_interface(
                 log(f"Backend '{name}' is unavailable ({exc}); trying the next one.")
             continue
         if log is not None:
-            log(f"Using the '{name}' backend.")
+            log(f"Using the '{name}' backend with {family.label or family.key}.")
         return interface
 
     raise RuntimeError(f"No capture backend could be started: {last_error}")

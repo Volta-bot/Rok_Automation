@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from rok_automation.game.interface import LDPlayerInterface, TimingConfig
-from rok_automation.game.ldplayer import EmulatorWindow, click_ldplayer_point
+from rok_automation.game.interface import DesktopInterface, TimingConfig
+from rok_automation.game.desktop import EmulatorWindow, click_window_point
 
 _TEST_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _TEST_DIR.parent
@@ -22,7 +22,7 @@ class TestClickRandomization(unittest.TestCase):
     def test_click_applies_randomized_offsets_across_calls(self) -> None:
         """Verify repeated calls do not click the exact same pixel every time."""
         window = EmulatorWindow(handle=12345, title="LDPlayer")
-        interface = LDPlayerInterface(window, timing=TimingConfig(click_offset_max=3))
+        interface = DesktopInterface(window, timing=TimingConfig(click_offset_max=3))
 
         # 100x60 button at (200, 100) -> reference center is (250, 130)
         bounds = (200, 100, 100, 60)
@@ -35,7 +35,7 @@ class TestClickRandomization(unittest.TestCase):
         def mock_click_point(win, point, frame_size, *, offset_range=0):
             clicked_points.append(point)
 
-        with patch("rok_automation.game.interface.click_ldplayer_point", side_effect=mock_click_point):
+        with patch("rok_automation.game.interface.click_window_point", side_effect=mock_click_point):
             for _ in range(30):
                 interface.click(bounds, screenshot)
 
@@ -51,7 +51,7 @@ class TestClickRandomization(unittest.TestCase):
     def test_click_stays_strictly_inside_narrow_element(self) -> None:
         """Verify small elements constrain the offset range so clicks remain inside."""
         window = EmulatorWindow(handle=12345, title="LDPlayer")
-        interface = LDPlayerInterface(window, timing=TimingConfig(click_offset_max=5))
+        interface = DesktopInterface(window, timing=TimingConfig(click_offset_max=5))
 
         # Narrow element: width=6, height=6 at (50, 50) -> reference center (53, 53)
         bounds = (50, 50, 6, 6)
@@ -64,7 +64,7 @@ class TestClickRandomization(unittest.TestCase):
         def mock_click_point(win, point, frame_size, *, offset_range=0):
             clicked_points.append(point)
 
-        with patch("rok_automation.game.interface.click_ldplayer_point", side_effect=mock_click_point):
+        with patch("rok_automation.game.interface.click_window_point", side_effect=mock_click_point):
             for _ in range(20):
                 interface.click(bounds, screenshot)
 
@@ -73,8 +73,8 @@ class TestClickRandomization(unittest.TestCase):
             self.assertLessEqual(abs(cx - ref_x), 1)
             self.assertLessEqual(abs(cy - ref_y), 1)
 
-    def test_click_ldplayer_point_randomizes_coordinates(self) -> None:
-        """Verify click_ldplayer_point applies offset around target reference point."""
+    def test_click_window_point_randomizes_coordinates(self) -> None:
+        """Verify click_window_point applies offset around target reference point."""
         window = EmulatorWindow(handle=12345, title="LDPlayer")
         ref_point = (400, 300)
         frame_size = (720, 1280)
@@ -94,13 +94,13 @@ class TestClickRandomization(unittest.TestCase):
 
         mock_user32.SetCursorPos.side_effect = mock_set_cursor
 
-        with patch("rok_automation.game.ldplayer._find_render_window_handle", return_value=67890), \
+        with patch("rok_automation.game.desktop.find_render_window_handle", return_value=67890), \
              patch("ctypes.WinDLL", return_value=mock_user32), \
              patch("time.sleep"):
 
             coords: list[tuple[int, int]] = []
             for _ in range(30):
-                pt = click_ldplayer_point(window, ref_point, frame_size, offset_range=3)
+                pt = click_window_point(window, ref_point, frame_size, offset_range=3)
                 coords.append(pt)
 
             for cx, cy in coords:

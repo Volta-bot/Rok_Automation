@@ -12,11 +12,9 @@ from rok_automation.game.backends import (
     BACKEND_NATIVE,
     create_game_interface,
 )
-from rok_automation.game.ldplayer import (
-    CANONICAL_CAPTURE_SIZE,
-    describe_window_tree,
-    find_ldplayer_window,
-)
+from rok_automation.game.desktop import describe_window_tree, find_emulator_window
+from rok_automation.game.emulators import families, select_family
+from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE
 from rok_automation.game.pause import clear_paused
 from rok_automation.vision.screen import ScreenDetector
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
@@ -33,16 +31,29 @@ def _build_game(backend: str, args):
     """Create the requested capture backend, or report why it failed."""
 
     try:
-        return create_game_interface(
+        interface = create_game_interface(
             backend,
+            emulator=args.emulator,
+            index=args.emulator_index,
             adb_path=args.adb_path,
             serial=args.adb_serial,
-            instance_index=args.ldplayer_index,
             log=lambda message: print(f"[{message}]"),
         )
     except Exception as exc:  # noqa: BLE001 - reported to the user
         print(f"Emulator: Disconnected ({exc})")
         return None
+
+    # Remember the emulator that was asked for, so the next run can use it
+    # without repeating the flag.
+    if args.emulator:
+        try:
+            from rok_automation.game.emulators import save_selection
+
+            save_selection(args.emulator, args.emulator_index)
+        except OSError:
+            pass
+
+    return interface
 
 
 def main() -> int:
@@ -135,10 +146,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--ldplayer-index",
+        "--emulator",
+        metavar="NAME",
+        help=(
+            "emulator family to drive: "
+            + ", ".join(family.key for family in families())
+            + " (default: the installed one)"
+        ),
+    )
+    parser.add_argument(
+        "--emulator-index",
         type=int,
         metavar="N",
-        help="LDPlayer instance index to drive (default: the running one)",
+        help="emulator instance index to drive (default: the running one)",
     )
     parser.add_argument(
         "--adb-serial",
@@ -173,7 +193,8 @@ def main() -> int:
 
     window = None
     if backend == BACKEND_DESKTOP or args.diagnose_window:
-        window = find_ldplayer_window()
+        family, _ = select_family(args.emulator)
+        window = find_emulator_window(family.window_terms, family.window_classes)
 
     if args.diagnose_window and window is not None:
         for description in describe_window_tree(window):

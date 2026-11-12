@@ -71,20 +71,60 @@ The automation can read the game through three interchangeable backends, selecte
 
 | Backend | Frames come from | Cost per frame | Window may be hidden? |
 | :--- | :--- | :--- | :--- |
-| `native` | LDPlayer's own `ldopengl64.dll` renderer | **≈ 6–100 ms** | **Yes** |
+| `native` | The emulator's own renderer | **≈ 6–100 ms** | **Yes** |
 | `adb` | `adb exec-out screencap` | ≈ 250–380 ms | Yes |
 | `desktop` | The visible window (`mss`) | ≈ 21 ms | No |
 
-- **Native Capture (fastest, recommended):** LDPlayer ships `ldopengl64.dll` next to `ldconsole.exe`. Its `CreateScreenShotInstance` entry point hands back a COM-style object whose second vtable slot copies the emulator's *rendered framebuffer* into memory. Reading that buffer avoids a full frame transfer entirely and works while the emulator window is minimised, hidden or covered.
+- **Native Capture (fastest, recommended):** Many emulators can hand out their own rendered framebuffer. LDPlayer ships `ldopengl64.dll` next to `ldconsole.exe`; its `CreateScreenShotInstance` entry point returns a COM-style object whose second vtable slot copies the emulator's *rendered framebuffer* into memory. Reading that buffer avoids a full frame transfer entirely and works while the emulator window is minimised, hidden or covered.
   - The emulator instance, its PID and its resolution are read from `ldconsole.exe list2`, so the captured frame and the input coordinates always describe the same emulator.
   - The library is located automatically through the uninstall registry (`DisplayIcon`) and the usual install folders; set `ROK_LDPLAYER_DIR` to override it. It needs LDPlayer 9.0.78 or newer.
   - Frames arrive bottom-up and are flipped into image order before any detection runs.
 - **ADB Capture:** Frames are pulled from the emulator over ADB and input travels through the Android input pipeline, so the host mouse is never moved.
   - Raw captures are used rather than PNG (`250 ms` versus `316 ms` per frame) and are normalised to the same canonical `1280x720` size as the desktop path, so every template and OCR region behaves identically.
-- **Desktop Capture:** Reads the visible `RenderWindow` from the screen. Fastest to set up, but the window must stay visible and uncovered.
+- **Desktop Capture:** Reads the visible render child window from the screen. Fastest to set up, but the window must stay visible and uncovered. The window is matched by title *and* by having a child that renders the game, so a browser tab mentioning the emulator is never picked up by mistake.
 - **Input:** All backends deliver taps and drags through the Android input pipeline (`input tap` / `input swipe`), which never steals the host mouse. Drags are stretched with the distance they cover so the game reads them as a drag rather than a flick or a stray tap.
 - **Adaptive Screen-Wait Budgets:** The controller measures the real capture latency at startup and scales every screen-wait budget to match, keeping the number of poll attempts per transition constant. Without this a slow capture would give the controller only one or two samples of a transition and it would time out before the screen had finished changing.
-- **Setup for the background backends:** In LDPlayer ➔ *Settings* ➔ *ADB debugging*, choose **Enable local connection** and restart the emulator. Leave *remote connection* off — it exposes the ADB port to the whole network, and ADB grants full control of the device.
+- **Setup for the background backends:** In the emulator's settings, enable **ADB debugging** with a **local connection** and restart it. Leave *remote connection* off — it exposes the ADB port to the whole network, and ADB grants full control of the device.
+
+---
+
+### 7. Emulator Support
+The capture and input layer is emulator-agnostic: the farming loop only ever talks to the `GameInterface` protocol (`screenshot`, `click`, `drag`, `wait`), so switching emulators changes nothing in the automation logic, the templates or the OCR regions.
+
+Each emulator family is one small module in `rok_automation/game/emulators/` that answers four questions:
+
+```python
+@register
+class LDPlayerFamily(EmulatorFamily):
+    key = "ldplayer"                       # used on the command line
+    label = "LDPlayer"                     # shown in the GUI
+    window_terms = ("ldplayer", "雷电")      # how to find its window
+    window_classes = ("LDPlayerMainFrame",) # ... and its main-frame class
+    adb_locations = ("adb.exe",)           # its bundled adb
+    registry_markers = ("dnplayer.exe",)   # how to find its install folder
+    supports_native_capture = True         # can it read its own framebuffer?
+
+    def discover(self) -> list[EmulatorInstance]: ...
+    def open_capture(self, instance) -> FrameSource: ...
+```
+
+**Adding an emulator is therefore a single new file** — no change to the automation, the vision layer or the CLI.
+
+| Family | Status | Native capture | Instance discovery |
+| :--- | :--- | :--- | :--- |
+| `ldplayer` | Supported | `ldopengl64.dll` | `ldconsole.exe list2` |
+| `mumu` | Supported (ADB + desktop) | *awaiting verification* | `MuMuManager.exe adb -v <index>` |
+
+- **Choosing an emulator:** `--emulator ldplayer` on the command line, the *Emulator* dropdown in the GUI, or the `ROK_EMULATOR` environment variable. The choice is remembered in `state/emulator.json`.
+- **MuMu Player:** MuMu 12's native capture library (`external_renderer_ipc.dll`) has to be checked against the installed version before it can be trusted, so MuMu currently uses the ADB backend. Everything else — discovery, the bundled adb, the window match and the serial — already works.
+
+### 8. Surviving a Flaky Emulator
+Emulators sometimes stop answering ADB until the connection is re-established. The symptoms are a capture that suddenly takes tens of seconds, or a device that shows up as `offline`.
+
+- **Bounded captures:** An ADB capture that has not returned within `25 s` is treated as stale instead of blocking the run for minutes.
+- **Automatic reconnection:** A stale capture or tap re-establishes the connection (`adb connect 127.0.0.1:<port>`, derived from the emulator's serial) and is retried once, so a hiccup does not end the run.
+- **Native capture avoids the problem:** The native backend reads frames straight from the renderer, so a stalled ADB connection cannot slow the detection down. Only the input commands still travel over ADB.
+- **Restarting the emulator:** When the emulator itself has stopped responding, `ldconsole.exe launch --index 0` starts it again; `MuMuManager.exe api -v 0 launch_player` does the same for MuMu.
 
 ---
 
@@ -116,23 +156,28 @@ The automation can read the game through three interchangeable backends, selecte
 ```text
 ROKauto/
 ├── rok_automation/
-│   ├── __main__.py                 # CLI entry point (--gui, --farm, --backend, --detect-screen, --screenshot, --diagnose-window)
+│   ├── __main__.py                 # CLI entry point (--gui, --farm, --backend, --emulator, --detect-screen, --screenshot)
 │   ├── ui/                         # Graphical User Interface (Control Center & Live Console)
 │   │   ├── app.py                  # Tkinter UI application, process worker, and live console stream
 │   │   └── __init__.py
-│   ├── automation/
+│   ├── automation/                 # Emulator-agnostic farming logic
 │   │   ├── controller.py           # State-driven farming loop, search level caching, & army dispatch
 │   │   ├── account_switcher.py     # State-driven profile/settings/character switcher & list scroller
 │   │   ├── gmail_switcher.py       # Multi-Gmail account switcher & LRU rotation tracker
 │   │   ├── daily_reward.py         # Daily VIP & Campaign reward claimer
 │   │   ├── context.py              # Per-account runtime context (armies out, target, errors)
 │   │   └── states.py               # Farming state enum definitions
-│   ├── game/
+│   ├── game/                       # Capture & input layer (the emulator-aware part)
 │   │   ├── backends.py             # Backend selection & automatic fallback chain
-│   │   ├── interface.py            # GameInterface abstraction & timing configuration
-│   │   ├── ldplayer.py             # Win32 LDPlayer window discovery, MSS capture, click & drag
-│   │   ├── ldopengl.py             # Native LDPlayer capture via ldopengl64.dll & ldconsole.exe
+│   │   ├── emulators/              # One module per supported emulator family
+│   │   │   ├── __init__.py         # The registry, instance model & selection
+│   │   │   ├── ldplayer.py         # LDPlayer: ldconsole discovery + ldopengl64 capture
+│   │   │   └── mumu.py             # MuMu Player: MuMuManager discovery + bundled adb
+│   │   ├── desktop.py              # Generic window discovery, screen capture & mouse input
+│   │   ├── native.py               # Native frame source + ADB input, combined
 │   │   ├── adb.py                  # ADB capture + Android input pipeline delivery
+│   │   ├── frame.py                # Canonical 1280x720 frame geometry
+│   │   ├── interface.py            # GameInterface abstraction & timing configuration
 │   │   ├── console.py              # Console output that survives a limited code page
 │   │   └── pause.py                # Cooperative pause support
 │   ├── logic/
@@ -154,10 +199,10 @@ ROKauto/
 
 ### Prerequisites
 - **OS:** Windows 10 / 11
-- **Emulator:** LDPlayer 9 or newer (with Rise of Kingdoms set to **Tiếng Việt** in-game language)
+- **Emulator:** LDPlayer 9 or newer, or MuMu Player 12 (with Rise of Kingdoms set to **Tiếng Việt** in-game language)
 - **Python:** Python 3.11 or newer
 - **Optional:** ADB, for background operation (*Settings* ➔ *ADB debugging* ➔ *Enable local connection*)
-- **Optional:** native capture needs `ldopengl64.dll`, which ships with LDPlayer 9.0.78 and newer
+- **Optional:** native capture needs the emulator's own capture library (LDPlayer 9.0.78 or newer)
 
 ---
 
@@ -214,6 +259,7 @@ The graphical user interface features:
 - **Focused Farming Buttons:** Run every starred RoK character in the current Gmail only, or farm the current RoK character only, without switching Gmail accounts.
 - **Core Automation Options:** Easily toggle automatic resource farming, multi-Gmail switching, and rotation resetting.
 - **Capture Backend Dropdown:** Choose *Native* (fastest, reads the emulator's own framebuffer), *ADB* (background, slower frames) or *Desktop* (captures the visible window). The chosen backend is used for the run and for the quick diagnostic tools.
+- **Emulator Dropdown:** Choose which emulator family to drive (LDPlayer, MuMu Player). The choice is remembered between runs.
 - **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards* (claims daily gifts, quest chests, and VIP points & free chest), *Alliance Help & Tech*, and *Auto Train Troops*.
 - **Integrated Live Output Console:** Monospace console stream underneath with real-time log coloring, auto-scroll, log copying, and clearing.
 - **Diagnostic Quick Tools:** Instant one-click buttons for LDPlayer screen capture, screen classification, and window hierarchy diagnostics.
@@ -252,11 +298,17 @@ Press `y` when prompted to start farming across all starred accounts.
   ```powershell
   python -m rok_automation --farm --reset-gmail-run
   ```
-- **Farm in the background (LDPlayer may be minimised or covered):**
+- **Farm in the background (the emulator may be minimised or covered):**
   ```powershell
   python -m rok_automation --farm --backend native
   ```
-  `native` reads the emulator's own framebuffer and is the fastest option; `--backend adb` pulls frames over ADB instead, and `--backend desktop` captures the visible window. All three fall back to the next slower one automatically. Add `--adb-serial emulator-5554` to pick a specific device, or `--ldplayer-index 0` to pick a specific emulator instance.
+  `native` reads the emulator's own framebuffer and is the fastest option; `--backend adb` pulls frames over ADB instead, and `--backend desktop` captures the visible window. All three fall back to the next slower one automatically. Add `--adb-serial emulator-5554` to pick a specific device, or `--emulator-index 0` to pick a specific emulator instance.
+- **Choose the emulator (LDPlayer or MuMu Player):**
+  ```powershell
+  python -m rok_automation --farm --emulator ldplayer
+  python -m rok_automation --farm --emulator mumu
+  ```
+  With no `--emulator`, the installed family is used. The choice is remembered in `state/emulator.json`, and `ROK_EMULATOR` overrides it.
 - **Keep the old ADB-only behaviour:**
   ```powershell
   python -m rok_automation --farm --adb

@@ -26,8 +26,9 @@ from typing import Callable, Sequence
 import cv2
 import numpy as np
 
+from rok_automation.game.emulators import EmulatorFamily
+from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE, compute_capture_crop
 from rok_automation.game.interface import TimingConfig, jittered_click_point
-from rok_automation.game.ldplayer import CANONICAL_CAPTURE_SIZE, compute_capture_crop
 from rok_automation.game.pause import wait_while_paused
 from rok_automation.vision.screen import cache_captured_frame, load_gray_frame
 
@@ -45,12 +46,16 @@ class AdbError(RuntimeError):
     """Raised when the emulator cannot be reached over ADB."""
 
 
-def find_adb_executable() -> str:
-    """Locate an adb client, preferring LDPlayer's own bundled copy."""
+def find_adb_executable(emulator: "EmulatorFamily | None" = None) -> str:
+    """Locate an adb client, preferring the emulator's own bundled copy."""
 
     override = os.environ.get("ROK_ADB_PATH")
     if override and Path(override).is_file():
         return override
+
+    if emulator is not None:
+        for candidate in emulator.adb_executables():
+            return str(candidate)
 
     on_path = shutil.which("adb")
     if on_path:
@@ -58,7 +63,8 @@ def find_adb_executable() -> str:
 
     candidates: list[Path] = []
     for base in (Path("C:/LDPlayer"), Path("C:/Program Files/LDPlayer"),
-                 Path("C:/Program Files (x86)/LDPlayer")):
+                 Path("C:/Program Files (x86)/LDPlayer"),
+                 Path("C:/Program Files/Netease/MuMuPlayer-12.0/shell")):
         if not base.is_dir():
             continue
         candidates.append(base / "adb.exe")
@@ -73,8 +79,15 @@ def find_adb_executable() -> str:
     )
 
 
-def find_adb_device(adb_path: str) -> str:
-    """Return the serial of the single connected emulator."""
+def find_adb_device(
+    adb_path: str,
+    preferred: Sequence[str] = (),
+) -> str:
+    """Return the serial of the connected emulator.
+
+    Serials the selected emulator is expected to use are preferred, then
+    the usual ``emulator-5554`` form, then a loopback address.
+    """
 
     result = subprocess.run(
         [adb_path, "devices"],
@@ -90,11 +103,18 @@ def find_adb_device(adb_path: str) -> str:
     if not devices:
         raise AdbError(
             "No ADB device is connected. Enable 'ADB debugging' with a local "
-            "connection in the LDPlayer settings and restart the emulator."
+            "connection in the emulator settings and restart it."
         )
+    for serial in preferred:
+        if serial in devices:
+            return serial
     # Emulator serials look like emulator-5554; prefer one of those.
     for device in devices:
         if device.startswith("emulator-"):
+            return device
+    # MuMu and other emulators appear as a loopback address.
+    for device in devices:
+        if device.startswith("127.0.0.1:"):
             return device
     return devices[0]
 
@@ -120,6 +140,25 @@ def _run(
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", "replace").strip()
         raise AdbError(f"adb {' '.join(args)} failed: {message}")
+    return result.stdout
+
+
+def _run_global(
+    adb_path: str,
+    args: Sequence[str],
+    *,
+    timeout: float = 60.0,
+) -> bytes:
+    """Run an adb command that is not bound to a device."""
+
+    try:
+        result = subprocess.run(
+            [adb_path, *args],
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdbError(f"adb command timed out: {' '.join(args)}") from exc
     return result.stdout
 
 
@@ -174,13 +213,18 @@ class AdbInput:
         *,
         adb_path: str | None = None,
         serial: str | None = None,
+        emulator: EmulatorFamily | None = None,
         guest_size: tuple[int, int] | None = None,
         timing: TimingConfig = TimingConfig(),
         pause_flag_path: Path | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
-        self.adb_path = adb_path or find_adb_executable()
-        self.serial = serial or find_adb_device(self.adb_path)
+        self.emulator = emulator
+        self.adb_path = adb_path or find_adb_executable(emulator)
+        self.serial = serial or find_adb_device(
+            self.adb_path,
+            preferred=emulator.preferred_serials() if emulator is not None else (),
+        )
         self.timing = timing
         self.pause_flag_path = pause_flag_path
         self.log = log
@@ -224,7 +268,67 @@ class AdbInput:
 
         return self.timing.timeout_scale
 
+    # -- recovery ------------------------------------------------------- #
+
+    def adb_port(self) -> int | None:
+        """Return the local TCP port the emulator's adb listens on.
+
+        LDPlayer numbers its instances ``emulator-5554``, ``emulator-5556``
+        and so on, and they listen on the next port up. Other emulators
+        already report a loopback serial.
+        """
+
+        serial = self.serial
+        if serial.startswith("127.0.0.1:"):
+            try:
+                return int(serial.rsplit(":", 1)[1])
+            except ValueError:
+                return None
+        if serial.startswith("emulator-"):
+            try:
+                return int(serial.rsplit("-", 1)[1]) + 1
+            except ValueError:
+                return None
+        return None
+
+    def reconnect(self) -> None:
+        """Bring the adb connection back after the device went stale.
+
+        Emulators sometimes stop answering adb until the connection is
+        re-established, which shows up as a command that never returns.
+        """
+
+        port = self.adb_port()
+        try:
+            if port is not None:
+                _run_global(self.adb_path, ["connect", f"127.0.0.1:{port}"], timeout=30)
+            else:
+                _run_global(self.adb_path, ["reconnect"], timeout=30)
+        except AdbError:
+            pass
+
+        # Give the device a moment to come back before it is used again.
+        for _ in range(10):
+            time.sleep(0.5)
+            try:
+                devices = _run(self.adb_path, self.serial, ["get-state"], timeout=10)
+            except AdbError:
+                continue
+            if b"device" in devices:
+                return
+
     # -- input ---------------------------------------------------------- #
+
+    def _input(self, args: Sequence[str], *, timeout: float = 30.0) -> None:
+        """Send an input command, reconnecting once if the link went stale."""
+
+        try:
+            _run(self.adb_path, self.serial, args, timeout=timeout)
+        except AdbError:
+            if self.log is not None:
+                self.log(f"ADB input failed ({' '.join(args)}); reconnecting.")
+            self.reconnect()
+            _run(self.adb_path, self.serial, args, timeout=timeout)
 
     def _to_guest(
         self,
@@ -268,12 +372,7 @@ class AdbInput:
         )
 
         guest_x, guest_y = self._to_guest(target_x, target_y)
-        _run(
-            self.adb_path,
-            self.serial,
-            ["shell", "input", "tap", str(guest_x), str(guest_y)],
-            timeout=30.0,
-        )
+        self._input(["shell", "input", "tap", str(guest_x), str(guest_y)])
         self.wait(
             self.timing.click_delay
             + random.uniform(self.timing.jitter_min, self.timing.jitter_max)
@@ -298,9 +397,7 @@ class AdbInput:
         distance = math.hypot(end_x - start_x, end_y - start_y)
         duration_ms = swipe_duration_ms(distance, self.timing.drag_duration)
 
-        _run(
-            self.adb_path,
-            self.serial,
+        self._input(
             [
                 "shell",
                 "input",
@@ -330,7 +427,8 @@ class AdbInterface(AdbInput):
         *,
         adb_path: str | None = None,
         serial: str | None = None,
-        screenshot_path: Path = Path("artifacts/ldplayer_adb.png"),
+        emulator: EmulatorFamily | None = None,
+        screenshot_path: Path = Path("artifacts/emulator_adb.png"),
         timing: TimingConfig = TimingConfig(),
         pause_flag_path: Path | None = None,
         log: Callable[[str], None] | None = None,
@@ -338,6 +436,7 @@ class AdbInterface(AdbInput):
         super().__init__(
             adb_path=adb_path,
             serial=serial,
+            emulator=emulator,
             timing=timing,
             pause_flag_path=pause_flag_path,
             log=log,
@@ -366,7 +465,29 @@ class AdbInterface(AdbInput):
     # -- capture -------------------------------------------------------- #
 
     def _capture_raw(self) -> np.ndarray:
-        data = _run(self.adb_path, self.serial, ["exec-out", "screencap"], timeout=90.0)
+        """Capture the emulator's framebuffer over adb.
+
+        A stale connection is re-established once before giving up, so a
+        hiccup in the emulator does not end the run.
+        """
+
+        try:
+            return self._screencap()
+        except AdbError as exc:
+            if self.log is not None:
+                self.log(f"ADB capture failed ({exc}); reconnecting.")
+            self.reconnect()
+            return self._screencap()
+
+    def _screencap(self) -> np.ndarray:
+        # A hung connection must not block the run for minutes, so the
+        # capture is given a bounded amount of time.
+        data = _run(
+            self.adb_path,
+            self.serial,
+            ["exec-out", "screencap"],
+            timeout=self.timing.capture_timeout,
+        )
         return parse_screencap(data)
 
     def screenshot(self) -> Path:
@@ -384,6 +505,6 @@ class AdbInterface(AdbInput):
     def _normalize(self, frame: np.ndarray) -> np.ndarray:
         """Scale a guest frame down to the canonical detection size."""
 
-        from rok_automation.game.ldplayer import normalize_capture
+        from rok_automation.game.frame import normalize_capture
 
         return normalize_capture(frame)

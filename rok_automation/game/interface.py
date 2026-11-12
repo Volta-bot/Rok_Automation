@@ -1,4 +1,4 @@
-"""Game-interface abstraction and visible-window LDPlayer implementation."""
+"""Game-interface abstraction and the visible-window desktop backend."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Callable, Protocol
 
 import cv2
 
-from rok_automation.game.ldplayer import (
+from rok_automation.game.desktop import (
     EmulatorWindow,
-    capture_ldplayer_window,
-    click_ldplayer_point,
-    drag_ldplayer_points,
+    capture_emulator_window,
+    click_window_point,
+    drag_window_points,
 )
 from rok_automation.game.pause import wait_while_paused
 from rok_automation.vision.screen import load_gray_frame
@@ -98,6 +98,9 @@ class TimingConfig:
     capture_latency: float = 0.021
     # Duration of a swipe gesture, in seconds.
     drag_duration: float = 0.30
+    # How long a single adb capture may take before the connection is
+    # considered stale and is re-established.
+    capture_timeout: float = 25.0
 
     @property
     def frame_time(self) -> float:
@@ -129,14 +132,14 @@ class TimingConfig:
         return seconds * self.timeout_scale
 
 
-class LDPlayerInterface:
-    """Capture and click controls in a visible LDPlayer render window."""
+class DesktopInterface:
+    """Capture and click controls in a visible emulator render window."""
 
     def __init__(
         self,
         window: EmulatorWindow,
         *,
-        screenshot_path: Path = Path("artifacts/ldplayer.png"),
+        screenshot_path: Path = Path("artifacts/emulator_desktop.png"),
         timing: TimingConfig = TimingConfig(),
         pause_flag_path: Path | None = None,
         log: Callable[[str], None] | None = None,
@@ -148,7 +151,7 @@ class LDPlayerInterface:
         self.log = log
 
     def screenshot(self) -> Path:
-        return capture_ldplayer_window(self.window, self.screenshot_path)
+        return capture_emulator_window(self.window, self.screenshot_path)
 
     def click(
         self,
@@ -169,7 +172,7 @@ class LDPlayerInterface:
             self.timing.click_offset_max if offset_range is None else offset_range,
         )
 
-        click_ldplayer_point(
+        click_window_point(
             self.window,
             (target_x, target_y),
             frame.shape,
@@ -189,7 +192,7 @@ class LDPlayerInterface:
         frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
-        drag_ldplayer_points(self.window, start, end, frame.shape)
+        drag_window_points(self.window, start, end, frame.shape)
         self.wait(self.timing.click_delay)
 
     def wait(self, seconds: float) -> None:

@@ -29,7 +29,8 @@ from rok_automation.game.backends import (
     BACKEND_LABELS,
     BACKEND_NATIVE,
 )
-from rok_automation.game.ldplayer import find_ldplayer_window
+from rok_automation.game.desktop import find_emulator_window
+from rok_automation.game.emulators import families, get_family, select_family
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.logic.resource_selector import (
     Resource,
@@ -98,6 +99,26 @@ class ModernColors:
     LOG_PLANNED = "#c084fc"
 
 
+def _emulator_label(key: str) -> str:
+    """Return the display label of an emulator family."""
+
+    try:
+        family = get_family(key)
+    except Exception:
+        return key
+    return family.label or family.key
+
+
+def _default_emulator_key() -> str:
+    """Return the key of the emulator family that is installed."""
+
+    try:
+        family, _ = select_family()
+    except Exception:
+        return families()[0].key
+    return family.key
+
+
 class ROKAutomationApp:
     """Main Application Window for ROKauto."""
 
@@ -130,6 +151,8 @@ class ROKAutomationApp:
         self.opt_reset_gmail = tk.BooleanVar(value=False)
         # How frames are captured: native (fastest), adb, or desktop window.
         self.opt_backend = tk.StringVar(value=BACKEND_NATIVE)
+        # Which emulator family to drive.
+        self.opt_emulator = tk.StringVar(value=_default_emulator_key())
 
         # Temporary / Planned options (not yet implemented)
         self.opt_daily_reward = tk.BooleanVar(value=False)
@@ -515,6 +538,27 @@ class ROKAutomationApp:
         )
         combo_backend.pack(fill=tk.X, pady=1)
         combo_backend.bind("<<ComboboxSelected>>", self._on_backend_changed)
+
+        lbl_emulator = tk.Label(
+            parent,
+            text="Emulator",
+            font=("Segoe UI", 9),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.TEXT_MUTED,
+        )
+        lbl_emulator.pack(anchor="w", pady=(6, 1))
+
+        self.emulator_display = tk.StringVar(value=_emulator_label(self.opt_emulator.get()))
+        combo_emulator = ttk.Combobox(
+            parent,
+            textvariable=self.emulator_display,
+            state="readonly",
+            values=[_emulator_label(family.key) for family in families()],
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+        )
+        combo_emulator.pack(fill=tk.X, pady=1)
+        combo_emulator.bind("<<ComboboxSelected>>", self._on_emulator_changed)
 
         cb_reset = tk.Checkbutton(
             parent,
@@ -923,6 +967,34 @@ class ROKAutomationApp:
                 return backend
         return BACKEND_NATIVE
 
+    def selected_emulator(self) -> str:
+        """Return the emulator family key behind the displayed label."""
+
+        display = self.emulator_display.get()
+        for family in families():
+            if _emulator_label(family.key) == display:
+                return family.key
+        return self.opt_emulator.get()
+
+    def _on_emulator_changed(self, _event: object = None) -> None:
+        """Explain the selected emulator and check that it is installed."""
+
+        key = self.selected_emulator()
+        self.opt_emulator.set(key)
+        try:
+            family = get_family(key)
+        except Exception as exc:
+            self.log_error(f"Unknown emulator: {exc}")
+            return
+
+        if family.is_installed():
+            self.log_success(f"Emulator ready: {family.label} ({', '.join(str(f) for f in family.install_folders())})")
+        else:
+            self.log_warning(
+                f"{family.label} does not look installed on this machine. "
+                "Install it, or pick another emulator."
+            )
+
     def check_emulator_connection(self) -> bool:
         """Check if the emulator is reachable and update the status badge.
 
@@ -954,7 +1026,13 @@ class ROKAutomationApp:
             )
             return True
 
-        window = find_ldplayer_window()
+        try:
+            family = get_family(self.selected_emulator())
+        except Exception:
+            family = None
+        terms = family.window_terms if family is not None else ("ldplayer",)
+        classes = family.window_classes if family is not None else ()
+        window = find_emulator_window(terms, classes)
         if window is not None:
             self.emulator_status_badge.config(
                 text=f"Emulator: Connected ({window.title})",
@@ -1105,6 +1183,7 @@ class ROKAutomationApp:
 
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
         cmd.extend(["--backend", self.selected_backend()])
+        cmd.extend(["--emulator", self.selected_emulator()])
         if farm_enabled:
             cmd.append("--farm")
             if self.opt_daily_reward.get():
@@ -1181,6 +1260,8 @@ class ROKAutomationApp:
             "--screenshot",
             "--backend",
             self.selected_backend(),
+            "--emulator",
+            self.selected_emulator(),
         ]
         self.log_info("Executing screenshot test...")
         self._launch_utility_command(cmd)
@@ -1198,6 +1279,8 @@ class ROKAutomationApp:
             "--detect-screen",
             "--backend",
             self.selected_backend(),
+            "--emulator",
+            self.selected_emulator(),
         ]
         self.log_info("Executing screen detection diagnostic...")
         self._launch_utility_command(cmd)
