@@ -122,6 +122,9 @@ class ROKAutomationApp:
         self.opt_farm = tk.BooleanVar(value=True)
         self.opt_switch_gmail = tk.BooleanVar(value=True)
         self.opt_reset_gmail = tk.BooleanVar(value=False)
+        # Drive the emulator over ADB so the LDPlayer window may be minimised
+        # or covered while the automation runs.
+        self.opt_adb = tk.BooleanVar(value=False)
 
         # Temporary / Planned options (not yet implemented)
         self.opt_daily_reward = tk.BooleanVar(value=False)
@@ -466,6 +469,24 @@ class ROKAutomationApp:
             anchor="w",
         )
         cb_switch_gmail.pack(fill=tk.X, pady=1)
+
+        cb_adb = tk.Checkbutton(
+            parent,
+            text=(
+                "Use ADB (LDPlayer window may be minimised or covered "
+                "while farming)"
+            ),
+            variable=self.opt_adb,
+            font=("Segoe UI", 9),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.TEXT_PRIMARY,
+            selectcolor=ModernColors.BG_DARK,
+            activebackground=ModernColors.BG_CARD,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            anchor="w",
+            command=self._on_adb_option_toggled,
+        )
+        cb_adb.pack(fill=tk.X, pady=1)
 
         cb_reset = tk.Checkbutton(
             parent,
@@ -866,7 +887,35 @@ class ROKAutomationApp:
         self.log_info("Full console output copied to clipboard.")
 
     def check_emulator_connection(self) -> bool:
-        """Check if LDPlayer window is available and update status badge."""
+        """Check if the emulator is reachable and update the status badge.
+
+        With ADB enabled the emulator counts as connected even when its
+        window is minimised or covered, because the capture comes from the
+        emulator itself rather than from the screen.
+        """
+
+        if self.opt_adb.get():
+            try:
+                from rok_automation.game.adb import (
+                    find_adb_device,
+                    find_adb_executable,
+                )
+
+                device = find_adb_device(find_adb_executable())
+            except Exception as exc:
+                self.emulator_status_badge.config(
+                    text=f"Emulator: ADB unavailable ({exc})"[:60],
+                    fg=ModernColors.ACCENT_RED,
+                    bg="#450a0a",
+                )
+                return False
+            self.emulator_status_badge.config(
+                text=f"Emulator: Connected (ADB {device})",
+                fg=ModernColors.ACCENT_GREEN,
+                bg="#064e3b",
+            )
+            return True
+
         window = find_ldplayer_window()
         if window is not None:
             self.emulator_status_badge.config(
@@ -882,6 +931,34 @@ class ROKAutomationApp:
                 bg="#450a0a",
             )
             return False
+
+    def _on_adb_option_toggled(self) -> None:
+        """Explain the ADB option and check the emulator is reachable."""
+
+        if not self.opt_adb.get():
+            self.log_info(
+                "ADB disabled: the LDPlayer window must stay visible and uncovered."
+            )
+            return
+
+        self.log_info(
+            "ADB enabled: the LDPlayer window may be minimised, hidden or "
+            "covered while farming. Frames are captured from the emulator "
+            "itself, so detection is unaffected by overlapping windows."
+        )
+        try:
+            from rok_automation.game.adb import find_adb_device, find_adb_executable
+
+            adb_path = find_adb_executable()
+            device = find_adb_device(adb_path)
+        except Exception as exc:
+            self.log_error(
+                f"ADB is enabled but no emulator was found: {exc}. "
+                "Enable 'ADB debugging' with a local connection in the "
+                "LDPlayer settings and restart the emulator."
+            )
+            return
+        self.log_success(f"ADB ready: {device} via {adb_path}")
 
     def _on_planned_option_toggled(self, title: str, var: tk.BooleanVar) -> None:
         """Handle toggling of optional / future features."""
@@ -977,6 +1054,8 @@ class ROKAutomationApp:
             )
 
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
+        if self.opt_adb.get():
+            cmd.append("--adb")
         if farm_enabled:
             cmd.append("--farm")
             if self.opt_daily_reward.get():

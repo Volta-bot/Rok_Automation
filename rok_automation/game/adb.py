@@ -234,7 +234,11 @@ class AdbInterface:
         x: float,
         y: float,
     ) -> tuple[int, int]:
-        """Map a canonical-frame point to guest display pixels."""
+        """Map a canonical-frame point to guest display pixels.
+
+        The point is treated as the centre of a canonical pixel, so the
+        mapping stays accurate at both edges of the frame.
+        """
 
         guest_width, guest_height = self._guest_size
         crop_left, crop_top, crop_width, crop_height = compute_capture_crop(
@@ -242,8 +246,8 @@ class AdbInterface:
             guest_height,
         )
         canonical_width, canonical_height = CANONICAL_CAPTURE_SIZE
-        guest_x = crop_left + x * crop_width / canonical_width
-        guest_y = crop_top + y * crop_height / canonical_height
+        guest_x = crop_left + (x + 0.5) * crop_width / canonical_width - 0.5
+        guest_y = crop_top + (y + 0.5) * crop_height / canonical_height - 0.5
         guest_x = max(0, min(guest_width - 1, int(round(guest_x))))
         guest_y = max(0, min(guest_height - 1, int(round(guest_y))))
         return guest_x, guest_y
