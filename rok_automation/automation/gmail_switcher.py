@@ -46,6 +46,10 @@ _MAX_DROPDOWN_SCROLLS = 10
 _MAX_IDENTITY_READS = 8
 _ACTION_RETRY_DELAY = 0.20
 _SCROLL_SETTLE_DELAY = 0.45
+# A reading must repeat this many times (once) before the entry click
+# is trusted, but the switch proceeds after a few attempts if the list
+# keeps jittering, so it can never hang.
+_MAX_STABILITY_WAITS = 3
 _LOGIN_RECLICK_DELAY = 4.0
 _USER_CENTER_LINGER = 6.0
 # Lilith's account web UI is white/grey; RoK screens are saturated. Measured
@@ -320,10 +324,11 @@ class GmailSwitcher:
         returning_to_first = False
         scroll_settled = False
         scrolls = 0
-        # Whether the list has actually moved since the dropdown opened.
-        # A list that never moves means the drag was read as a tap, so
-        # the bottom cannot be trusted yet.
-        list_moved = False
+        # Identical consecutive readings seen since the last change; a
+        # reading must repeat once before the click is trusted, because
+        # the list can still be gliding right after a drag.
+        stable_reads = 0
+        stability_waits = 0
         last_signature: tuple[str, ...] | None = None
         last_state = "unknown"
 
@@ -439,24 +444,39 @@ class GmailSwitcher:
                     unchanged = (
                         last_signature is not None and signature == last_signature
                     )
-                    if last_signature is not None and not unchanged:
-                        list_moved = True
                     at_bottom = (
-                        (unchanged and list_moved)
+                        unchanged
                         or span < frame.shape[0] * 0.05
                         or scrolls >= _MAX_DROPDOWN_SCROLLS
                     )
-                    if at_bottom:
-                        scroll_settled = True
-                        self._log(
-                            "Gmail dropdown is at the bottom; visible accounts: "
-                            + ", ".join(entry.email for entry in lilith.entries)
-                        )
-                    else:
+                    if not at_bottom:
                         last_signature = signature
+                        stable_reads = 0
+                        stability_waits = 0
                         scrolls += 1
                         self._scroll_dropdown(screenshot, frame, lilith.entries)
                         continue
+                    if not unchanged or stable_reads == 0:
+                        # The list keeps gliding or bouncing for a moment
+                        # after a drag, so a single reading can be out of
+                        # date by half a row. Only trust one that repeats
+                        # after the settle delay; this costs one capture,
+                        # not another scroll. If the reading never
+                        # repeats, continue with the latest one after a
+                        # few attempts rather than hanging the switch.
+                        if not unchanged:
+                            stable_reads = 0
+                            stability_waits = 0
+                        stable_reads += 1
+                        if stability_waits < _MAX_STABILITY_WAITS:
+                            stability_waits += 1
+                            self.game.wait(_SCROLL_SETTLE_DELAY)
+                            continue
+                    scroll_settled = True
+                    self._log(
+                        "Gmail dropdown is at the bottom; visible accounts: "
+                        + ", ".join(entry.email for entry in lilith.entries)
+                    )
 
                 if target is None:
                     choice = self._choose_target(rotation, current, lilith.entries)
@@ -486,10 +506,14 @@ class GmailSwitcher:
                     scroll_settled = False
                     last_signature = None
                     scrolls = 0
-                    list_moved = False
+                    stable_reads = 0
+                    stability_waits = 0
                     continue
                 self._bump(clicks, "entry", "Gmail dropdown entry")
-                self.game.click(entry.bounds, screenshot)
+                self.game.click(
+                    self._entry_click_bounds(entry, lilith.entries),
+                    screenshot,
+                )
                 self._wait_for_state_change("dropdown_open")
                 continue
 
@@ -529,7 +553,8 @@ class GmailSwitcher:
                 scroll_settled = False
                 last_signature = None
                 scrolls = 0
-                list_moved = False
+                stable_reads = 0
+                stability_waits = 0
                 self._wait_for_state_change("switch_popup")
                 continue
 
@@ -612,6 +637,32 @@ class GmailSwitcher:
             (entry for entry in entries if entry.identity.matches(target)),
             None,
         )
+
+    @staticmethod
+    def _entry_click_bounds(
+        entry: _DropdownEntry,
+        entries: list[_DropdownEntry],
+    ) -> Box:
+        """Lower the click into the middle of the account row.
+
+        The dropdown's rows keep a constant pitch: the e-mail text sits
+        at the top of its row and the row card extends a full pitch
+        below it. Clicking the centre of the text alone can sit high
+        enough that the tap is read by the row above, so the click is
+        taken from the middle of the row instead. The pitch comes from
+        the detected rows themselves, so it follows the dropdown
+        wherever it is drawn on screen.
+        """
+
+        x, y, width, height = entry.bounds
+        tops = sorted(item.bounds[1] for item in entries)
+        pitch = min(
+            (below - above for above, below in zip(tops, tops[1:]) if below > above),
+            default=0,
+        )
+        if pitch <= height:
+            return entry.bounds
+        return (x, y, width, pitch)
 
     @staticmethod
     def _field_matches(field_email: str | None, target: GmailIdentity) -> bool:

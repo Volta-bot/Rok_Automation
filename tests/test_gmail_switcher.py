@@ -202,5 +202,62 @@ class TestUploadedScreenshots(unittest.TestCase):
         self.assertEqual(bottom_entry.uid, "32990")
 
 
+class TestEntryClickBounds(unittest.TestCase):
+    """The click on a dropdown entry lands in the middle of its row."""
+
+    def setUp(self):
+        self.switcher = GmailSwitcher(DummyGame(), ScreenDetector(), log=lambda m: None)
+
+    def test_the_click_is_lowered_half_a_row(self):
+        # Rows 56px apart, e-mail text 22px tall at the top of each row.
+        entries = [
+            _DropdownEntry("a@gmail.com", None, (100, 350, 180, 22)),
+            _DropdownEntry("b@gmail.com", None, (100, 406, 180, 22)),
+            _DropdownEntry("c@gmail.com", None, (100, 462, 180, 22)),
+        ]
+        bounds = self.switcher._entry_click_bounds(entries[-1], entries)
+        self.assertEqual(bounds, (100, 462, 180, 56))
+        # The click point (centre) must be clearly below the text centre.
+        self.assertGreater(
+            bounds[1] + bounds[3] // 2,
+            entries[-1].bounds[1] + entries[-1].bounds[3] // 2,
+        )
+
+    def test_the_lowered_click_stays_inside_the_row(self):
+        entries = [
+            _DropdownEntry("a@gmail.com", None, (100, 350, 180, 22)),
+            _DropdownEntry("b@gmail.com", None, (100, 406, 180, 22)),
+            _DropdownEntry("c@gmail.com", None, (100, 462, 180, 22)),
+        ]
+        for entry in entries:
+            bounds = self.switcher._entry_click_bounds(entry, entries)
+            centre_y = bounds[1] + bounds[3] // 2
+            # The click must stay inside this row: above the next row's
+            # e-mail text and below this row's text centre.
+            self.assertGreater(centre_y, entry.bounds[1])
+            index = entries.index(entry)
+            if index + 1 < len(entries):
+                self.assertLess(centre_y, entries[index + 1].bounds[1])
+
+    def test_a_wrapped_two_line_email_is_not_lowered_too_far(self):
+        # A wrapped e-mail is taller than the others; the row pitch does
+        # not change, so the click still lands mid-row.
+        entries = [
+            _DropdownEntry("a@gmail.com", None, (100, 350, 180, 22)),
+            _DropdownEntry("wrapped.long.name@gmail.com", None, (100, 406, 180, 44)),
+        ]
+        bounds = self.switcher._entry_click_bounds(entries[-1], entries)
+        self.assertEqual(bounds, (100, 406, 180, 56))
+        centre_y = bounds[1] + bounds[3] // 2
+        self.assertEqual(centre_y, 434)
+
+    def test_without_measurable_pitch_the_bounds_are_kept(self):
+        single = [_DropdownEntry("a@gmail.com", None, (100, 350, 180, 22))]
+        self.assertEqual(
+            self.switcher._entry_click_bounds(single[0], single),
+            single[0].bounds,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
