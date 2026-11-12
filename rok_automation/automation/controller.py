@@ -25,6 +25,7 @@ from rok_automation.automation.gmail_switcher import (
 )
 from rok_automation.automation.states import FarmState
 from rok_automation.game.console import safe_print
+from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
@@ -130,6 +131,7 @@ class FarmingController:
         rng: random.Random | None = None,
         log=safe_print,
         daily_rewards: bool = False,
+        daily_rewards_flag_path: Path | None = DEFAULT_DAILY_REWARD_FLAG_PATH,
         switch_gmail: bool = True,
         switch_rok_accounts: bool = True,
         gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
@@ -144,6 +146,8 @@ class FarmingController:
         self.rng = rng or random.Random()
         self.log = log
         self.daily_rewards = daily_rewards
+        self.daily_rewards_flag_path = daily_rewards_flag_path
+        self._daily_rewards_enabled_before = False
         self.switch_gmail = switch_gmail
         self.switch_rok_accounts = switch_rok_accounts
         self.gmail_state_path = gmail_state_path
@@ -364,13 +368,42 @@ class FarmingController:
             screenshot, detection = self._read_screen()
         return screenshot, detection
 
+    def _should_claim_daily_rewards(self) -> bool:
+        """Whether this account should have its daily rewards claimed.
+
+        The option can be switched on while the run is going, so the
+        setting is read again for every account instead of only once at
+        the start.
+        """
+
+        if self.daily_rewards:
+            return True
+        if self.daily_rewards_flag_path is None:
+            return False
+
+        from rok_automation.game.flags import daily_rewards_enabled
+
+        if daily_rewards_enabled(self.daily_rewards_flag_path):
+            if not self._daily_rewards_enabled_before:
+                self._log(
+                    "Daily rewards switched on; they will be claimed from the "
+                    "next account"
+                )
+                self._daily_rewards_enabled_before = True
+            return True
+
+        if self._daily_rewards_enabled_before:
+            self._log("Daily rewards switched off; skipping the claim")
+            self._daily_rewards_enabled_before = False
+        return False
+
     def _run_one_account(
         self,
         *,
         expected_account_name: str | None = None,
     ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
-        if self.daily_rewards:
+        if self._should_claim_daily_rewards():
             self._transition(
                 FarmState.CLAIM_DAILY_REWARD,
                 "Claiming daily VIP and campaign rewards",

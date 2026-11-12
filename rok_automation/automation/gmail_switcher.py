@@ -320,7 +320,10 @@ class GmailSwitcher:
         returning_to_first = False
         scroll_settled = False
         scrolls = 0
-        bottom_confirmation_scroll_done = False
+        # Whether the list has actually moved since the dropdown opened.
+        # A list that never moves means the drag was read as a tap, so
+        # the bottom cannot be trusted yet.
+        list_moved = False
         last_signature: tuple[str, ...] | None = None
         last_state = "unknown"
 
@@ -433,20 +436,16 @@ class GmailSwitcher:
                         if len(lilith.entries) >= 2
                         else 0.0
                     )
+                    unchanged = (
+                        last_signature is not None and signature == last_signature
+                    )
+                    if last_signature is not None and not unchanged:
+                        list_moved = True
                     at_bottom = (
-                        (last_signature is not None and signature == last_signature)
+                        (unchanged and list_moved)
                         or span < frame.shape[0] * 0.05
                         or scrolls >= _MAX_DROPDOWN_SCROLLS
                     )
-                    if at_bottom and not bottom_confirmation_scroll_done:
-                        self._log(
-                            "Confirming the Gmail dropdown bottom with one extra scroll"
-                        )
-                        last_signature = signature
-                        scrolls += 1
-                        bottom_confirmation_scroll_done = True
-                        self._scroll_dropdown(screenshot, frame, lilith.entries)
-                        continue
                     if at_bottom:
                         scroll_settled = True
                         self._log(
@@ -487,7 +486,7 @@ class GmailSwitcher:
                     scroll_settled = False
                     last_signature = None
                     scrolls = 0
-                    bottom_confirmation_scroll_done = False
+                    list_moved = False
                     continue
                 self._bump(clicks, "entry", "Gmail dropdown entry")
                 self.game.click(entry.bounds, screenshot)
@@ -530,7 +529,7 @@ class GmailSwitcher:
                 scroll_settled = False
                 last_signature = None
                 scrolls = 0
-                bottom_confirmation_scroll_done = False
+                list_moved = False
                 self._wait_for_state_change("switch_popup")
                 continue
 

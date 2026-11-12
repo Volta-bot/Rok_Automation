@@ -223,27 +223,49 @@ class TestPauseButton(unittest.TestCase):
         self.assertIn("PAUSE", self.app.btn_pause.cget("text"))
 
     def test_action_buttons_are_evenly_sized_and_spaced(self) -> None:
-        """The three action buttons must share the row evenly.
+        """START keeps the most room; PAUSE and STOP share the rest evenly.
 
         They used to be packed by hand, which left START absorbing all
-        the spare width and the gaps between the buttons unequal.
+        the spare width and the gaps between the buttons unequal. PAUSE
+        and STOP are narrower on purpose: START is the button people
+        look for, the other two are secondary controls.
         """
         self.app.root.update_idletasks()
-        buttons = [self.app.btn_start, self.app.btn_pause, self.app.btn_stop]
+        buttons = [self.app.btn_pause, self.app.btn_stop]
         widths = {w.winfo_width() for w in buttons}
         self.assertEqual(
             len(widths),
             1,
-            f"action buttons have different widths: "
+            f"pause/stop buttons have different widths: "
             f"{[w.winfo_width() for w in buttons]}",
         )
+        # PAUSE and STOP are the secondary controls: a smaller font and
+        # tighter padding than START keeps them visibly narrower.
+        import tkinter.font as tkfont
+
+        for button in buttons:
+            font = tkfont.Font(font=button.cget("font"))
+            self.assertEqual(
+                (font.actual("family"), font.actual("size"), font.actual("weight")),
+                ("Segoe UI", 10, "bold"),
+            )
+            self.assertEqual(int(button.cget("padx")), 10)
+        font = tkfont.Font(font=self.app.btn_start.cget("font"))
+        self.assertEqual(
+            (font.actual("family"), font.actual("size"), font.actual("weight")),
+            ("Segoe UI", 11, "bold"),
+        )
+        self.assertEqual(int(self.app.btn_start.cget("padx")), 16)
 
         # The order must read START, PAUSE, STOP from left to right.
         columns = [int(w.grid_info()["column"]) for w in buttons]
+        columns.insert(0, int(self.app.btn_start.grid_info()["column"]))
         self.assertEqual(columns, [0, 1, 2])
 
-        # The columns share the row evenly, which keeps the gaps equal.
-        for column in range(3):
+        # START takes twice the room of the two equal secondary columns.
+        start = self.app.btn_box.grid_columnconfigure(0)
+        self.assertEqual(start["weight"], 2)
+        for column in (1, 2):
             settings = self.app.btn_box.grid_columnconfigure(column)
             self.assertEqual(settings["weight"], 1)
             self.assertEqual(settings["uniform"], "action_button")

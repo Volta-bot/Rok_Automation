@@ -32,6 +32,7 @@ from rok_automation.game.backends import (
 from rok_automation.game.desktop import find_emulator_window
 from rok_automation.game.display import enable_dpi_awareness
 from rok_automation.game.emulators import families, get_family, select_family
+from rok_automation.game.flags import set_daily_rewards
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.game.process import run_hidden
 from rok_automation.logic.resource_selector import (
@@ -384,8 +385,10 @@ class ROKAutomationApp:
         btn_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
         btn_box.pack(fill=tk.X, pady=(0, 10))
         self.btn_box = btn_box
-        for column in range(3):
-            btn_box.columnconfigure(column, weight=1, uniform="action_button")
+        # START keeps the most room, PAUSE and STOP share the rest evenly.
+        btn_box.columnconfigure(0, weight=2)
+        btn_box.columnconfigure(1, weight=1, uniform="action_button")
+        btn_box.columnconfigure(2, weight=1, uniform="action_button")
 
         self.btn_start = tk.Button(
             btn_box,
@@ -407,7 +410,7 @@ class ROKAutomationApp:
         self.btn_pause = tk.Button(
             btn_box,
             text="⏸  PAUSE",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg=ModernColors.ACCENT_BLUE,
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_BLUE_HOVER,
@@ -416,7 +419,7 @@ class ROKAutomationApp:
             relief=tk.FLAT,
             cursor="hand2",
             state=tk.DISABLED,
-            padx=16,
+            padx=10,
             pady=8,
             command=self.toggle_pause,
         )
@@ -425,7 +428,7 @@ class ROKAutomationApp:
         self.btn_stop = tk.Button(
             btn_box,
             text="⏹  STOP",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg=ModernColors.ACCENT_RED,
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_RED_HOVER,
@@ -434,7 +437,7 @@ class ROKAutomationApp:
             relief=tk.FLAT,
             cursor="hand2",
             state=tk.DISABLED,
-            padx=16,
+            padx=10,
             pady=8,
             command=self.stop_automation,
         )
@@ -1100,10 +1103,26 @@ class ROKAutomationApp:
         """Handle toggling of optional / future features."""
         state_str = "ENABLED" if var.get() else "DISABLED"
         if title == "Collect Daily Rewards":
+            # The automation runs in its own process, so the option is
+            # handed over through a flag file that is read before every
+            # account. Switching it on therefore takes effect from the
+            # next account, even in the middle of a run.
+            enabled = bool(var.get())
+            try:
+                set_daily_rewards(enabled)
+            except OSError as exc:
+                self.log_error(f"Could not update the daily reward option: {exc}")
+                return
             self.log(
                 f"[Option] {title} set to {state_str}. "
-                f"(Daily VIP points, VIP free chest, and Campaign golden chest will be claimed before farming)",
-                tag="info" if var.get() else "warning",
+                + (
+                    "Rewards will be claimed from the next account "
+                    "(daily VIP points, VIP free chest and the Campaign "
+                    "golden chest)."
+                    if enabled
+                    else "No more rewards will be claimed."
+                ),
+                tag="info" if enabled else "warning",
             )
             return
 
@@ -1194,8 +1213,12 @@ class ROKAutomationApp:
         cmd.extend(["--emulator", self.selected_emulator()])
         if farm_enabled:
             cmd.append("--farm")
-            if self.opt_daily_reward.get():
-                cmd.append("--daily-reward")
+            # The reward option is handed over through the flag file, so
+            # it can be switched while the run is going.
+            try:
+                set_daily_rewards(bool(self.opt_daily_reward.get()))
+            except OSError as exc:
+                self.log_error(f"Could not apply the daily reward option: {exc}")
         elif self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
         if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
