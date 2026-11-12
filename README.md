@@ -58,7 +58,15 @@ When enabled, daily rewards are claimed first before any resource farming begins
 3. **Session Position Pinning:** Remembers static button locations across accounts to avoid redundant rescanning.
 4. **Resilient Error Recovery:** Detects already-claimed chests, dismisses stuck popups, and recovers safely back to the City view without hanging.
 
-### 5. High-Speed Vision Optimizations
+### 5. Resolution-Independent Detection
+- **Canonical Capture Size:** Every screenshot is rescaled to a fixed **1280x720** frame before any detection runs. The UI templates are authored against one resolution, so normalising the capture keeps template matching, OCR regions and the pinned-position cache **identical no matter how large or small the LDPlayer window is**.
+  - Without this, the matcher's scale ceiling (`maximum_scale = 1.35`) meant any capture wider than ~1728px could not match the templates at all — the score collapsed from `0.99` to `0.65` on a maximised window.
+  - Measured across window widths from 800px to 1920px on real game frames, the mean template score spread fell from **0.119 to 0.014**.
+- **Aspect-Correct Crops:** A window whose aspect is not 16:9 is centre-cropped rather than stretched, so the game content is never distorted.
+- **Bidirectional Interpolation:** Shrinking uses area averaging (best detail retention); growing uses **bilinear** rather than cubic/lanczos, because those ring around sharp edges and the ringing made the OCR read of the small `Cấp: N` label fail at some window sizes.
+- **Correct Click Mapping:** Clicks and drags are mapped back through the same crop and scale the capture used, so a click always lands on the same game pixel regardless of the window size.
+
+### 6. High-Speed Vision Optimizations
 - **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
 - **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
 - **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
@@ -124,12 +132,15 @@ ROKauto/
 ### Recommended Emulator & Display Settings
 
 > [!IMPORTANT]
-> **MAKE THE LDPLAYER SCREEN AS BIG AS POSSIBLE!**
-> Computer vision template matching and text OCR (reading account names, army count `x/5`, and search levels `Cấp: 8`) require high pixel sharpness. **Do not run LDPlayer in a tiny window or low resolution.** If the screen is shrunk, text and buttons become blurry and detection will fail.
+> **Keep the LDPlayer window reasonably large.**
+> The detector normalises every capture to a fixed 1280x720 frame, so **detection no longer breaks when the window is resized** — a maximised window works as well as a small one. However, a *very small* window still loses real detail: the emulator downsamples the game's 1920x1080 render to fit, and the tiny text (`Cấp: 8`, the `x/5` counter) becomes unreadable no matter how it is scaled afterwards.
+>
+> **Sweet spot:** anything from roughly **1100px wide upward**. Below that, expect occasional OCR misses on the smallest labels.
 
-1. **Maximize the Window:**
-   - Always maximize or expand the LDPlayer window on your monitor so UI elements are as large and clear as possible.
-   - Keep the LDPlayer window visible and unminimized during automation (do not overlap other windows over it).
+1. **Window Size (flexible):**
+   - Any window size works for *detection*, because captures are normalised to 1280x720 before matching.
+   - Keep the LDPlayer window visible and unminimized during automation (do not overlap other windows over it) — the capture reads the visible pixels.
+   - If you resize the window mid-run, the next capture simply picks up the new size.
 
 2. **LDPlayer Emulator Resolution Settings:**
    - In LDPlayer, click the **Settings** (gear icon) on the right toolbar ➔ **Advanced**:
