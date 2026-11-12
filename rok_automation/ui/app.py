@@ -23,6 +23,12 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from rok_automation.automation.controller import DEFAULT_SESSION_SUMMARY_PATH
+from rok_automation.game.backends import (
+    BACKEND_ADB,
+    BACKEND_DESKTOP,
+    BACKEND_LABELS,
+    BACKEND_NATIVE,
+)
 from rok_automation.game.ldplayer import find_ldplayer_window
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.logic.resource_selector import (
@@ -122,9 +128,8 @@ class ROKAutomationApp:
         self.opt_farm = tk.BooleanVar(value=True)
         self.opt_switch_gmail = tk.BooleanVar(value=True)
         self.opt_reset_gmail = tk.BooleanVar(value=False)
-        # Drive the emulator over ADB so the LDPlayer window may be minimised
-        # or covered while the automation runs.
-        self.opt_adb = tk.BooleanVar(value=False)
+        # How frames are captured: native (fastest), adb, or desktop window.
+        self.opt_backend = tk.StringVar(value=BACKEND_NATIVE)
 
         # Temporary / Planned options (not yet implemented)
         self.opt_daily_reward = tk.BooleanVar(value=False)
@@ -194,6 +199,23 @@ class ROKAutomationApp:
             "Dark.TCheckbutton",
             background=[("active", ModernColors.BG_CARD)],
             foreground=[("active", ModernColors.TEXT_PRIMARY)],
+        )
+
+        # Combobox styles (the capture backend picker)
+        style.configure(
+            "Dark.TCombobox",
+            background=ModernColors.BG_CARD_LIGHT,
+            fieldbackground=ModernColors.BG_CARD_LIGHT,
+            foreground=ModernColors.TEXT_PRIMARY,
+            arrowcolor=ModernColors.TEXT_PRIMARY,
+            bordercolor=ModernColors.BG_BORDER,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Dark.TCombobox",
+            fieldbackground=[("readonly", ModernColors.BG_CARD_LIGHT)],
+            background=[("readonly", ModernColors.BG_CARD_LIGHT)],
+            foreground=[("readonly", ModernColors.TEXT_PRIMARY)],
         )
 
     def _build_ui(self) -> None:
@@ -470,23 +492,29 @@ class ROKAutomationApp:
         )
         cb_switch_gmail.pack(fill=tk.X, pady=1)
 
-        cb_adb = tk.Checkbutton(
+        lbl_backend = tk.Label(
             parent,
-            text=(
-                "Use ADB (LDPlayer window may be minimised or covered "
-                "while farming)"
-            ),
-            variable=self.opt_adb,
+            text="Capture Backend (how game frames are read)",
             font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_PRIMARY,
-            selectcolor=ModernColors.BG_DARK,
-            activebackground=ModernColors.BG_CARD,
-            activeforeground=ModernColors.TEXT_PRIMARY,
-            anchor="w",
-            command=self._on_adb_option_toggled,
+            fg=ModernColors.TEXT_MUTED,
         )
-        cb_adb.pack(fill=tk.X, pady=1)
+        lbl_backend.pack(anchor="w", pady=(6, 1))
+
+        self.backend_display = tk.StringVar(value=BACKEND_LABELS[BACKEND_NATIVE])
+        combo_backend = ttk.Combobox(
+            parent,
+            textvariable=self.backend_display,
+            state="readonly",
+            values=[
+                BACKEND_LABELS[backend]
+                for backend in (BACKEND_NATIVE, BACKEND_ADB, BACKEND_DESKTOP)
+            ],
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+        )
+        combo_backend.pack(fill=tk.X, pady=1)
+        combo_backend.bind("<<ComboboxSelected>>", self._on_backend_changed)
 
         cb_reset = tk.Checkbutton(
             parent,
@@ -886,15 +914,25 @@ class ROKAutomationApp:
         self.root.clipboard_append(content)
         self.log_info("Full console output copied to clipboard.")
 
+    def selected_backend(self) -> str:
+        """Return the backend value behind the displayed label."""
+
+        display = self.backend_display.get()
+        for backend, label in BACKEND_LABELS.items():
+            if label == display:
+                return backend
+        return BACKEND_NATIVE
+
     def check_emulator_connection(self) -> bool:
         """Check if the emulator is reachable and update the status badge.
 
-        With ADB enabled the emulator counts as connected even when its
-        window is minimised or covered, because the capture comes from the
-        emulator itself rather than from the screen.
+        The ADB and native backends count the emulator as connected even
+        when its window is minimised or covered, because the frames come
+        from the emulator itself rather than from the screen.
         """
 
-        if self.opt_adb.get():
+        backend = self.selected_backend()
+        if backend in (BACKEND_ADB, BACKEND_NATIVE):
             try:
                 from rok_automation.game.adb import (
                     find_adb_device,
@@ -910,7 +948,7 @@ class ROKAutomationApp:
                 )
                 return False
             self.emulator_status_badge.config(
-                text=f"Emulator: Connected (ADB {device})",
+                text=f"Emulator: Connected ({backend.upper()} {device})",
                 fg=ModernColors.ACCENT_GREEN,
                 bg="#064e3b",
             )
@@ -932,20 +970,32 @@ class ROKAutomationApp:
             )
             return False
 
-    def _on_adb_option_toggled(self) -> None:
-        """Explain the ADB option and check the emulator is reachable."""
+    def _on_backend_changed(self, _event: object = None) -> None:
+        """Explain the selected backend and check the emulator is reachable."""
 
-        if not self.opt_adb.get():
+        backend = self.selected_backend()
+        self.opt_backend.set(backend)
+
+        if backend == BACKEND_DESKTOP:
             self.log_info(
-                "ADB disabled: the LDPlayer window must stay visible and uncovered."
+                "Desktop backend: the LDPlayer window must stay visible and "
+                "uncovered. Frames are read from the screen."
             )
             return
 
-        self.log_info(
-            "ADB enabled: the LDPlayer window may be minimised, hidden or "
-            "covered while farming. Frames are captured from the emulator "
-            "itself, so detection is unaffected by overlapping windows."
-        )
+        if backend == BACKEND_NATIVE:
+            self.log_info(
+                "Native backend: frames are read from the emulator's own "
+                "renderer (about 20 ms per frame), so the LDPlayer window may "
+                "be minimised, hidden or covered. Input is sent over ADB."
+            )
+        else:
+            self.log_info(
+                "ADB backend: the LDPlayer window may be minimised, hidden or "
+                "covered while farming, but every frame is transferred over "
+                "ADB and costs about a quarter of a second."
+            )
+
         try:
             from rok_automation.game.adb import find_adb_device, find_adb_executable
 
@@ -953,9 +1003,9 @@ class ROKAutomationApp:
             device = find_adb_device(adb_path)
         except Exception as exc:
             self.log_error(
-                f"ADB is enabled but no emulator was found: {exc}. "
-                "Enable 'ADB debugging' with a local connection in the "
-                "LDPlayer settings and restart the emulator."
+                f"Input over ADB is not available: {exc}. Enable 'ADB "
+                "debugging' with a local connection in the LDPlayer settings "
+                "and restart the emulator."
             )
             return
         self.log_success(f"ADB ready: {device} via {adb_path}")
@@ -1054,8 +1104,7 @@ class ROKAutomationApp:
             )
 
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
-        if self.opt_adb.get():
-            cmd.append("--adb")
+        cmd.extend(["--backend", self.selected_backend()])
         if farm_enabled:
             cmd.append("--farm")
             if self.opt_daily_reward.get():
@@ -1124,7 +1173,15 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--screenshot"]
+        cmd = [
+            _get_python_cli_executable(),
+            "-u",
+            "-m",
+            "rok_automation",
+            "--screenshot",
+            "--backend",
+            self.selected_backend(),
+        ]
         self.log_info("Executing screenshot test...")
         self._launch_utility_command(cmd)
 
@@ -1133,7 +1190,15 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--detect-screen"]
+        cmd = [
+            _get_python_cli_executable(),
+            "-u",
+            "-m",
+            "rok_automation",
+            "--detect-screen",
+            "--backend",
+            self.selected_backend(),
+        ]
         self.log_info("Executing screen detection diagnostic...")
         self._launch_utility_command(cmd)
 

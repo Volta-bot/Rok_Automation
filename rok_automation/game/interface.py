@@ -20,6 +20,39 @@ from rok_automation.game.pause import wait_while_paused
 from rok_automation.vision.screen import load_gray_frame
 
 
+def jittered_click_point(
+    bounds: tuple[int, int, int, int],
+    frame_shape: tuple[int, ...],
+    offset_range: int,
+) -> tuple[int, int]:
+    """Return the point to click for a control, nudged off its exact centre.
+
+    A small randomized offset on both axes keeps repeated clicks from
+    landing on the very same pixel. The offset is clamped so the point
+    always stays inside the control it belongs to, however small that
+    control is.
+    """
+
+    frame_height, frame_width = frame_shape[0], frame_shape[1]
+    x, y, width, height = bounds
+    ref_x = x + width // 2
+    ref_y = y + height // 2
+
+    max_ox = min(offset_range, max(1, width // 6)) if width > 2 else min(offset_range, 1)
+    max_oy = min(offset_range, max(1, height // 6)) if height > 2 else min(offset_range, 1)
+
+    offset_x = random.randint(-max_ox, max_ox) if max_ox > 0 else 0
+    offset_y = random.randint(-max_oy, max_oy) if max_oy > 0 else 0
+
+    # Clamp into the control first, so a tiny button cannot be missed.
+    target_x = max(x, min(x + max(width - 1, 0), ref_x + offset_x))
+    target_y = max(y, min(y + max(height - 1, 0), ref_y + offset_y))
+    # Then keep it inside the frame.
+    target_x = max(0, min(frame_width - 1, target_x))
+    target_y = max(0, min(frame_height - 1, target_y))
+    return target_x, target_y
+
+
 class GameInterface(Protocol):
     """The small surface the automation controller needs from a game client."""
 
@@ -127,25 +160,14 @@ class LDPlayerInterface:
         frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
-        x, y, width, height = bounds
-        ref_x = x + width // 2
-        ref_y = y + height // 2
 
         # Apply a small, randomized offset to target coordinates (both X and Y)
         # while keeping strictly inside the intended button/element bounds.
-        max_limit = (
-            offset_range
-            if offset_range is not None
-            else self.timing.click_offset_max
+        target_x, target_y = jittered_click_point(
+            bounds,
+            frame.shape[:2],
+            self.timing.click_offset_max if offset_range is None else offset_range,
         )
-        max_ox = min(max_limit, max(1, width // 6)) if width > 2 else min(max_limit, 1)
-        max_oy = min(max_limit, max(1, height // 6)) if height > 2 else min(max_limit, 1)
-
-        offset_x = random.randint(-max_ox, max_ox) if max_ox > 0 else 0
-        offset_y = random.randint(-max_oy, max_oy) if max_oy > 0 else 0
-
-        target_x = max(0, min(frame.shape[1] - 1, ref_x + offset_x))
-        target_y = max(0, min(frame.shape[0] - 1, ref_y + offset_y))
 
         click_ldplayer_point(
             self.window,

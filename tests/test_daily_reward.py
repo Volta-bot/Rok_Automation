@@ -179,6 +179,9 @@ class TestDailyReward(unittest.TestCase):
     def test_controller_daily_rewards_flag_triggers_claimer(self) -> None:
         """Verify FarmingController invokes DailyRewardClaimer when daily_rewards is True."""
         mock_game = MagicMock()
+        # The controller reads the captured frame, so the mock has to hand
+        # back a real image instead of a placeholder.
+        mock_game.screenshot.return_value = _ARTIFACTS_DIR / "test_960.png"
         mock_detector = MagicMock()
         mock_detector.locate_template.return_value = None
         mock_detector.detect.return_value = ScreenDetection(

@@ -24,6 +24,7 @@ from rok_automation.automation.gmail_switcher import (
     GmailSwitcher,
 )
 from rok_automation.automation.states import FarmState
+from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
@@ -127,7 +128,7 @@ class FarmingController:
         detector: ScreenDetector | None = None,
         max_armies: int = 5,
         rng: random.Random | None = None,
-        log=print,
+        log=safe_print,
         daily_rewards: bool = False,
         switch_gmail: bool = True,
         switch_rok_accounts: bool = True,

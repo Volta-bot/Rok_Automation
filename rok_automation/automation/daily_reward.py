@@ -11,6 +11,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.screen import (
@@ -68,7 +69,7 @@ class DailyRewardClaimer:
         game: GameInterface,
         detector: ScreenDetector | None = None,
         *,
-        log: Callable[[str], None] = print,
+        log: Callable[[str], None] = safe_print,
     ) -> None:
         self.game = game
         self.detector = detector or ScreenDetector()

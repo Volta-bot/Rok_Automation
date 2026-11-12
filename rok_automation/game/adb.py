@@ -12,6 +12,7 @@ identically whichever backend produced the frame.
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import shutil
@@ -25,14 +26,16 @@ from typing import Callable, Sequence
 import cv2
 import numpy as np
 
-from rok_automation.game.interface import TimingConfig
+from rok_automation.game.interface import TimingConfig, jittered_click_point
 from rok_automation.game.ldplayer import CANONICAL_CAPTURE_SIZE, compute_capture_crop
 from rok_automation.game.pause import wait_while_paused
 from rok_automation.vision.screen import cache_captured_frame, load_gray_frame
 
 
-# The LDPlayer framebuffer arrives as BGRA bytes, matching OpenCV's order.
-_FRAME_PIXEL_ORDER = "BGRA"
+# Android's raw screencap stores each pixel as four bytes in R, G, B, A
+# order, while OpenCV works in B, G, R. The bytes therefore have to be
+# swapped before the frame can be compared with the templates.
+_SCREENSHOT_PIXEL_ORDER = "RGBA"
 # Android's raw screencap header: width, height, format, colour space.
 _SCREENCAP_HEADER_SIZE = 16
 _FORMAT_RGBA_8888 = 1
@@ -138,32 +141,50 @@ def parse_screencap(data: bytes) -> np.ndarray:
             f"The emulator returned {len(pixels)} of {expected} screen bytes."
         )
     frame = np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 4)
-    if fmt == _FORMAT_RGBA_8888 and _FRAME_PIXEL_ORDER == "RGBA":
+    if fmt == _FORMAT_RGBA_8888 and _SCREENSHOT_PIXEL_ORDER == "RGBA":
         return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
     return np.ascontiguousarray(frame[:, :, :3])
 
 
-class AdbInterface:
-    """Drive the emulator through ADB instead of the Windows desktop."""
+def swipe_duration_ms(distance: float, base_duration: float) -> int:
+    """Return how long a swipe should last for the distance it covers.
+
+    A drag that is too quick is read by the game as a flick, and on a busy
+    emulator sometimes as a plain tap. The gesture is therefore stretched
+    with the distance it covers so it always registers as a drag.
+    """
+
+    return int(min(1200.0, max(base_duration * 1000.0, distance * 0.8)))
+
+
+class AdbInput:
+    """Deliver taps and drags to the emulator over ADB.
+
+    Input travels through the Android input pipeline, so the host mouse
+    cursor is never moved and the emulator window may be minimised,
+    hidden or covered while the run continues.
+
+    This is the input half of the ADB backend and the input half of the
+    native capture backend, which reads frames from the emulator's own
+    renderer but still sends its input here.
+    """
 
     def __init__(
         self,
         *,
         adb_path: str | None = None,
         serial: str | None = None,
-        screenshot_path: Path = Path("artifacts/ldplayer_adb.png"),
+        guest_size: tuple[int, int] | None = None,
         timing: TimingConfig = TimingConfig(),
         pause_flag_path: Path | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self.adb_path = adb_path or find_adb_executable()
         self.serial = serial or find_adb_device(self.adb_path)
-        self.screenshot_path = screenshot_path
         self.timing = timing
         self.pause_flag_path = pause_flag_path
         self.log = log
-        self._guest_size = self._read_guest_size()
-        self._measure_latency()
+        self._guest_size = tuple(guest_size) if guest_size else self._read_guest_size()
 
     # -- setup ---------------------------------------------------------- #
 
@@ -173,59 +194,35 @@ class AdbInterface:
         output = _run(self.adb_path, self.serial, ["shell", "wm", "size"]).decode(
             "utf-8", "replace"
         )
+        physical: tuple[int, int] | None = None
+        override: tuple[int, int] | None = None
         for line in output.splitlines():
             if "Physical size" in line:
-                size = line.split(":", 1)[1].strip()
-                width, height = (int(part) for part in size.split("x")[:2])
-                return width, height
-        raise AdbError(f"Could not read the emulator display size: {output.strip()}")
+                physical = self._parse_size(line)
+            elif "Override size" in line:
+                override = self._parse_size(line)
+        # An override is the size the guest actually draws at, so it wins.
+        size = override or physical
+        if size is None:
+            raise AdbError(f"Could not read the emulator display size: {output.strip()}")
+        return size
 
-    def _measure_latency(self) -> None:
-        """Time a few captures so the timeouts can match the real speed."""
+    @staticmethod
+    def _parse_size(line: str) -> tuple[int, int] | None:
+        """Read a ``Physical size: 1920x1080`` style line."""
 
-        samples = []
-        for _ in range(3):
-            started = time.perf_counter()
-            self._capture_raw()
-            samples.append(time.perf_counter() - started)
-        latency = statistics.median(samples)
-        self.timing = replace(self.timing, capture_latency=latency)
-        if self.log is not None:
-            self.log(
-                f"ADB capture latency {latency * 1000:.0f} ms; "
-                f"screen timeouts scaled {self.timeout_scale:.1f}x"
-            )
+        try:
+            value = line.split(":", 1)[1].strip()
+            width, height = (int(part) for part in value.split("x")[:2])
+        except (IndexError, ValueError):
+            return None
+        return width, height
 
     @property
     def timeout_scale(self) -> float:
         """How much slower a frame is than the desktop capture path."""
 
         return self.timing.timeout_scale
-
-    # -- capture -------------------------------------------------------- #
-
-    def _capture_raw(self) -> np.ndarray:
-        data = _run(self.adb_path, self.serial, ["exec-out", "screencap"], timeout=90.0)
-        return parse_screencap(data)
-
-    def screenshot(self) -> Path:
-        """Capture the emulator and store a canonical 1280x720 frame."""
-
-        frame = self._capture_raw()
-        normalized = self._normalize(frame)
-        destination = self.screenshot_path.expanduser()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        resolved = destination.resolve()
-        cv2.imwrite(str(resolved), normalized)
-        cache_captured_frame(resolved, normalized)
-        return resolved
-
-    def _normalize(self, frame: np.ndarray) -> np.ndarray:
-        """Scale a guest frame down to the canonical detection size."""
-
-        from rok_automation.game.ldplayer import normalize_capture
-
-        return normalize_capture(frame)
 
     # -- input ---------------------------------------------------------- #
 
@@ -264,23 +261,11 @@ class AdbInterface:
         frame = load_gray_frame(screenshot_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
-        x, y, width, height = bounds
-        ref_x = x + width // 2
-        ref_y = y + height // 2
-
-        max_limit = (
-            offset_range
-            if offset_range is not None
-            else self.timing.click_offset_max
+        target_x, target_y = jittered_click_point(
+            bounds,
+            frame.shape[:2],
+            self.timing.click_offset_max if offset_range is None else offset_range,
         )
-        max_ox = min(max_limit, max(1, width // 6)) if width > 2 else min(max_limit, 1)
-        max_oy = min(max_limit, max(1, height // 6)) if height > 2 else min(max_limit, 1)
-
-        offset_x = random.randint(-max_ox, max_ox) if max_ox > 0 else 0
-        offset_y = random.randint(-max_oy, max_oy) if max_oy > 0 else 0
-
-        target_x = max(0, min(frame.shape[1] - 1, ref_x + offset_x))
-        target_y = max(0, min(frame.shape[0] - 1, ref_y + offset_y))
 
         guest_x, guest_y = self._to_guest(target_x, target_y)
         _run(
@@ -307,6 +292,12 @@ class AdbInterface:
             raise FileNotFoundError(f"Could not read screenshot: {screenshot_path}")
         start_x, start_y = self._to_guest(*start)
         end_x, end_y = self._to_guest(*end)
+
+        # A drag that is too quick is read by the game as a flick, and on a
+        # busy emulator sometimes as a plain tap.
+        distance = math.hypot(end_x - start_x, end_y - start_y)
+        duration_ms = swipe_duration_ms(distance, self.timing.drag_duration)
+
         _run(
             self.adb_path,
             self.serial,
@@ -318,7 +309,7 @@ class AdbInterface:
                 str(start_y),
                 str(end_x),
                 str(end_y),
-                str(int(self.timing.drag_duration * 1000)),
+                str(duration_ms),
             ],
             timeout=60.0,
         )
@@ -329,3 +320,70 @@ class AdbInterface:
 
         wait_while_paused(self.pause_flag_path, self.log)
         time.sleep(max(0.0, seconds))
+
+
+class AdbInterface(AdbInput):
+    """Drive the emulator through ADB instead of the Windows desktop."""
+
+    def __init__(
+        self,
+        *,
+        adb_path: str | None = None,
+        serial: str | None = None,
+        screenshot_path: Path = Path("artifacts/ldplayer_adb.png"),
+        timing: TimingConfig = TimingConfig(),
+        pause_flag_path: Path | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(
+            adb_path=adb_path,
+            serial=serial,
+            timing=timing,
+            pause_flag_path=pause_flag_path,
+            log=log,
+        )
+        self.screenshot_path = screenshot_path
+        self._measure_latency()
+
+    # -- setup ---------------------------------------------------------- #
+
+    def _measure_latency(self) -> None:
+        """Time a few captures so the timeouts can match the real speed."""
+
+        samples = []
+        for _ in range(3):
+            started = time.perf_counter()
+            self._capture_raw()
+            samples.append(time.perf_counter() - started)
+        latency = statistics.median(samples)
+        self.timing = replace(self.timing, capture_latency=latency)
+        if self.log is not None:
+            self.log(
+                f"ADB capture latency {latency * 1000:.0f} ms; "
+                f"screen timeouts scaled {self.timeout_scale:.1f}x"
+            )
+
+    # -- capture -------------------------------------------------------- #
+
+    def _capture_raw(self) -> np.ndarray:
+        data = _run(self.adb_path, self.serial, ["exec-out", "screencap"], timeout=90.0)
+        return parse_screencap(data)
+
+    def screenshot(self) -> Path:
+        """Capture the emulator and store a canonical 1280x720 frame."""
+
+        frame = self._capture_raw()
+        normalized = self._normalize(frame)
+        destination = self.screenshot_path.expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        resolved = destination.resolve()
+        cv2.imwrite(str(resolved), normalized)
+        cache_captured_frame(resolved, normalized)
+        return resolved
+
+    def _normalize(self, frame: np.ndarray) -> np.ndarray:
+        """Scale a guest frame down to the canonical detection size."""
+
+        from rok_automation.game.ldplayer import normalize_capture
+
+        return normalize_capture(frame)

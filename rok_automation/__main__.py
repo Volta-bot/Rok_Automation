@@ -5,12 +5,18 @@ import sys
 from pathlib import Path
 
 from rok_automation.automation.controller import FarmingController
+from rok_automation.game.backends import (
+    BACKEND_ADB,
+    BACKEND_CHOICES,
+    BACKEND_DESKTOP,
+    BACKEND_NATIVE,
+    create_game_interface,
+)
 from rok_automation.game.ldplayer import (
     CANONICAL_CAPTURE_SIZE,
     describe_window_tree,
     find_ldplayer_window,
 )
-from rok_automation.game.interface import LDPlayerInterface
 from rok_automation.game.pause import clear_paused
 from rok_automation.vision.screen import ScreenDetector
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
@@ -23,19 +29,19 @@ _RESOURCE_DISPLAY_NAMES = {
 }
 
 
-def _build_adb_game(serial: str | None, adb_path: str | None):
-    """Create an ADB-backed game interface, or report why it failed."""
-
-    from rok_automation.game.adb import AdbError, AdbInterface
+def _build_game(backend: str, args):
+    """Create the requested capture backend, or report why it failed."""
 
     try:
-        return AdbInterface(
-            serial=serial,
-            adb_path=adb_path,
+        return create_game_interface(
+            backend,
+            adb_path=args.adb_path,
+            serial=args.adb_serial,
+            instance_index=args.ldplayer_index,
             log=lambda message: print(f"[{message}]"),
         )
-    except AdbError as exc:
-        print(f"ADB connection failed: {exc}")
+    except Exception as exc:  # noqa: BLE001 - reported to the user
+        print(f"Emulator: Disconnected ({exc})")
         return None
 
 
@@ -51,7 +57,7 @@ def main() -> int:
         const=Path("artifacts/ldplayer.png"),
         type=Path,
         metavar="PATH",
-        help="capture the visible LDPlayer game area (default: artifacts/ldplayer.png)",
+        help="capture the LDPlayer game area using the selected backend",
     )
     parser.add_argument(
         "--diagnose-window",
@@ -113,8 +119,26 @@ def main() -> int:
         action="store_true",
         help=(
             "drive the emulator over ADB so the LDPlayer window may be "
-            "minimised, hidden or covered by other windows"
+            "minimised, hidden or covered by other windows (same as "
+            "--backend adb)"
         ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=BACKEND_NATIVE,
+        help=(
+            "how frames are captured: "
+            "'native' reads the emulator's own framebuffer (fastest, "
+            "background), 'adb' pulls frames over ADB, 'desktop' captures the "
+            "visible window. Falls back automatically when unavailable."
+        ),
+    )
+    parser.add_argument(
+        "--ldplayer-index",
+        type=int,
+        metavar="N",
+        help="LDPlayer instance index to drive (default: the running one)",
     )
     parser.add_argument(
         "--adb-serial",
@@ -142,27 +166,16 @@ def main() -> int:
         from rok_automation.ui.app import launch_gui
         return launch_gui(hide_console=not args.show_console)
 
-    game = None
-    if args.adb:
-        game = _build_adb_game(args.adb_serial, args.adb_path)
-        if game is None:
-            return 1
-        print(
-            f"Emulator: Connected over ADB ({game.serial}); the LDPlayer "
-            "window may be minimised or covered."
-        )
-    else:
-        window = find_ldplayer_window()
-        if window is None:
-            print("Emulator: Disconnected (no matching visible LDPlayer window found)")
-            return 1
-        print(f"Emulator: Connected — {window.title} (handle={window.handle})")
-        game = LDPlayerInterface(
-            window,
-            log=lambda message: print(f"[{message}]"),
-        )
+    backend = BACKEND_ADB if args.adb else args.backend
+    game = _build_game(backend, args)
+    if game is None:
+        return 1
 
-    if args.diagnose_window and not args.adb:
+    window = None
+    if backend == BACKEND_DESKTOP or args.diagnose_window:
+        window = find_ldplayer_window()
+
+    if args.diagnose_window and window is not None:
         for description in describe_window_tree(window):
             print(description)
 
