@@ -30,6 +30,7 @@ from rok_automation.game.emulators import EmulatorFamily
 from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE, compute_capture_crop
 from rok_automation.game.interface import TimingConfig, jittered_click_point
 from rok_automation.game.pause import wait_while_paused
+from rok_automation.game.process import run_hidden
 from rok_automation.vision.screen import cache_captured_frame, load_gray_frame
 
 
@@ -89,7 +90,7 @@ def find_adb_device(
     the usual ``emulator-5554`` form, then a loopback address.
     """
 
-    result = subprocess.run(
+    result = run_hidden(
         [adb_path, "devices"],
         capture_output=True,
         text=True,
@@ -130,7 +131,7 @@ def _run(
 
     command = [adb_path, "-s", serial, *args]
     try:
-        result = subprocess.run(
+        result = run_hidden(
             command,
             capture_output=True,
             timeout=timeout,
@@ -152,7 +153,7 @@ def _run_global(
     """Run an adb command that is not bound to a device."""
 
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [adb_path, *args],
             capture_output=True,
             timeout=timeout,

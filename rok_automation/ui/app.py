@@ -30,8 +30,10 @@ from rok_automation.game.backends import (
     BACKEND_NATIVE,
 )
 from rok_automation.game.desktop import find_emulator_window
+from rok_automation.game.display import enable_dpi_awareness
 from rok_automation.game.emulators import families, get_family, select_family
 from rok_automation.game.pause import clear_paused, set_paused
+from rok_automation.game.process import run_hidden
 from rok_automation.logic.resource_selector import (
     Resource,
     SearchTarget,
@@ -126,15 +128,21 @@ class ROKAutomationApp:
         self,
         root: tk.Tk,
         session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
+        display_scale: float = 1.0,
     ) -> None:
         hide_console_window()
         self.root = root
         self.session_summary_path = session_summary_path
+        self.display_scale = display_scale
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         # Wide enough for the whole layout: the two option cards side by
         # side need about 1160px, and the button row needs the rest.
-        self.root.geometry("1200x820")
-        self.root.minsize(880, 640)
+        # The size is given in physical pixels, so it is multiplied by the
+        # display scale to keep the same amount of room on a scaled screen.
+        width = round(1200 * display_scale)
+        height = round(820 * display_scale)
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(round(880 * display_scale), round(640 * display_scale))
         self.root.configure(bg=ModernColors.BG_DARK)
 
         # Process & Thread state
@@ -1438,7 +1446,7 @@ class ROKAutomationApp:
 
         if sys.platform == "win32":
             try:
-                subprocess.run(
+                run_hidden(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     capture_output=True,
                     check=False,
@@ -1593,7 +1601,10 @@ def launch_gui(hide_console: bool = True) -> int:
     """Entry point to launch the graphical user interface."""
     if hide_console:
         hide_console_window()
+    # The toolkit has to know about the display scaling before the first
+    # window is created, otherwise Windows stretches the whole interface.
+    scale = enable_dpi_awareness()
     root = tk.Tk()
-    app = ROKAutomationApp(root)
+    app = ROKAutomationApp(root, display_scale=scale)
     root.mainloop()
     return 0

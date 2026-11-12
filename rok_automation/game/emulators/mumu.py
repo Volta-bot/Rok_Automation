@@ -24,6 +24,7 @@ from rok_automation.game.emulators import (
     install_dirs_from_registry,
     register,
 )
+from rok_automation.game.process import run_hidden
 
 # The folders MuMu 12 is commonly installed in.
 _INSTALL_LOCATIONS = (
@@ -82,7 +83,7 @@ class MuMuFamily(EmulatorFamily):
 
         manager = self.manager_path() / "MuMuManager.exe"
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [str(manager), "adb", "-v", str(index)],
                 capture_output=True,
                 timeout=20,

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rok_automation.game.pause import clear_paused, set_paused
+from rok_automation.game.display import display_scale
 from rok_automation.ui.app import ModernColors, ROKAutomationApp
 
 
@@ -28,7 +29,11 @@ class TestROKAutomationApp(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
-        self.app = ROKAutomationApp(self.root, session_summary_path=None)
+        self.app = ROKAutomationApp(
+            self.root,
+            session_summary_path=None,
+            display_scale=display_scale(),
+        )
 
     def tearDown(self) -> None:
         if self.app._is_running:
@@ -200,7 +205,11 @@ class TestPauseButton(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
-        self.app = ROKAutomationApp(self.root, session_summary_path=None)
+        self.app = ROKAutomationApp(
+            self.root,
+            session_summary_path=None,
+            display_scale=display_scale(),
+        )
         self.flag = Path("state/_test_pause.flag")
         clear_paused(self.flag)
 
@@ -296,7 +305,11 @@ class TestStopReliability(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
-        self.app = ROKAutomationApp(self.root, session_summary_path=None)
+        self.app = ROKAutomationApp(
+            self.root,
+            session_summary_path=None,
+            display_scale=display_scale(),
+        )
 
     def test_process_handle_is_available_before_the_worker_thread_starts(self) -> None:
         """The handle must exist as soon as START returns.

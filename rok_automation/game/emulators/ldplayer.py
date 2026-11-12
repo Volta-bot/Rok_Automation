@@ -27,6 +27,7 @@ from rok_automation.game.emulators import (
     install_dirs_from_registry,
     register,
 )
+from rok_automation.game.process import run_hidden
 
 # The folders LDPlayer is commonly installed in.
 _INSTALL_LOCATIONS = (
@@ -197,7 +198,7 @@ class LDPlayerFamily(EmulatorFamily):
 
         folder = self.console_path()
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [str(folder / "ldconsole.exe"), "list2"],
                 capture_output=True,
                 timeout=20,

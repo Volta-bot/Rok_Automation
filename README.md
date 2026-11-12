@@ -128,6 +128,14 @@ Emulators sometimes stop answering ADB until the connection is re-established. T
 
 ---
 
+### 9. A Sharp Interface on a Scaled Display
+The interface is declared per-monitor DPI aware before the toolkit creates the first window, and the window is sized in physical pixels for the display's real scale.
+
+- Without this, Windows renders the window at 96 DPI and stretches the result, which makes the whole interface look soft and slow to redraw on a scaled display (measured on a 125% screen: the text sharpness roughly doubles once the window is drawn at the display's own resolution).
+- The window keeps the same *logical* size at every scale, so the layout is identical on a 100% and a 150% screen.
+
+---
+
 ### 7. High-Speed Vision Optimizations
 - **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
 - **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
@@ -177,6 +185,8 @@ ROKauto/
 │   │   ├── native.py               # Native frame source + ADB input, combined
 │   │   ├── adb.py                  # ADB capture + Android input pipeline delivery
 │   │   ├── frame.py                # Canonical 1280x720 frame geometry
+│   │   ├── display.py              # DPI awareness & display scaling for the interface
+│   │   ├── process.py              # Helper programs that never open a console window
 │   │   ├── interface.py            # GameInterface abstraction & timing configuration
 │   │   ├── console.py              # Console output that survives a limited code page
 │   │   └── pause.py                # Cooperative pause support
