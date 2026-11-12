@@ -28,9 +28,26 @@ class TestResourceNodeYields(unittest.TestCase):
 
     def test_gold_yields(self):
         self.assertEqual(resource_node_yield(Resource.GOLD, 8), 525_000)
-        self.assertEqual(resource_node_yield(Resource.GOLD, 7), 472_000)
+        self.assertEqual(resource_node_yield(Resource.GOLD, 7), 472_500)
         self.assertEqual(resource_node_yield(Resource.GOLD, 6), 420_000)
-        self.assertEqual(resource_node_yield(Resource.GOLD, 5), 336_000)
+        self.assertEqual(resource_node_yield(Resource.GOLD, 5), 315_000)
+
+    def test_every_resource_follows_the_same_level_ratios(self):
+        """Each level step scales identically for every resource type.
+
+        Lv8 -> Lv7 is 0.9, Lv7 -> Lv6 is 8/9, and Lv6 -> Lv5 is 0.75. A
+        value that breaks this pattern is a typo, so the ratios are checked
+        rather than just the individual numbers.
+        """
+        for resource in Resource:
+            level_8 = resource_node_yield(resource, 8)
+            level_7 = resource_node_yield(resource, 7)
+            level_6 = resource_node_yield(resource, 6)
+            level_5 = resource_node_yield(resource, 5)
+            with self.subTest(resource=resource.value):
+                self.assertAlmostEqual(level_7 / level_8, 0.9, places=6)
+                self.assertAlmostEqual(level_6 / level_7, 8 / 9, places=6)
+                self.assertAlmostEqual(level_5 / level_6, 0.75, places=6)
 
     def test_calculate_totals(self):
         targets = [
@@ -39,24 +56,24 @@ class TestResourceNodeYields(unittest.TestCase):
             SearchTarget(Resource.WOOD, 6),   # 1,260,000
             SearchTarget(Resource.STONE, 8),  # 1,181,250
             SearchTarget(Resource.GOLD, 8),   #   525,000
-            SearchTarget(Resource.GOLD, 5),   #   336,000
+            SearchTarget(Resource.GOLD, 5),   #   315,000
         ]
         totals = calculate_farmed_resources(targets)
         self.assertEqual(totals[Resource.FOOD], 1_575_000 + 1_417_500)
         self.assertEqual(totals[Resource.WOOD], 1_260_000)
         self.assertEqual(totals[Resource.STONE], 1_181_250)
-        self.assertEqual(totals[Resource.GOLD], 525_000 + 336_000)
+        self.assertEqual(totals[Resource.GOLD], 525_000 + 315_000)
         grand_total = sum(totals.values())
-        self.assertEqual(grand_total, 6_294_750)
+        self.assertEqual(grand_total, 6_273_750)
 
     def test_farm_context_properties(self):
         ctx = FarmContext()
         ctx.dispatched_targets = [
             SearchTarget(Resource.GOLD, 8),  # 525,000
-            SearchTarget(Resource.GOLD, 7),  # 472,000
+            SearchTarget(Resource.GOLD, 7),  # 472,500
         ]
-        self.assertEqual(ctx.total_farmed_resources[Resource.GOLD], 997_000)
-        self.assertEqual(ctx.grand_total_farmed, 997_000)
+        self.assertEqual(ctx.total_farmed_resources[Resource.GOLD], 997_500)
+        self.assertEqual(ctx.grand_total_farmed, 997_500)
 
     def test_formatting(self):
         self.assertEqual(format_resource_amount(1_575_000), "1,575,000 (1.58M)")

@@ -19,7 +19,7 @@ Instead of relying on blind delays or fixed coordinate clicks, the automation co
   - **Coordinate Deduplication:** Reads the node's `X: ... Y: ...` coordinates from the resource popup and skips nodes already visited during the current account's session.
   - **Map-Change Detection:** Compares map margin strips before and after pressing `Tìm kiếm` to detect when no node was found (`Không tìm thấy...`) without waiting for toast animations to fade.
 - **Active March Slot Detection:** Reads the `x/5` march counter on the right side of the World Map (treating an absent counter as `0/5`) and only dispatches armies for the remaining free slots.
-- **Total Resources Farmed Calculation:** Tracks every dispatched army's resource type and node level (Lv8–Lv5), calculating yields according to official node capacities (Food/Wood: Lv8 1.575M, Lv7 1.418M, Lv6 1.26M, Lv5 945k; Stone: Lv8 1.181M, Lv7 1.063M, Lv6 945k, Lv5 709k; Gold: Lv8 525k, Lv7 472k, Lv6 420k, Lv5 336k) and logging a detailed per-resource and grand total summary upon completing the run.
+- **Total Resources Farmed Calculation:** Tracks every dispatched army's resource type and node level (Lv8–Lv5), calculating yields according to official node capacities (Food/Wood: Lv8 1.575M, Lv7 1.418M, Lv6 1.26M, Lv5 945k; Stone: Lv8 1.181M, Lv7 1.063M, Lv6 945k, Lv5 709k; Gold: Lv8 525k, Lv7 472.5k, Lv6 420k, Lv5 315k) and logging a detailed per-resource and grand total summary upon completing the run.
 
 ### 2. Multi-Account Character Switching (`Nhân vật`)
 Once all 5 army slots are marching (or all resource levels are exhausted), the automation switches to the next starred character:
@@ -174,7 +174,8 @@ Launch the ROKauto Control Center GUI cleanly without any background command pro
 - **CLI / Terminal:** `python -m rok_automation --gui` (automatically hides attached console; pass `--show-console` to keep it).
 
 The graphical user interface features:
-- **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`).
+- **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`). Stopping reliably terminates the worker on the first press.
+- **Pause & Resume:** `[PAUSE]` freezes the run between two actions — the game is left untouched and the button turns into `[PLAY]` to continue exactly where it stopped.
 - **Focused Farming Buttons:** Run every starred RoK character in the current Gmail only, or farm the current RoK character only, without switching Gmail accounts.
 - **Core Automation Options:** Easily toggle automatic resource farming, multi-Gmail switching, and rotation resetting.
 - **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards* (claims daily gifts, quest chests, and VIP points & free chest), *Alliance Help & Tech*, and *Auto Train Troops*.

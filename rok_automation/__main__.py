@@ -12,6 +12,7 @@ from rok_automation.game.ldplayer import (
 )
 from rok_automation.game.interface import LDPlayerInterface
 from rok_automation.game.ldplayer import CANONICAL_CAPTURE_SIZE
+from rok_automation.game.pause import clear_paused
 from rok_automation.vision.screen import ScreenDetector
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
 
@@ -193,9 +194,11 @@ def main() -> int:
         return 0 if success else 1
 
     if args.farm:
+        # A stale pause flag from an earlier run must not freeze this one.
+        clear_paused()
         try:
             controller = FarmingController(
-                LDPlayerInterface(window),
+                LDPlayerInterface(window, log=lambda message: print(f"[{message}]")),
                 daily_rewards=args.daily_reward,
                 switch_gmail=not args.no_switch_gmail,
                 switch_rok_accounts=not args.current_rok_only,

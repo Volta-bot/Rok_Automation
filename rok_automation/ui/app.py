@@ -24,6 +24,7 @@ from typing import Any
 
 from rok_automation.automation.controller import DEFAULT_SESSION_SUMMARY_PATH
 from rok_automation.game.ldplayer import find_ldplayer_window
+from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.logic.resource_selector import (
     Resource,
     SearchTarget,
@@ -112,6 +113,7 @@ class ROKAutomationApp:
         self._worker_thread: threading.Thread | None = None
         self._output_queue: queue.Queue[str | None] = queue.Queue()
         self._is_running = False
+        self._is_paused = False
         self._session_targets: list[SearchTarget] = []
 
         # Options state
@@ -338,6 +340,24 @@ class ROKAutomationApp:
             command=self.start_automation,
         )
         self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        self.btn_pause = tk.Button(
+            btn_box,
+            text="⏸  PAUSE",
+            font=("Segoe UI", 11, "bold"),
+            bg=ModernColors.ACCENT_BLUE,
+            fg="#ffffff",
+            activebackground=ModernColors.ACCENT_BLUE_HOVER,
+            activeforeground="#ffffff",
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            state=tk.DISABLED,
+            padx=16,
+            pady=8,
+            command=self.toggle_pause,
+        )
+        self.btn_pause.pack(side=tk.RIGHT, fill=tk.X, expand=False, padx=(0, 6))
 
         self.btn_stop = tk.Button(
             btn_box,
@@ -964,11 +984,51 @@ class ROKAutomationApp:
             cmd.append("--reset-gmail-run")
 
         self.log_info(f"Starting automation with command: {' '.join(cmd)}")
-        self._set_running_state(True)
+        self._start_worker(cmd)
 
+    def _spawn_process(self, cmd: list[str]) -> subprocess.Popen[str]:
+        """Start the worker subprocess and return its handle.
+
+        The process is created on the calling thread so the handle exists
+        immediately. Creating it inside the reader thread left STOP with
+        nothing to kill when the user clicked straight after START.
+        """
+
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONUTF8"] = "1"
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creationflags,
+            env=env,
+        )
+
+    def _start_worker(self, cmd: list[str]) -> None:
+        """Spawn the worker process and start streaming its output."""
+
+        try:
+            process = self._spawn_process(cmd)
+        except Exception as exc:
+            self.log_error(f"Failed to start the automation process: {exc}")
+            self._set_running_state(False)
+            return
+
+        self._current_process = process
+        self._set_running_state(True)
         self._worker_thread = threading.Thread(
             target=self._run_subprocess_worker,
-            args=(cmd,),
+            args=(process,),
             daemon=True,
         )
         self._worker_thread.start()
@@ -1002,48 +1062,20 @@ class ROKAutomationApp:
 
     def _launch_utility_command(self, cmd: list[str]) -> None:
         """Run a short utility command in background."""
-        self._set_running_state(True)
-        self._worker_thread = threading.Thread(
-            target=self._run_subprocess_worker,
-            args=(cmd,),
-            daemon=True,
-        )
-        self._worker_thread.start()
+        self._start_worker(cmd)
 
-    def _run_subprocess_worker(self, cmd: list[str]) -> None:
-        """Background worker thread that runs a subprocess and streams output."""
+    def _run_subprocess_worker(self, process: subprocess.Popen[str]) -> None:
+        """Background worker thread that streams a subprocess's output."""
         try:
-            # Set UTF-8 encoding environment for clean subprocess unicode handling
-            env = dict(os.environ)
-            env["PYTHONUNBUFFERED"] = "1"
-            env["PYTHONUTF8"] = "1"
-
-            # On Windows, hide command window if desired
-            creationflags = 0
-            if sys.platform == "win32":
-                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-            self._current_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=creationflags,
-                env=env,
-            )
-
-            if self._current_process.stdout is not None:
-                for line in iter(self._current_process.stdout.readline, ""):
+            if process.stdout is not None:
+                for line in iter(process.stdout.readline, ""):
                     if line:
                         self._output_queue.put(line.rstrip("\r\n"))
-                    elif self._current_process.poll() is not None:
+                    elif process.poll() is not None:
                         break
 
-            self._current_process.wait()
-            return_code = self._current_process.returncode
+            process.wait()
+            return_code = process.returncode
 
             if return_code == 0:
                 self._output_queue.put("[SUCCESS] Process completed successfully.")
@@ -1100,34 +1132,110 @@ class ROKAutomationApp:
 
         self.root.after(50, self._poll_output_queue)
 
+    def toggle_pause(self) -> None:
+        """Pause the running automation, or resume it when already paused."""
+
+        if not self._is_running:
+            return
+
+        if self._is_paused:
+            clear_paused()
+            self._is_paused = False
+            self.log_info("Resuming automation.")
+            self.lbl_run_state.config(
+                text="● Running...", fg=ModernColors.ACCENT_GREEN
+            )
+            self.btn_pause.config(
+                text="⏸  PAUSE",
+                bg=ModernColors.ACCENT_BLUE,
+                activebackground=ModernColors.ACCENT_BLUE_HOVER,
+            )
+        else:
+            set_paused()
+            self._is_paused = True
+            self.log_warning("Pausing automation — the game will be left untouched.")
+            self.lbl_run_state.config(
+                text="● Paused", fg=ModernColors.ACCENT_AMBER
+            )
+            self.btn_pause.config(
+                text="▶  PLAY",
+                bg=ModernColors.ACCENT_AMBER,
+                activebackground=ModernColors.ACCENT_AMBER,
+            )
+
     def stop_automation(self) -> None:
-        """Gracefully stop or terminate the running automation process and display farmed resources."""
-        if not self._is_running and self._current_process is None:
+        """Stop the running automation process and show the resources farmed."""
+
+        proc = self._current_process
+        if not self._is_running and proc is None:
             return
 
         self.log_warning("Stopping automation requested by user (force stop)...")
         self.lbl_run_state.config(text="● Stopping...", fg=ModernColors.ACCENT_AMBER)
 
-        proc = self._current_process
-        if proc is not None:
-            try:
-                if sys.platform == "win32":
-                    # Force kill process tree cleanly on Windows
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        capture_output=True,
-                        check=False,
-                    )
-                else:
-                    proc.terminate()
-            except Exception as exc:
-                self.log_error(f"Error terminating process: {exc}")
+        # A paused run is blocked in its wait loop; make sure the pause flag
+        # is cleared so nothing is left half-paused for the next run.
+        if self._is_paused:
+            clear_paused()
+            self._is_paused = False
+
+        self._terminate_process(proc)
 
         self.log_info("Automation stopped.")
         self._set_running_state(False)
 
         # Show how much resources were farmed before force stop!
         self._display_farmed_resources_summary(stopped_early=True)
+
+    def _terminate_process(self, proc: subprocess.Popen[str] | None) -> None:
+        """Terminate the worker process and wait until it is really gone.
+
+        ``taskkill /T`` handles helper processes, but it can silently fail
+        (for example while the process is still starting up), so the exit
+        is confirmed and a direct kill is used as a fallback. This is what
+        made STOP occasionally need several presses.
+        """
+
+        if proc is None:
+            return
+
+        if proc.poll() is not None:
+            return
+
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+            except Exception as exc:
+                self.log_warning(f"taskkill could not run ({exc}); killing directly")
+        else:
+            try:
+                proc.terminate()
+            except Exception as exc:
+                self.log_warning(f"terminate failed ({exc}); killing directly")
+
+        # Confirm the process really exited before reporting "stopped".
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            self.log_error("The automation process could not be terminated.")
 
     def _display_farmed_resources_summary(self, *, stopped_early: bool = True) -> None:
         """Display full breakdown of all resources farmed up to this moment."""
@@ -1213,6 +1321,7 @@ class ROKAutomationApp:
             self.btn_farm_current_gmail.config(state=tk.DISABLED)
             self.btn_farm_current_rok.config(state=tk.DISABLED)
             self.btn_stop.config(state=tk.NORMAL, bg=ModernColors.ACCENT_RED)
+            self.btn_pause.config(state=tk.NORMAL)
             self.lbl_run_state.config(
                 text="● Running...", fg=ModernColors.ACCENT_GREEN
             )
@@ -1222,6 +1331,14 @@ class ROKAutomationApp:
             self.btn_farm_current_gmail.config(state=tk.NORMAL)
             self.btn_farm_current_rok.config(state=tk.NORMAL)
             self.btn_stop.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
+            self.btn_pause.config(state=tk.DISABLED)
+            # Reset the pause button so the next run starts unpaused.
+            self._is_paused = False
+            self.btn_pause.config(
+                text="⏸  PAUSE",
+                bg=ModernColors.ACCENT_BLUE,
+                activebackground=ModernColors.ACCENT_BLUE_HOVER,
+            )
             self.lbl_run_state.config(text="● Idle", fg=ModernColors.TEXT_MUTED)
             self.console_line_count.config(text="(Ready)", fg=ModernColors.TEXT_MUTED)
 

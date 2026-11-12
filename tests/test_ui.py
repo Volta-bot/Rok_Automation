@@ -1,10 +1,13 @@
 """Unit tests for the ROKauto Graphical User Interface."""
 
 import queue
+import subprocess
 import tkinter as tk
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.ui.app import ModernColors, ROKAutomationApp
 
 
@@ -162,6 +165,133 @@ class TestROKAutomationApp(unittest.TestCase):
         """Verify hide_console_window runs safely without exception."""
         from rok_automation.ui.app import hide_console_window
         hide_console_window()  # Should not raise
+
+
+class TestPauseButton(unittest.TestCase):
+    """Verify the pause button toggles between PAUSE and PLAY."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except tk.TclError:
+            raise unittest.SkipTest("Tkinter display not available in this environment")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "root") and cls.root:
+            cls.root.destroy()
+
+    def setUp(self) -> None:
+        self.app = ROKAutomationApp(self.root, session_summary_path=None)
+        self.flag = Path("state/_test_pause.flag")
+        clear_paused(self.flag)
+
+    def tearDown(self) -> None:
+        clear_paused(self.flag)
+        if self.app._is_running:
+            self.app._set_running_state(False)
+
+    def test_pause_button_disabled_while_idle(self) -> None:
+        self.assertEqual(self.app.btn_pause.cget("state"), tk.DISABLED)
+        self.assertIn("PAUSE", self.app.btn_pause.cget("text"))
+
+    def test_pause_button_enabled_while_running(self) -> None:
+        self.app._set_running_state(True)
+        self.assertEqual(self.app.btn_pause.cget("state"), tk.NORMAL)
+
+    def test_toggle_pause_switches_button_to_play(self) -> None:
+        self.app._set_running_state(True)
+        with patch("rok_automation.ui.app.set_paused") as mock_pause:
+            self.app.toggle_pause()
+            mock_pause.assert_called_once()
+
+        self.assertTrue(self.app._is_paused)
+        self.assertIn("PLAY", self.app.btn_pause.cget("text"))
+        self.assertIn("Paused", self.app.lbl_run_state.cget("text"))
+
+    def test_toggle_pause_again_resumes(self) -> None:
+        self.app._set_running_state(True)
+        with patch("rok_automation.ui.app.set_paused"), \
+             patch("rok_automation.ui.app.clear_paused") as mock_clear:
+            self.app.toggle_pause()
+            self.app.toggle_pause()
+            mock_clear.assert_called_once()
+
+        self.assertFalse(self.app._is_paused)
+        self.assertIn("PAUSE", self.app.btn_pause.cget("text"))
+        self.assertIn("Running", self.app.lbl_run_state.cget("text"))
+
+    def test_pause_does_nothing_when_not_running(self) -> None:
+        self.app.toggle_pause()
+        self.assertFalse(self.app._is_paused)
+
+    def test_stopping_a_paused_run_clears_the_flag(self) -> None:
+        self.app._set_running_state(True)
+        set_paused(self.flag)
+        self.app._is_paused = True
+        with patch("rok_automation.ui.app.clear_paused") as mock_clear:
+            self.app.stop_automation()
+            mock_clear.assert_called()
+        self.assertFalse(self.app._is_paused)
+
+
+class TestStopReliability(unittest.TestCase):
+    """Verify STOP always terminates the worker, even on the first press."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except tk.TclError:
+            raise unittest.SkipTest("Tkinter display not available in this environment")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "root") and cls.root:
+            cls.root.destroy()
+
+    def setUp(self) -> None:
+        self.app = ROKAutomationApp(self.root, session_summary_path=None)
+
+    def test_process_handle_is_available_before_the_worker_thread_starts(self) -> None:
+        """The handle must exist as soon as START returns.
+
+        Creating the process inside the reader thread left STOP with no
+        handle to kill when the user clicked straight after START.
+        """
+        spawned = MagicMock()
+        spawned.stdout = None
+        spawned.poll.return_value = None
+        with patch.object(self.app, "_spawn_process", return_value=spawned) as mock_spawn:
+            with patch("rok_automation.ui.app.threading.Thread") as mock_thread:
+                mock_thread.return_value.start = MagicMock()
+                self.app._start_worker(["python", "-c", "pass"])
+
+            mock_spawn.assert_called_once()
+            self.assertIs(self.app._current_process, spawned)
+
+    def test_terminate_confirms_the_process_exited(self) -> None:
+        """STOP must wait for the exit instead of assuming it happened."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        # The first wait times out, so the direct-kill fallback is used.
+        proc.wait.side_effect = [subprocess.TimeoutExpired("cmd", 5), None]
+
+        self.app._terminate_process(proc)
+
+        proc.kill.assert_called_once()
+
+    def test_terminate_returns_early_for_a_finished_process(self) -> None:
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        self.app._terminate_process(proc)
+        proc.kill.assert_not_called()
+
+    def test_terminate_tolerates_a_missing_process(self) -> None:
+        self.app._terminate_process(None)
 
 
 if __name__ == "__main__":

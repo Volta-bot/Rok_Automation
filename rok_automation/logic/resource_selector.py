@@ -56,9 +56,9 @@ RESOURCE_NODE_YIELDS: dict[tuple[Resource, int], int] = {
     (Resource.STONE, 5): 708_750,
     # Gold nodes
     (Resource.GOLD, 8): 525_000,
-    (Resource.GOLD, 7): 472_000,
+    (Resource.GOLD, 7): 472_500,
     (Resource.GOLD, 6): 420_000,
-    (Resource.GOLD, 5): 336_000,
+    (Resource.GOLD, 5): 315_000,
 }
 
 

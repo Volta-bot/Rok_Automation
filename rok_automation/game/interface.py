@@ -6,7 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import cv2
 
@@ -16,6 +16,7 @@ from rok_automation.game.ldplayer import (
     click_ldplayer_point,
     drag_ldplayer_points,
 )
+from rok_automation.game.pause import wait_while_paused
 from rok_automation.vision.screen import load_gray_frame
 
 
@@ -63,10 +64,14 @@ class LDPlayerInterface:
         *,
         screenshot_path: Path = Path("artifacts/ldplayer.png"),
         timing: TimingConfig = TimingConfig(),
+        pause_flag_path: Path | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.window = window
         self.screenshot_path = screenshot_path
         self.timing = timing
+        self.pause_flag_path = pause_flag_path
+        self.log = log
 
     def screenshot(self) -> Path:
         return capture_ldplayer_window(self.window, self.screenshot_path)
@@ -124,6 +129,13 @@ class LDPlayerInterface:
         drag_ldplayer_points(self.window, start, end, frame.shape)
         self.wait(self.timing.click_delay)
 
-    @staticmethod
-    def wait(seconds: float) -> None:
+    def wait(self, seconds: float) -> None:
+        """Sleep, honouring a pause request from the user.
+
+        Every wait in the automation funnels through here, so blocking
+        here freezes the whole run without interrupting an in-flight
+        click or OCR pass.
+        """
+
+        wait_while_paused(self.pause_flag_path, self.log)
         time.sleep(max(0.0, seconds))
