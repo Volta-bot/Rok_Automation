@@ -17,6 +17,7 @@ Instead of relying on blind delays or fixed coordinate clicks, the automation co
 - **Contested Node & Duplicate Avoidance:**
   - **Green Incoming Route Detection:** Analyzes HSV color masks and line geometry to detect incoming green dotted march lines from other players and skips contested nodes.
   - **Coordinate Deduplication:** Reads the node's `X: ... Y: ...` coordinates from the resource popup and skips nodes already visited during the current account's session.
+  - **Node Memory Across Cycles:** The nodes an account farmed are remembered (per account, with a timestamp) in `state/farmed_nodes.json` for 30 minutes, so a fresh farming cycle does not march back to the same node the moment its previous march has arrived and its green route is no longer visible. Afterwards the node is usually depleted anyway, so the search will not return it.
   - **Map-Change Detection:** Compares map margin strips before and after pressing `Tìm kiếm` to detect when no node was found (`Không tìm thấy...`) without waiting for toast animations to fade.
 - **Active March Slot Detection:** Reads the `x/5` march counter on the right side of the World Map (treating an absent counter as `0/5`) and only dispatches armies for the remaining free slots.
 - **Total Resources Farmed Calculation:** Tracks every dispatched army's resource type and node level (Lv8–Lv5), calculating yields according to official node capacities (Food/Wood: Lv8 1.575M, Lv7 1.418M, Lv6 1.26M, Lv5 945k; Stone: Lv8 1.181M, Lv7 1.063M, Lv6 945k, Lv5 709k; Gold: Lv8 525k, Lv7 472.5k, Lv6 420k, Lv5 315k) and logging a detailed per-resource and grand total summary upon completing the run.
@@ -189,6 +190,7 @@ ROKauto/
 │   │   ├── process.py              # Helper programs that never open a console window
 │   │   ├── interface.py            # GameInterface abstraction & timing configuration
 │   │   ├── console.py              # Console output that survives a limited code page
+│   │   ├── farmed_nodes.py         # Per-account memory of recently farmed nodes
 │   │   └── pause.py                # Cooperative pause support
 │   ├── logic/
 │   │   └── resource_selector.py    # Vietnamese/English resource keyword parser & Lv8-Lv5 search planner

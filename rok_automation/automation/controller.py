@@ -25,6 +25,10 @@ from rok_automation.automation.gmail_switcher import (
 )
 from rok_automation.automation.states import FarmState
 from rok_automation.game.console import safe_print
+from rok_automation.game.farmed_nodes import (
+    load_recent_farmed_nodes,
+    remember_farmed_node,
+)
 from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
@@ -397,6 +401,13 @@ class FarmingController:
             self._daily_rewards_enabled_before = False
         return False
 
+    def _remember_farmed_node(self, coordinates: tuple[int, int] | None) -> None:
+        """Persist a farmed node so later cycles do not march back to it."""
+
+        if coordinates is None or not self.context.account_name:
+            return
+        remember_farmed_node(self.context.account_name, coordinates)
+
     def _run_one_account(
         self,
         *,
@@ -554,6 +565,17 @@ class FarmingController:
             resource: RESOURCE_LEVELS[0] for resource in Resource
         }
         seen_resource_coordinates: set[tuple[int, int]] = set()
+        # Nodes this account farmed in earlier cycles are remembered too:
+        # the search can return the same node after the march that went
+        # there has arrived, when its route is no longer visible.
+        if self.context.account_name:
+            recent_nodes = load_recent_farmed_nodes(self.context.account_name)
+            seen_resource_coordinates.update(recent_nodes)
+            if recent_nodes:
+                self._log(
+                    f"Remembering {len(recent_nodes)} resource node(s) this "
+                    "account farmed in the last 30 minutes"
+                )
 
         for army_number in range(1, dispatch_limit + 1):
             total_army_number = self.context.starting_armies_out + army_number
@@ -781,6 +803,23 @@ class FarmingController:
                             candidate_states={ScreenState.RESOURCE_FOUND},
                         )
                     coordinates = result.resource_coordinates
+                    if coordinates is None:
+                        # One retry: the panel's X/Y text can fail to OCR
+                        # on a single frame, and a node whose coordinates
+                        # were never read can never be deduplicated.
+                        try:
+                            self.game.wait(_ACTION_RETRY_DELAY)
+                            retry_screenshot = self.game.screenshot()
+                            retry = self.detector.detect(
+                                retry_screenshot,
+                                read_account=False,
+                                candidate_states={ScreenState.RESOURCE_FOUND},
+                            )
+                            if retry.state is ScreenState.RESOURCE_FOUND:
+                                result = retry
+                                coordinates = retry.resource_coordinates
+                        except OSError:
+                            pass
                     if coordinates is not None:
                         self._log(
                             f"Resource location: X:{coordinates[0]} Y:{coordinates[1]}"
@@ -840,6 +879,7 @@ class FarmingController:
                     if self._dispatch_army(target, army_number):
                         if coordinates is not None:
                             seen_resource_coordinates.add(coordinates)
+                            self._remember_farmed_node(coordinates)
                         return True
                     recoveries += 1
                     last_error = "gather flow fell back before Hành quân"

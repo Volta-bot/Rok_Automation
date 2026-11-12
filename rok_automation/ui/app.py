@@ -32,7 +32,10 @@ from rok_automation.game.backends import (
 from rok_automation.game.desktop import find_emulator_window
 from rok_automation.game.display import enable_dpi_awareness
 from rok_automation.game.emulators import families, get_family, select_family
-from rok_automation.game.flags import set_daily_rewards
+from rok_automation.game.flags import (
+    DEFAULT_DAILY_REWARD_FLAG_PATH,
+    set_daily_rewards,
+)
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.game.process import run_hidden
 from rok_automation.logic.resource_selector import (
@@ -130,11 +133,13 @@ class ROKAutomationApp:
         root: tk.Tk,
         session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
         display_scale: float = 1.0,
+        daily_reward_flag_path: Path | None = DEFAULT_DAILY_REWARD_FLAG_PATH,
     ) -> None:
         hide_console_window()
         self.root = root
         self.session_summary_path = session_summary_path
         self.display_scale = display_scale
+        self.daily_reward_flag_path = daily_reward_flag_path
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         # Wide enough for the whole layout: the two option cards side by
         # side need about 1160px, and the button row needs the rest.
@@ -1109,7 +1114,7 @@ class ROKAutomationApp:
             # next account, even in the middle of a run.
             enabled = bool(var.get())
             try:
-                set_daily_rewards(enabled)
+                set_daily_rewards(enabled, self.daily_reward_flag_path)
             except OSError as exc:
                 self.log_error(f"Could not update the daily reward option: {exc}")
                 return
@@ -1216,7 +1221,10 @@ class ROKAutomationApp:
             # The reward option is handed over through the flag file, so
             # it can be switched while the run is going.
             try:
-                set_daily_rewards(bool(self.opt_daily_reward.get()))
+                set_daily_rewards(
+                    bool(self.opt_daily_reward.get()),
+                    self.daily_reward_flag_path,
+                )
             except OSError as exc:
                 self.log_error(f"Could not apply the daily reward option: {exc}")
         elif self.opt_daily_reward.get():

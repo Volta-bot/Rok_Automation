@@ -2,6 +2,7 @@
 
 import queue
 import subprocess
+import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -29,10 +30,18 @@ class TestROKAutomationApp(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
+        # The daily-reward flag must never be written to the real state
+        # file by a test.
+        self.flag_path = Path(tempfile.gettempdir()) / "rokauto_test_daily.flag"
+        try:
+            self.flag_path.unlink()
+        except FileNotFoundError:
+            pass
         self.app = ROKAutomationApp(
             self.root,
             session_summary_path=None,
             display_scale=display_scale(),
+            daily_reward_flag_path=self.flag_path,
         )
 
     def tearDown(self) -> None:
@@ -110,6 +119,16 @@ class TestROKAutomationApp(unittest.TestCase):
         content2 = self.app.txt_console.get("1.0", tk.END)
         self.assertIn("Collect Daily Rewards", content2)
         self.assertIn("planned", content2.lower())
+
+    def test_the_daily_reward_toggle_never_touches_the_real_flag(self) -> None:
+        """A test toggling the option must not enable it for real runs."""
+
+        from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
+
+        self.app.opt_daily_reward.set(True)
+        self.app._on_planned_option_toggled("Collect Daily Rewards", self.app.opt_daily_reward)
+        self.assertFalse(DEFAULT_DAILY_REWARD_FLAG_PATH.is_file())
+        self.assertTrue(self.flag_path.is_file())
 
     def test_copy_console_log(self) -> None:
         """Verify copying console log content to clipboard."""
@@ -205,10 +224,18 @@ class TestPauseButton(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
+        # The daily-reward flag must never be written to the real state
+        # file by a test.
+        self.flag_path = Path(tempfile.gettempdir()) / "rokauto_test_daily.flag"
+        try:
+            self.flag_path.unlink()
+        except FileNotFoundError:
+            pass
         self.app = ROKAutomationApp(
             self.root,
             session_summary_path=None,
             display_scale=display_scale(),
+            daily_reward_flag_path=self.flag_path,
         )
         self.flag = Path("state/_test_pause.flag")
         clear_paused(self.flag)
@@ -327,10 +354,18 @@ class TestStopReliability(unittest.TestCase):
             cls.root.destroy()
 
     def setUp(self) -> None:
+        # The daily-reward flag must never be written to the real state
+        # file by a test.
+        self.flag_path = Path(tempfile.gettempdir()) / "rokauto_test_daily.flag"
+        try:
+            self.flag_path.unlink()
+        except FileNotFoundError:
+            pass
         self.app = ROKAutomationApp(
             self.root,
             session_summary_path=None,
             display_scale=display_scale(),
+            daily_reward_flag_path=self.flag_path,
         )
 
     def test_process_handle_is_available_before_the_worker_thread_starts(self) -> None:
