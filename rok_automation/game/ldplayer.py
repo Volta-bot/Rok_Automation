@@ -9,6 +9,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,82 @@ class EmulatorWindow:
 
     handle: int
     title: str
+
+
+# The UI templates and OCR region ratios are authored against a 1280x720 game
+# frame. Normalising every capture to that size keeps detection identical no
+# matter how large or small the emulator window happens to be on screen.
+CANONICAL_CAPTURE_SIZE = (1280, 720)
+# A capture may deviate from the canonical aspect by this much before it is
+# treated as non-16:9 and cropped instead of stretched.
+_ASPECT_TOLERANCE = 0.02
+
+
+def compute_capture_crop(
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    """Return the region of a render window that the canonical frame covers.
+
+    Returns ``(left, top, crop_width, crop_height)`` in render pixels. For a
+    16:9 render window this is the whole window. A window with a different
+    aspect is centre-cropped so the game content is never stretched.
+
+    The result depends only on the render size, so the capture and the click
+    mapping always agree without sharing any state.
+    """
+
+    target_width, target_height = CANONICAL_CAPTURE_SIZE
+    if width <= 0 or height <= 0:
+        return 0, 0, max(0, width), max(0, height)
+
+    source_aspect = width / height
+    target_aspect = target_width / target_height
+    if abs(source_aspect - target_aspect) <= _ASPECT_TOLERANCE:
+        return 0, 0, width, height
+
+    if source_aspect > target_aspect:
+        crop_width = max(1, round(height * target_aspect))
+        left = max(0, (width - crop_width) // 2)
+        return left, 0, crop_width, height
+
+    crop_height = max(1, round(width / target_aspect))
+    top = max(0, (height - crop_height) // 2)
+    return 0, top, width, crop_height
+
+
+def normalize_capture(frame: Any) -> Any:
+    """Rescale a captured game frame to the canonical detection size.
+
+    The emulator renders the game at a fixed guest resolution and scales it
+    to fit its window, so the captured pixels change size whenever the
+    window is resized. Rescaling every capture back to a single canonical
+    size keeps template matching, OCR regions and the pinned-position cache
+    stable regardless of the window size.
+
+    Frames that are not 16:9 are centre-cropped to the canonical aspect
+    first so the game content is never stretched.
+    """
+
+    import cv2
+
+    height, width = frame.shape[:2]
+    target_width, target_height = CANONICAL_CAPTURE_SIZE
+    if width == target_width and height == target_height:
+        return frame
+
+    left, top, crop_width, crop_height = compute_capture_crop(width, height)
+    if crop_width <= 0 or crop_height <= 0:
+        return frame
+    cropped = frame[top : top + crop_height, left : left + crop_width]
+
+    scale = target_width / crop_width
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    return cv2.resize(
+        cropped,
+        (target_width, target_height),
+        interpolation=interpolation,
+    )
 
 
 def _enable_per_monitor_dpi_awareness() -> None:
@@ -227,6 +304,11 @@ def capture_ldplayer_window(window: EmulatorWindow, output_path: Path) -> Path:
     This is a desktop-region capture: minimized, covered, or off-screen game
     areas cannot be captured as emulator content. ``output_path`` may be
     relative to the current working directory.
+
+    The captured frame is normalised to :data:`CANONICAL_CAPTURE_SIZE` so the
+    templates and OCR regions behave identically at every window size. The
+    transform describing that mapping is recorded so clicks and drags are
+    still delivered to the correct render pixel.
     """
 
     if sys.platform != "win32":
@@ -297,8 +379,9 @@ def capture_ldplayer_window(window: EmulatorWindow, output_path: Path) -> Path:
         with mss.MSS() as screen:
             shot = screen.grab(region)
             bgr = np.asarray(shot)[:, :, :3].copy()
-            cv2.imwrite(str(resolved), bgr)
-            cache_captured_frame(resolved, bgr)
+            normalized = normalize_capture(bgr)
+            cv2.imwrite(str(resolved), normalized)
+            cache_captured_frame(resolved, normalized)
     except Exception as exc:
         raise RuntimeError(f"Desktop capture failed: {exc}") from exc
 
@@ -366,8 +449,17 @@ def click_ldplayer_point(
         image_x = max(0, min(frame_width - 1, image_x + random.randint(-offset_range, offset_range)))
         image_y = max(0, min(frame_height - 1, image_y + random.randint(-offset_range, offset_range)))
 
-    screen_x = rect.left + round(image_x * render_width / frame_width)
-    screen_y = rect.top + round(image_y * render_height / frame_height)
+    # Captured frames are normalised to the canonical size, so the point is
+    # mapped back through the same crop and scale the capture used.
+    crop_left, crop_top, crop_width, crop_height = compute_capture_crop(
+        render_width,
+        render_height,
+    )
+    canonical_width, canonical_height = CANONICAL_CAPTURE_SIZE
+    render_x = crop_left + image_x * crop_width / canonical_width
+    render_y = crop_top + image_y * crop_height / canonical_height
+    screen_x = rect.left + round(render_x)
+    screen_y = rect.top + round(render_y)
     set_cursor_pos = user32.SetCursorPos
     set_cursor_pos.argtypes = (ctypes.c_int, ctypes.c_int)
     set_cursor_pos.restype = wintypes.BOOL
@@ -420,13 +512,21 @@ def drag_ldplayer_points(
     frame_height, frame_width = frame_size
     render_width, render_height = rect.right - rect.left, rect.bottom - rect.top
 
+    # Captured frames are normalised to the canonical size, so points are
+    # mapped back through the same crop and scale the capture used.
+    crop_left, crop_top, crop_width, crop_height = compute_capture_crop(
+        render_width,
+        render_height,
+    )
+    canonical_width, canonical_height = CANONICAL_CAPTURE_SIZE
+
     def to_screen(point: tuple[int, int]) -> tuple[int, int]:
         x, y = point
         if not (0 <= x < frame_width and 0 <= y < frame_height):
             raise ValueError("The drag point is outside the captured game frame")
         return (
-            rect.left + round(x * render_width / frame_width),
-            rect.top + round(y * render_height / frame_height),
+            rect.left + round(crop_left + x * crop_width / canonical_width),
+            rect.top + round(crop_top + y * crop_height / canonical_height),
         )
 
     start_screen, end_screen = to_screen(start), to_screen(end)
