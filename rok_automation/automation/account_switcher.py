@@ -631,7 +631,7 @@ class AccountSwitcher:
         """Wait briefly until the screen advances past ``previous_state``."""
 
         self.game.wait(_ACTION_RETRY_DELAY)
-        deadline = time.monotonic() + 2.5
+        deadline = time.monotonic() + self.game.timing.scaled(2.5)
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
             state, _bounds, _score = self._detect_menu_state(screenshot, frame)
@@ -659,7 +659,7 @@ class AccountSwitcher:
         card_clicks = 1
         yes_clicks = 0
         confirmed_login = False
-        deadline = time.monotonic() + 20.0
+        deadline = time.monotonic() + self.game.timing.scaled(20.0)
 
         while time.monotonic() < deadline:
             self.game.wait(_ACTION_RETRY_DELAY)

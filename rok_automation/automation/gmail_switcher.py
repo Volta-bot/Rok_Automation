@@ -719,7 +719,7 @@ class GmailSwitcher:
         """Wait briefly until the screen advances past ``previous_state``."""
 
         self.game.wait(_ACTION_RETRY_DELAY)
-        deadline = time.monotonic() + _STATE_CHANGE_TIMEOUT
+        deadline = time.monotonic() + self.game.timing.scaled(_STATE_CHANGE_TIMEOUT)
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)

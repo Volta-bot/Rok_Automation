@@ -155,6 +155,12 @@ class FarmingController:
         self._resource_levels: dict[Resource, int] = {}
         self.session_targets: list[SearchTarget] = []
 
+    # Screen-wait budgets scale with how slow a capture is, so the ADB
+    # backend (about 350 ms per frame) still gets the same number of
+    # samples of a transition as the desktop backend (about 21 ms).
+    def _budget(self, seconds: float) -> float:
+        return self.game.timing.scaled(seconds)
+
     def run(self) -> FarmContext:
         """Farm the configured RoK characters across the configured Gmail scope.
 
@@ -396,7 +402,7 @@ class FarmingController:
                     detection,
                     _NAVIGATION_TEMPLATES / "city_map_button.png",
                     confidence_threshold=0.68,
-                    change_timeout=_CITY_TO_MAP_TIMEOUT,
+                    change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
                 )
                 screenshot, detection = self._read_screen()
                 if detection.state is not ScreenState.CITY:
@@ -622,7 +628,7 @@ class FarmingController:
                         screen,
                         _NAVIGATION_TEMPLATES / "city_map_button.png",
                         confidence_threshold=0.68,
-                        change_timeout=_CITY_TO_MAP_TIMEOUT,
+                        change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
                     )
                     continue
 
@@ -845,7 +851,7 @@ class FarmingController:
     ) -> tuple[Path, ScreenDetection]:
         """Identify the current farming screen using fast ROI/pinned checks."""
 
-        deadline = time.monotonic() + _SCREEN_READ_TIMEOUT
+        deadline = time.monotonic() + self._budget(_SCREEN_READ_TIMEOUT)
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
@@ -885,10 +891,12 @@ class FarmingController:
         template_path: Path,
         *,
         confidence_threshold: float,
-        change_timeout: float = _STEP_CHANGE_TIMEOUT,
+        change_timeout: float | None = None,
     ) -> tuple[Path, ScreenDetection] | None:
         """Click a navigation button and wait until the screen moves on."""
 
+        if change_timeout is None:
+            change_timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         if screenshot is None:
             screenshot = self.game.screenshot()
         hit = self.detector.locate_template(
@@ -1008,7 +1016,7 @@ class FarmingController:
     ) -> tuple[Path, ScreenDetection]:
         """Wait briefly for the resource menu to finish opening or updating."""
 
-        deadline = time.monotonic() + _SEARCH_MENU_READY_TIMEOUT
+        deadline = time.monotonic() + self._budget(_SEARCH_MENU_READY_TIMEOUT)
         last_state = ScreenState.UNKNOWN
         attempts = 0
         next_screenshot = initial_screenshot
@@ -1062,7 +1070,7 @@ class FarmingController:
             FarmState.SEND_TROOPS,
             f"Found {target.resource.value} Lv{target.level}; opening gather",
         )
-        deadline = time.monotonic() + _DISPATCH_TIMEOUT
+        deadline = time.monotonic() + self._budget(_DISPATCH_TIMEOUT)
         clicks = {state: 0 for state in _DISPATCH_BUTTONS}
         marched = False
         fallback_since: float | None = None
@@ -1113,7 +1121,9 @@ class FarmingController:
                 if not marched:
                     if fallback_since is None:
                         fallback_since = time.monotonic()
-                    elif time.monotonic() - fallback_since >= _FALLBACK_CONFIRM_SECONDS:
+                    elif time.monotonic() - fallback_since >= self._budget(
+                        _FALLBACK_CONFIRM_SECONDS
+                    ):
                         expected = (
                             "Quân mới / Hành quân"
                             if any(clicks.values())
@@ -1315,11 +1325,13 @@ class FarmingController:
         clicked_state: ScreenState,
         clicked_bounds: tuple[int, int, int, int] | None,
         *,
-        timeout: float = _STEP_CHANGE_TIMEOUT,
+        timeout: float | None = None,
         expected_states: tuple[ScreenState, ...] | None = None,
     ) -> tuple[Path, ScreenDetection, bool] | None:
         """Wait until the screen advances past ``clicked_state`` and return it."""
 
+        if timeout is None:
+            timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         self.game.wait(_STEP_SETTLE_DELAY)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -1363,7 +1375,7 @@ class FarmingController:
         # A menu can briefly classify as UNKNOWN while its animation settles.
         # Retry that transient state, but never click from a different known
         # screen. Revalidate both state and target before every attempt.
-        deadline = time.monotonic() + _CONTROL_READY_TIMEOUT
+        deadline = time.monotonic() + self._budget(_CONTROL_READY_TIMEOUT)
         last_state = ScreenState.UNKNOWN
         attempts = 0
         next_screenshot = initial_screenshot
@@ -1426,7 +1438,7 @@ class FarmingController:
         unsuccessful search leaves the menu and underlying map in place.
         """
 
-        deadline = time.monotonic() + self.game.timing.transition_timeout
+        deadline = time.monotonic() + self._budget(self.game.timing.transition_timeout)
         started = time.monotonic()
         unchanged_frames = 0
         last_detection: ScreenDetection | None = None
@@ -1480,7 +1492,7 @@ class FarmingController:
                     unchanged_frames += 1
 
                 if (
-                    time.monotonic() - started >= _SEARCH_SETTLE_SECONDS
+                    time.monotonic() - started >= self._budget(_SEARCH_SETTLE_SECONDS)
                     and unchanged_frames >= _UNCHANGED_SEARCH_FRAMES
                 ):
                     return screenshot, ScreenDetection(
@@ -1548,7 +1560,7 @@ class FarmingController:
         self,
         expected_states: set[ScreenState],
     ) -> tuple[Path, ScreenDetection]:
-        timeout = self.game.timing.transition_timeout
+        timeout = self._budget(self.game.timing.transition_timeout)
         deadline = time.monotonic() + timeout
         last_detection: ScreenDetection | None = None
         while time.monotonic() < deadline:

@@ -6,12 +6,11 @@ from pathlib import Path
 
 from rok_automation.automation.controller import FarmingController
 from rok_automation.game.ldplayer import (
-    capture_ldplayer_window,
+    CANONICAL_CAPTURE_SIZE,
     describe_window_tree,
     find_ldplayer_window,
 )
 from rok_automation.game.interface import LDPlayerInterface
-from rok_automation.game.ldplayer import CANONICAL_CAPTURE_SIZE
 from rok_automation.game.pause import clear_paused
 from rok_automation.vision.screen import ScreenDetector
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
@@ -22,6 +21,22 @@ _RESOURCE_DISPLAY_NAMES = {
     Resource.FOOD: "Food (Ngô)",
     Resource.WOOD: "Wood (Gỗ)",
 }
+
+
+def _build_adb_game(serial: str | None, adb_path: str | None):
+    """Create an ADB-backed game interface, or report why it failed."""
+
+    from rok_automation.game.adb import AdbError, AdbInterface
+
+    try:
+        return AdbInterface(
+            serial=serial,
+            adb_path=adb_path,
+            log=lambda message: print(f"[{message}]"),
+        )
+    except AdbError as exc:
+        print(f"ADB connection failed: {exc}")
+        return None
 
 
 def main() -> int:
@@ -94,6 +109,24 @@ def main() -> int:
         help="known active level from controller context for a found resource",
     )
     parser.add_argument(
+        "--adb",
+        action="store_true",
+        help=(
+            "drive the emulator over ADB so the LDPlayer window may be "
+            "minimised, hidden or covered by other windows"
+        ),
+    )
+    parser.add_argument(
+        "--adb-serial",
+        metavar="SERIAL",
+        help="ADB device serial to use (default: the connected emulator)",
+    )
+    parser.add_argument(
+        "--adb-path",
+        metavar="PATH",
+        help="path to the adb executable (default: LDPlayer's bundled adb)",
+    )
+    parser.add_argument(
         "--gui",
         action="store_true",
         help="launch the graphical user interface (ROKauto Control Center)",
@@ -109,21 +142,34 @@ def main() -> int:
         from rok_automation.ui.app import launch_gui
         return launch_gui(hide_console=not args.show_console)
 
-    window = find_ldplayer_window()
-    if window is None:
-        print("Emulator: Disconnected (no matching visible LDPlayer window found)")
-        return 1
+    game = None
+    if args.adb:
+        game = _build_adb_game(args.adb_serial, args.adb_path)
+        if game is None:
+            return 1
+        print(
+            f"Emulator: Connected over ADB ({game.serial}); the LDPlayer "
+            "window may be minimised or covered."
+        )
+    else:
+        window = find_ldplayer_window()
+        if window is None:
+            print("Emulator: Disconnected (no matching visible LDPlayer window found)")
+            return 1
+        print(f"Emulator: Connected — {window.title} (handle={window.handle})")
+        game = LDPlayerInterface(
+            window,
+            log=lambda message: print(f"[{message}]"),
+        )
 
-    print(f"Emulator: Connected — {window.title} (handle={window.handle})")
-
-    if args.diagnose_window:
+    if args.diagnose_window and not args.adb:
         for description in describe_window_tree(window):
             print(description)
 
     if args.screenshot is not None or args.detect_screen:
         screenshot_path = args.screenshot or Path("artifacts/ldplayer.png")
         try:
-            output_path = capture_ldplayer_window(window, screenshot_path)
+            output_path = game.screenshot()
         except (OSError, RuntimeError) as exc:
             print(f"Screenshot failed: {exc}")
             return 1
@@ -189,7 +235,7 @@ def main() -> int:
 
     if args.daily_reward_only or (args.daily_reward and not args.farm):
         from rok_automation.automation.daily_reward import DailyRewardClaimer
-        claimer = DailyRewardClaimer(LDPlayerInterface(window))
+        claimer = DailyRewardClaimer(game)
         success = claimer.claim_all()
         return 0 if success else 1
 
@@ -198,7 +244,7 @@ def main() -> int:
         clear_paused()
         try:
             controller = FarmingController(
-                LDPlayerInterface(window, log=lambda message: print(f"[{message}]")),
+                game,
                 daily_rewards=args.daily_reward,
                 switch_gmail=not args.no_switch_gmail,
                 switch_rok_accounts=not args.current_rok_only,

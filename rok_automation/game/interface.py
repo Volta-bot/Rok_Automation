@@ -45,6 +45,12 @@ class GameInterface(Protocol):
     def wait(self, seconds: float) -> None: ...
 
 
+# A capture plus a template match takes about this long on the desktop
+# capture path. It is the reference the timeout scale is measured against.
+_TYPICAL_DETECT_TIME = 0.060
+_REFERENCE_POLL_TIME = 0.081 + 0.040
+
+
 @dataclass(frozen=True)
 class TimingConfig:
     click_delay: float = 0.015
@@ -53,6 +59,41 @@ class TimingConfig:
     poll_interval: float = 0.040
     transition_timeout: float = 12.0
     click_offset_max: int = 3
+    # How long a single capture takes. The desktop path is measured at about
+    # 21 ms; the ADB path is much slower, so the screen-wait budgets are
+    # scaled to match and the controller never misses a transition.
+    capture_latency: float = 0.021
+    # Duration of a swipe gesture, in seconds.
+    drag_duration: float = 0.30
+
+    @property
+    def frame_time(self) -> float:
+        """Approximate seconds for one capture plus detection cycle."""
+
+        return self.capture_latency + _TYPICAL_DETECT_TIME
+
+    @property
+    def poll_iteration_time(self) -> float:
+        """Seconds for one poll: capture, detect, then pause."""
+
+        return self.frame_time + self.poll_interval
+
+    @property
+    def timeout_scale(self) -> float:
+        """Multiplier that keeps the number of poll attempts constant.
+
+        A slower capture means each poll costs more wall-clock time, so
+        the screen-wait budgets are scaled to match. Without this the
+        controller would only get one or two samples of a transition and
+        would time out before the screen had finished changing.
+        """
+
+        return max(1.0, self.poll_iteration_time / _REFERENCE_POLL_TIME)
+
+    def scaled(self, seconds: float) -> float:
+        """Scale a screen-wait budget for the current capture speed."""
+
+        return seconds * self.timeout_scale
 
 
 class LDPlayerInterface:
