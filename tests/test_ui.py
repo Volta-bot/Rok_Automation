@@ -197,6 +197,32 @@ class TestPauseButton(unittest.TestCase):
         self.assertEqual(self.app.btn_pause.cget("state"), tk.DISABLED)
         self.assertIn("PAUSE", self.app.btn_pause.cget("text"))
 
+    def test_action_buttons_are_evenly_sized_and_spaced(self) -> None:
+        """The three action buttons must share the row evenly.
+
+        They used to be packed by hand, which left START absorbing all
+        the spare width and the gaps between the buttons unequal.
+        """
+        self.app.root.update_idletasks()
+        buttons = [self.app.btn_start, self.app.btn_pause, self.app.btn_stop]
+        widths = {w.winfo_width() for w in buttons}
+        self.assertEqual(
+            len(widths),
+            1,
+            f"action buttons have different widths: "
+            f"{[w.winfo_width() for w in buttons]}",
+        )
+
+        # The order must read START, PAUSE, STOP from left to right.
+        columns = [int(w.grid_info()["column"]) for w in buttons]
+        self.assertEqual(columns, [0, 1, 2])
+
+        # The columns share the row evenly, which keeps the gaps equal.
+        for column in range(3):
+            settings = self.app.btn_box.grid_columnconfigure(column)
+            self.assertEqual(settings["weight"], 1)
+            self.assertEqual(settings["uniform"], "action_button")
+
     def test_pause_button_enabled_while_running(self) -> None:
         self.app._set_running_state(True)
         self.assertEqual(self.app.btn_pause.cget("state"), tk.NORMAL)

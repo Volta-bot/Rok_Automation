@@ -320,9 +320,14 @@ class ROKAutomationApp:
         )
         self.lbl_session_farmed.pack(side=tk.RIGHT, padx=(0, 10))
 
-        # Big Action Buttons Row (Start / Stop)
+        # Big Action Buttons Row (Start / Pause / Stop).
+        # A grid with uniform columns keeps the three buttons the same
+        # width and the same gaps, whatever the window size.
         btn_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
         btn_box.pack(fill=tk.X, pady=(0, 10))
+        self.btn_box = btn_box
+        for column in range(3):
+            btn_box.columnconfigure(column, weight=1, uniform="action_button")
 
         self.btn_start = tk.Button(
             btn_box,
@@ -339,7 +344,7 @@ class ROKAutomationApp:
             pady=8,
             command=self.start_automation,
         )
-        self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.btn_start.grid(row=0, column=0, sticky="ew", padx=5)
 
         self.btn_pause = tk.Button(
             btn_box,
@@ -357,7 +362,7 @@ class ROKAutomationApp:
             pady=8,
             command=self.toggle_pause,
         )
-        self.btn_pause.pack(side=tk.RIGHT, fill=tk.X, expand=False, padx=(0, 6))
+        self.btn_pause.grid(row=0, column=1, sticky="ew", padx=5)
 
         self.btn_stop = tk.Button(
             btn_box,
@@ -375,7 +380,7 @@ class ROKAutomationApp:
             pady=8,
             command=self.stop_automation,
         )
-        self.btn_stop.pack(side=tk.RIGHT, fill=tk.X, expand=False)
+        self.btn_stop.grid(row=0, column=2, sticky="ew", padx=5)
 
         scope_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
         scope_box.pack(fill=tk.X, pady=(0, 8))
