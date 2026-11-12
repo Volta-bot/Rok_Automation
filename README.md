@@ -66,7 +66,17 @@ When enabled, daily rewards are claimed first before any resource farming begins
 - **Bidirectional Interpolation:** Shrinking uses area averaging (best detail retention); growing uses **bilinear** rather than cubic/lanczos, because those ring around sharp edges and the ringing made the OCR read of the small `Cấp: N` label fail at some window sizes.
 - **Correct Click Mapping:** Clicks and drags are mapped back through the same crop and scale the capture used, so a click always lands on the same game pixel regardless of the window size.
 
-### 6. High-Speed Vision Optimizations
+### 6. Background Operation via ADB
+- **Optional ADB Backend:** Enable *Use ADB* in the control panel (or pass `--adb`) and the emulator is driven over ADB instead of the desktop. The LDPlayer window may then be **minimised, hidden or covered** while farming, and the mouse cursor is never moved.
+  - Frames come from the emulator's own framebuffer (`adb exec-out screencap`), so an overlapping window can never be captured by mistake. This is the only mode that works with the emulator in the background.
+  - Raw captures are used rather than PNG (`354 ms` versus `950 ms` per frame) and are normalised to the same canonical `1280x720` size as the desktop path, so every template and OCR region behaves identically.
+  - Input is sent through the Android input pipeline (`input tap` / `input swipe`), which does not steal the host mouse.
+- **Adaptive Screen-Wait Budgets:** The controller measures the real capture latency at startup and scales every screen-wait budget to match, keeping the number of poll attempts per transition constant. Without this a slow capture would give the controller only one or two samples of a transition and it would time out before the screen had finished changing.
+- **Setup:** In LDPlayer ➔ *Settings* ➔ *ADB debugging*, choose **Enable local connection** and restart the emulator. Leave *remote connection* off — it exposes the ADB port to the whole network, and ADB grants full control of the device.
+
+---
+
+### 7. High-Speed Vision Optimizations
 - **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
 - **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
 - **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
@@ -126,6 +136,7 @@ ROKauto/
 - **OS:** Windows 10 / 11
 - **Emulator:** LDPlayer 9 (with Rise of Kingdoms set to **Tiếng Việt** in-game language)
 - **Python:** Python 3.11 or newer
+- **Optional:** ADB, for background operation (*Settings* ➔ *ADB debugging* ➔ *Enable local connection*)
 
 ---
 
@@ -216,6 +227,11 @@ Press `y` when prompted to start farming across all starred accounts.
   ```powershell
   python -m rok_automation --farm --reset-gmail-run
   ```
+- **Farm in the background (LDPlayer may be minimised or covered):**
+  ```powershell
+  python -m rok_automation --farm --adb
+  ```
+  Requires *Settings* ➔ *ADB debugging* ➔ *Enable local connection* in LDPlayer. Add `--adb-serial emulator-5554` to pick a specific device.
 - **Detect and classify the current LDPlayer screen (read-only):**
   ```powershell
   python -m rok_automation --detect-screen
