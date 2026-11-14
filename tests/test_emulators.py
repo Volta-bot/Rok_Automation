@@ -74,8 +74,8 @@ class TestEmulatorRegistry(unittest.TestCase):
     def test_get_family_returns_the_registered_family(self) -> None:
         self.assertEqual(get_family("mumu").key, "mumu")
 
-    def test_mumu_does_not_claim_native_capture(self) -> None:
-        self.assertFalse(get_family("mumu").has_native_capture)
+    def test_mumu_supports_native_capture(self) -> None:
+        self.assertTrue(get_family("mumu").has_native_capture)
 
     def test_selection_round_trips_through_the_state_file(self) -> None:
         import tempfile
@@ -158,11 +158,47 @@ class TestMuMuAdbCapture(unittest.TestCase):
         family = get_family("mumu")
         with patch("rok_automation.game.native.select_family", return_value=(family, None)), \
              patch.object(type(family), "discover", return_value=[instance]), \
+             patch.object(type(family), "open_capture", side_effect=EmulatorError("unavailable")), \
              patch("rok_automation.game.native._run_global") as connect, \
              patch("rok_automation.game.native.NativeInterface") as interface:
             create_native_interface(emulator="mumu", index=2, adb_path="adb")
         connect.assert_called_once_with("adb", ["connect", "127.0.0.1:16416"], timeout=25)
         self.assertEqual(interface.call_args.kwargs["serial"], "127.0.0.1:16416")
+
+    def test_native_capture_is_verified_and_falls_back_on_error(self) -> None:
+        from rok_automation.game.native import FallbackFrameSource, _matching_displays
+
+        original = np.full((90, 160, 3), 64, dtype=np.uint8)
+        self.assertTrue(_matching_displays(original, original.copy()))
+        self.assertFalse(_matching_displays(original, np.zeros_like(original)))
+        self.assertFalse(_matching_displays(original, original[:80]))
+        primary = MagicMock()
+        primary.capture.side_effect = [original, EmulatorError("disconnected")]
+        fallback = MagicMock()
+        fallback.capture.return_value = np.zeros_like(original)
+        source = FallbackFrameSource(primary, fallback)
+        np.testing.assert_array_equal(source.capture(), original)
+        np.testing.assert_array_equal(source.capture(), np.zeros_like(original))
+        np.testing.assert_array_equal(source.capture(), np.zeros_like(original))
+        primary.close.assert_called_once()
+        self.assertEqual(fallback.capture.call_count, 2)
+
+    def test_factory_rejects_a_different_native_display(self) -> None:
+        from rok_automation.game.native import AdbFrameSource, create_native_interface
+
+        instance = EmulatorInstance(0, "MuMu", running=True, details={"adb_port": "16384"})
+        family = get_family("mumu")
+        primary = MagicMock()
+        primary.capture.return_value = np.zeros((90, 160, 3), dtype=np.uint8)
+        with patch("rok_automation.game.native.select_family", return_value=(family, None)), \
+             patch.object(type(family), "discover", return_value=[instance]), \
+             patch.object(type(family), "open_capture", return_value=primary), \
+             patch("rok_automation.game.native._run_global"), \
+             patch.object(AdbFrameSource, "capture", return_value=np.full((90, 160, 3), 100, dtype=np.uint8)), \
+             patch("rok_automation.game.native.NativeInterface") as interface:
+            create_native_interface(emulator="mumu", adb_path="adb")
+        self.assertIsInstance(interface.call_args.kwargs["source"], AdbFrameSource)
+        primary.close.assert_called_once()
 
     def test_unsupported_saved_selection_falls_back_to_mumu(self) -> None:
         with patch("rok_automation.game.emulators.load_selection", return_value=("obsolete", 2)), \

@@ -166,6 +166,9 @@ class DailyRewardClaimer:
                 self.game.wait(1.0)
                 continue
 
+            from rok_automation.game.popups import close_scout_manager
+            if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                continue
             # In some open menu or popup: try clicking top-left back button or margin
             self._log(f"Screen is {detection.state.value}; pressing Back to reach City...")
             back_btn = self._get_cached_bounds((w, h), "back_button", NORM_BACK_BUTTON)

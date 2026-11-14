@@ -1,5 +1,6 @@
 """Unit tests for the ROKauto Graphical User Interface."""
 
+import json
 import queue
 import subprocess
 import tempfile
@@ -209,6 +210,68 @@ class TestROKAutomationApp(unittest.TestCase):
         badge_text = self.app.lbl_session_farmed.cget("text")
         self.assertIn("Farmed:", badge_text)
         self.assertIn("2 armies", badge_text)
+
+    def test_farmed_total_survives_stop_and_next_start(self) -> None:
+        with patch.object(self.app, "_start_worker"), \
+             patch("rok_automation.ui.app.set_daily_rewards"), \
+             patch("rok_automation.ui.app.set_city_resources"), \
+             patch("rok_automation.ui.app.set_forge_material"):
+            self.app.start_automation()
+            self.app._output_queue.put("Army 1/5 dispatched to Food Lv6")
+            self.app._poll_output_queue()
+            self.app._set_running_state(True)
+            self.app.stop_automation()
+            self.app.start_automation()
+            self.assertIn("1 armies", self.app.lbl_session_farmed.cget("text"))
+            self.app._output_queue.put("Army 1/5 dispatched to Gold Lv8")
+            self.app._poll_output_queue()
+        self.assertEqual(len(self.app._session_targets), 2)
+        self.assertIn("2 armies", self.app.lbl_session_farmed.cget("text"))
+
+    def test_city_tasks_run_without_farming(self) -> None:
+        self.app.opt_farm.set(False)
+        self.app.opt_collect_city_resources.set(True)
+        self.app.opt_daily_reward.set(True)
+        with patch.object(self.app, "_start_worker") as start, \
+             patch("rok_automation.ui.app.set_daily_rewards"), \
+             patch("rok_automation.ui.app.set_city_resources") as resources, \
+             patch("rok_automation.ui.app.set_forge_material"):
+            self.app.start_automation(scope="rok")
+        command = start.call_args.args[0]
+        self.assertIn("--city-tasks-only", command)
+        self.assertIn("--daily-reward-only", command)
+        self.assertNotIn("--farm", command)
+        resources.assert_called_once_with(True)
+
+    def test_city_task_test_buttons_run_independently(self) -> None:
+        self.app.opt_forge_material.set("Iron")
+        with patch.object(self.app, "_launch_utility_command") as launch:
+            self.app._test_city_task(False)
+            self.app._test_city_task(True)
+        self.assertIn("--test-city-resources", launch.call_args_list[0].args[0])
+        forge_command = launch.call_args_list[1].args[0]
+        self.assertEqual(forge_command[-2:], ["--test-forge-material", "Iron"])
+
+    def test_stop_summary_merges_current_run_disk_progress(self) -> None:
+        from rok_automation.logic.resource_selector import Resource, SearchTarget
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            path.write_text(json.dumps({"targets": [
+                {"resource": "Gold", "level": 8},
+                {"resource": "Wood", "level": 6},
+            ]}), encoding="utf-8")
+            self.app.session_summary_path = path
+            self.app._run_summary_enabled = True
+            self.app._run_start_index = 1
+            self.app._session_targets = [
+                SearchTarget(resource=Resource.FOOD, level=6),
+                SearchTarget(resource=Resource.GOLD, level=8),
+            ]
+            self.app._display_farmed_resources_summary()
+            self.assertEqual([target.resource for target in self.app._session_targets],
+                             [Resource.FOOD, Resource.GOLD, Resource.WOOD])
+            self.assertIn("3 armies", self.app.lbl_session_farmed.cget("text"))
 
     def test_get_python_cli_executable(self) -> None:
         """Verify _get_python_cli_executable returns python.exe."""

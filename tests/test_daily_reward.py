@@ -176,7 +176,9 @@ class TestDailyReward(unittest.TestCase):
             self.assertFalse(result)
             mock_recover.assert_called_once()
 
-    def test_controller_daily_rewards_flag_triggers_claimer(self) -> None:
+    @patch("rok_automation.automation.controller.city_resources_enabled", return_value=False)
+    @patch("rok_automation.automation.controller.forge_material_to_produce", return_value=None)
+    def test_controller_daily_rewards_flag_triggers_claimer(self, _forge, _resources) -> None:
         """Verify FarmingController invokes DailyRewardClaimer when daily_rewards is True."""
         mock_game = MagicMock()
         # The controller reads the captured frame, so the mock has to hand

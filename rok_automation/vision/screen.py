@@ -107,6 +107,8 @@ _FRAME_CACHE: dict[Path, tuple[int, int, Any, Any]] = {}
 
 # Normalized (left, top, right, bottom) search regions for static UI controls.
 _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
+    "scout_manager_title.png": (0.20, 0.00, 0.80, 0.20),
+    "scout_manager_close.png": (0.80, 0.00, 1.00, 0.18),
     "world_search_button.png": (0.00, 0.56, 0.16, 0.88),
     "city_map_button.png": (0.00, 0.74, 0.16, 1.00),
     "world_city_button.png": (0.00, 0.74, 0.16, 1.00),
@@ -399,6 +401,14 @@ class ScreenDetector:
         if match is None:
             return None
         return int(match.group(1)), int(match.group(2))
+
+    @staticmethod
+    def invalidate_position(template_path: str | Path, *, context_key: Any = None) -> None:
+        """Forget a stale position for one control and resource across frame sizes."""
+        name = Path(template_path).name
+        for key in list(_POSITION_CACHE):
+            if key[2] == name and key[3] == context_key:
+                del _POSITION_CACHE[key]
 
     @classmethod
     def locate_template(

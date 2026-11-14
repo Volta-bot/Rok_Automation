@@ -165,6 +165,8 @@ class ROKAutomationApp:
         self._is_running = False
         self._is_paused = False
         self._session_targets: list[SearchTarget] = []
+        self._run_start_index = 0
+        self._run_summary_enabled = False
 
         # Options state
         self.opt_farm = tk.BooleanVar(value=True)
@@ -807,9 +809,11 @@ class ROKAutomationApp:
         try:
             accounts = self.signed_in_accounts.load()
             farmed = GmailRotation.farmed_from_path(self.gmail_state_path)
+            rotation = GmailRotation.load(self.gmail_state_path, include_completed=True)
         except OSError as exc:
             self.log_error(f"Could not read Gmail account progress: {exc}")
             accounts, farmed = [], []
+            rotation = GmailRotation()
 
         if not accounts:
             tk.Label(
@@ -849,9 +853,17 @@ class ROKAutomationApp:
                 disabledforeground=(ModernColors.ACCENT_GREEN if completed else ModernColors.ACCENT_RED),
                 command=lambda identity=account.identity: self._toggle_gmail_progress(identity),
             ).pack(side=tk.LEFT)
+            character_progress = rotation.get_character_progress(account.identity)
+            account_text = account.identity.email or (f"UID {account.identity.uid}" if account.identity.uid else "unknown Gmail")
+            if character_progress:
+                index = character_progress.get("index")
+                direction = character_progress.get("direction")
+                if isinstance(index, int) and direction in (-1, 1):
+                    total = character_progress.get("total")
+                    account_text += f"  {index + 1}/{total if total is not None else '?'} {'⬇' if direction == 1 else '⬆'}"
             tk.Label(
                 row,
-                text=account.identity.label(),
+                text=account_text,
                 font=("Segoe UI", 8),
                 bg=ModernColors.BG_CARD_LIGHT,
                 fg=ModernColors.TEXT_PRIMARY,
@@ -1031,7 +1043,7 @@ class ROKAutomationApp:
         # Temporary Quick Action Buttons (for testing upcoming modules)
         action_lbl = tk.Label(
             parent,
-            text="Test Action Triggers (Future Modules)",
+            text="Test Actions",
             font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_MUTED,
@@ -1064,6 +1076,18 @@ class ROKAutomationApp:
                 pady=3,
             )
             btn.pack(side=tk.LEFT, padx=(0, 4), pady=2)
+
+        city_test_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
+        city_test_row.pack(fill=tk.X)
+        for text, forge in (("Test City Resources", False), ("Test Forge Material", True)):
+            tk.Button(
+                city_test_row, text=text, font=("Segoe UI", 8),
+                bg=ModernColors.BG_CARD_LIGHT, fg=ModernColors.TEXT_PRIMARY,
+                activebackground=ModernColors.BG_BORDER,
+                activeforeground=ModernColors.TEXT_PRIMARY, bd=1, relief=tk.SOLID,
+                cursor="hand2", padx=6, pady=3,
+                command=lambda is_forge=forge: self._test_city_task(is_forge),
+            ).pack(side=tk.LEFT, padx=(0, 4), pady=2)
 
     def _build_console(self, parent: tk.Widget) -> None:
         """Build the bottom console area showing live application output."""
@@ -1297,7 +1321,7 @@ class ROKAutomationApp:
     def _check_adb_ready(self) -> None:
         """Report whether the emulator accepts input over ADB."""
 
-        self.log_info("MuMu uses ADB for screenshots and input.")
+        self.log_info("MuMu uses native capture when available and ADB for input.")
 
         try:
             from rok_automation.game.adb import find_adb_device, find_adb_executable
@@ -1325,7 +1349,7 @@ class ROKAutomationApp:
     def check_emulator_connection(self) -> bool:
         """Check if the emulator is reachable and update the status badge.
 
-        MuMu screenshots and input both use the ADB connection.
+        MuMu uses native capture when available and ADB for input.
         """
 
         try:
@@ -1421,7 +1445,7 @@ class ROKAutomationApp:
             return
         state = "ENABLED" if enabled else "DISABLED"
         detail = (
-            f"Next ready forge will produce {self.opt_forge_material.get()}."
+            f"The forge will select {self.opt_forge_material.get()}."
             if enabled
             else "No more forge production will be started."
         )
@@ -1441,6 +1465,22 @@ class ROKAutomationApp:
             f"Forge material changed to {self.opt_forge_material.get()}; "
             "it takes effect from the next account."
         )
+
+    def _test_city_task(self, forge: bool) -> None:
+        """Run one city action on the current account without changing options."""
+        if self._is_running:
+            self.log_warning("Cannot run test while automation is active.")
+            return
+        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation",
+               "--emulator", self.selected_emulator()]
+        if forge:
+            material = self.opt_forge_material.get()
+            cmd.extend(["--test-forge-material", material])
+            self.log_info(f"Testing forge production: {material}.")
+        else:
+            cmd.append("--test-city-resources")
+            self.log_info("Testing city resource collection.")
+        self._launch_utility_command(cmd)
 
     def trigger_planned_feature_test(self, feature_name: str) -> None:
         """Handler for the temporary buttons to test/preview planned actions."""
@@ -1471,21 +1511,16 @@ class ROKAutomationApp:
         if scope not in {"all", "gmail", "rok"}:
             raise ValueError(f"Unsupported farm scope: {scope}")
 
-        self._session_targets.clear()
-        self.lbl_session_farmed.config(text="")
-        if self.session_summary_path and self.session_summary_path.is_file():
-            try:
-                self.session_summary_path.unlink()
-            except OSError:
-                pass
-
         # Check options
-        farm_enabled = self.opt_farm.get() or scope != "all"
+        farm_enabled = bool(self.opt_farm.get())
+        city_tasks_enabled = bool(self.opt_collect_city_resources.get() or self.opt_auto_forge.get())
         if not farm_enabled:
-            if self.opt_daily_reward.get():
+            if city_tasks_enabled:
                 self.log_info(
-                    "Farming is unchecked; running Daily Rewards collection only."
+                    "Farming is unchecked; running city tasks immediately on the current account."
                 )
+            elif self.opt_daily_reward.get():
+                self.log_info("Farming is unchecked; running Daily Rewards collection only.")
             else:
                 confirm = messagebox.askyesno(
                     "ROKauto",
@@ -1499,9 +1534,9 @@ class ROKAutomationApp:
                 "Daily Rewards active: VIP points, free VIP chest, and Campaign golden chest will be claimed."
             )
 
-        if scope == "gmail":
+        if farm_enabled and scope == "gmail":
             self.log_info("Farming all RoK accounts in the current Gmail only.")
-        elif scope == "rok":
+        elif farm_enabled and scope == "rok":
             self.log_info("Farming the current RoK account only.")
 
         # Check other planned options and notify user in log
@@ -1522,10 +1557,11 @@ class ROKAutomationApp:
         cmd.extend(["--emulator", self.selected_emulator()])
         if self.gmail_state_path is not None:
             cmd.extend(["--gmail-state", str(self.gmail_state_path)])
-        if farm_enabled:
-            cmd.append("--farm")
-            # The reward option is handed over through the flag file, so
-            # it can be switched while the run is going.
+        if farm_enabled or city_tasks_enabled:
+            if farm_enabled:
+                cmd.append("--farm")
+            else:
+                cmd.append("--city-tasks-only")
             try:
                 set_daily_rewards(
                     bool(self.opt_daily_reward.get()),
@@ -1539,13 +1575,22 @@ class ROKAutomationApp:
                 )
             except OSError as exc:
                 self.log_error(f"Could not apply automation options: {exc}")
-        elif self.opt_daily_reward.get():
+        if not farm_enabled and self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
         if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
             cmd.append("--no-switch-gmail")
         if scope == "rok":
             cmd.append("--current-rok-only")
 
+        self._run_start_index = len(self._session_targets)
+        if self.session_summary_path and self.session_summary_path.is_file():
+            try:
+                self.session_summary_path.unlink()
+            except OSError:
+                pass
+        self._run_summary_enabled = bool(
+            self.session_summary_path and not self.session_summary_path.is_file()
+        )
         self.log_info(f"Starting automation with command: {' '.join(cmd)}")
         self._start_worker(cmd)
 
@@ -1679,6 +1724,11 @@ class ROKAutomationApp:
 
     def _poll_output_queue(self) -> None:
         """Drain lines from background worker queue into the console."""
+        self._drain_output_queue()
+        self.root.after(50, self._poll_output_queue)
+
+    def _drain_output_queue(self) -> None:
+        """Process queued worker output without scheduling another poll."""
         try:
             while True:
                 line = self._output_queue.get_nowait()
@@ -1720,8 +1770,6 @@ class ROKAutomationApp:
                             pass
         except queue.Empty:
             pass
-
-        self.root.after(50, self._poll_output_queue)
 
     def toggle_pause(self) -> None:
         """Pause the running automation, or resume it when already paused."""
@@ -1771,6 +1819,9 @@ class ROKAutomationApp:
             self._is_paused = False
 
         self._terminate_process(proc)
+        if self._worker_thread is not None:
+            self._worker_thread.join(timeout=2)
+        self._drain_output_queue()
 
         self.log_info("Automation stopped.")
         self._set_running_state(False)
@@ -1833,7 +1884,7 @@ class ROKAutomationApp:
         targets = list(self._session_targets)
 
         # Check if disk session_summary.json has recorded targets
-        if self.session_summary_path and self.session_summary_path.is_file():
+        if self._run_summary_enabled and self.session_summary_path and self.session_summary_path.is_file():
             try:
                 data = json.loads(
                     self.session_summary_path.read_text(encoding="utf-8")
@@ -1843,8 +1894,10 @@ class ROKAutomationApp:
                     for t in data.get("targets", [])
                     if "resource" in t and "level" in t
                 ]
-                if len(disk_targets) >= len(targets):
-                    targets = disk_targets
+                run_start = self._run_start_index
+                if len(disk_targets) > len(targets) - run_start:
+                    targets = targets[:run_start] + disk_targets
+                    self._session_targets = list(targets)
             except Exception:
                 pass
 

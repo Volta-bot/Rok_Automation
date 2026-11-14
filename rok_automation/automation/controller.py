@@ -24,6 +24,7 @@ from rok_automation.automation.gmail_switcher import (
     GmailAccountRegistry,
     GmailRotation,
     GmailSwitcher,
+    GMAIL_PROGRESS_UPDATED,
 )
 from rok_automation.automation.states import FarmState
 from rok_automation.game.console import safe_print
@@ -74,7 +75,7 @@ _SEARCH_SETTLE_SECONDS = 0.85
 _SEARCH_SUBMIT_DELAY = 0.04
 _SEARCH_MENU_READY_TIMEOUT = 2.5
 _CONTROL_READY_TIMEOUT = 2.5
-_LEVEL_REPEAT_PAUSE = 0.08
+_LEVEL_REPEAT_PAUSE = 0.15
 _LEVEL_SETTLE_DELAY = 0.12
 _MAX_ACTION_ATTEMPTS = 5
 _ACTION_RETRY_DELAY = 0.20
@@ -207,7 +208,7 @@ class FarmingController:
             progress = rotation
             if progress is None and self.switch_rok_accounts:
                 progress = GmailRotation.load(self.gmail_state_path)
-            if progress is not None and progress.farmed:
+            if progress is not None and (progress.farmed or self.switch_rok_accounts):
                 known_current = GmailSwitcher(
                     self.game, self.detector, log=self._log,
                     signed_in_accounts=self.signed_in_accounts,
@@ -221,6 +222,8 @@ class FarmingController:
                     self._log(f"Skipping {known_current.label()}: already farmed this run")
                     context, characters, dispatched = self.context, 0, 0
                 else:
+                    self._current_gmail_for_progress = known_current
+                    self._progress_rotation = progress
                     context, characters, dispatched = self._farm_linked_characters()
                 total_dispatched += dispatched
                 total_characters += characters
@@ -344,6 +347,13 @@ class FarmingController:
             return context, 1, total_dispatched
 
         traversal = AccountTraversal()
+        def record_position(index, total, direction):
+            identity = getattr(self, "_current_gmail_for_progress", None)
+            rotation = getattr(self, "_progress_rotation", None)
+            if identity is not None and rotation is not None and index is not None and direction in (-1, 1):
+                rotation.set_character_progress(identity, index, total, direction)
+                self._log(GMAIL_PROGRESS_UPDATED)
+
         farmed_accounts = 0
         total_dispatched = 0
         expected_account_name: str | None = None
@@ -372,6 +382,9 @@ class FarmingController:
                 f"{farmed_accounts} account(s) farmed this run"
             )
 
+            if traversal.direction is not None:
+                record_position(traversal.current_index, traversal.total_accounts, traversal.direction)
+
             if not traversal.has_more_accounts():
                 context.last_error = None
                 return context, farmed_accounts, total_dispatched
@@ -380,7 +393,7 @@ class FarmingController:
                 self.game,
                 self.detector,
                 log=self._log,
-            ).switch_to_next(traversal)
+            ).switch_to_next(traversal, on_initialized=record_position)
             if next_name is None:
                 context.last_error = None
                 return context, farmed_accounts, total_dispatched
@@ -391,6 +404,9 @@ class FarmingController:
         """Press the City map button without classifying the current view first."""
 
         screenshot = self.game.screenshot()
+        from rok_automation.game.popups import close_scout_manager
+        if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+            screenshot = self.game.screenshot()
         frame = load_gray_frame(screenshot)
         if frame is None:
             raise FarmingError("Could not read the game frame before opening the world map")
@@ -456,9 +472,6 @@ class FarmingController:
         expected_account_name: str | None = None,
     ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
-        collect_city_resources = city_resources_enabled()
-        forge_material = forge_material_to_produce()
-        run_city_tasks = collect_city_resources or forge_material is not None
         if self._should_claim_daily_rewards():
             self._transition(
                 FarmState.CLAIM_DAILY_REWARD,
@@ -473,15 +486,9 @@ class FarmingController:
             )
             claimer.claim_all()
             self.game.wait(1.5)
-            if run_city_tasks:
-                screenshot, detection = self._read_screen()
-            else:
-                screenshot, detection = self._open_world_map_directly()
+            screenshot, detection = self._open_world_map_directly()
         elif expected_account_name is None:
-            if run_city_tasks:
-                screenshot, detection = self._read_screen()
-            else:
-                screenshot, detection = self._open_world_map_directly()
+            screenshot, detection = self._open_world_map_directly()
         else:
             screenshot, detection = self._read_screen()
             for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
@@ -490,27 +497,7 @@ class FarmingController:
                 self.game.wait(_ACTION_RETRY_DELAY)
                 screenshot, detection = self._read_screen()
 
-        if run_city_tasks and detection.state is not ScreenState.CITY:
-            self._log("Returning to City View before running city tasks")
-            from rok_automation.automation.daily_reward import DailyRewardClaimer
-
-            returned_to_city = DailyRewardClaimer(
-                self.game,
-                self.detector,
-                log=self._log,
-            ).ensure_city_view(max_attempts=3)
-            if returned_to_city:
-                screenshot, detection = self._read_screen()
-            else:
-                self._log("Could not reach City View; skipping city tasks")
-
         if detection.state is ScreenState.CITY:
-            if run_city_tasks:
-                self._run_city_tasks(
-                    collect_resources=collect_city_resources,
-                    forge_material=forge_material,
-                )
-                screenshot, detection = self._read_screen()
             for _attempt in range(_MAX_ACTION_ATTEMPTS):
                 self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
                 self._press_and_wait(
@@ -632,6 +619,7 @@ class FarmingController:
             f"available slots: {5 - self.context.starting_armies_out}"
         )
         if dispatch_limit == 0:
+            self._run_enabled_city_tasks()
             self._transition(
                 FarmState.COMPLETE,
                 "All 5 army slots are already in use; nothing to dispatch",
@@ -670,6 +658,7 @@ class FarmingController:
                 self.context.last_error = (
                     "No available resource location found in the search plan"
                 )
+                self._run_enabled_city_tasks()
                 self._transition(
                     FarmState.STOPPED,
                     "No available resource location found for any supported "
@@ -677,6 +666,7 @@ class FarmingController:
                 )
                 return self.context
 
+        self._run_enabled_city_tasks()
         acc_total = self.context.grand_total_farmed
         yield_str = f" (+{acc_total:,} resources)" if acc_total > 0 else ""
         self._transition(
@@ -686,13 +676,47 @@ class FarmingController:
         )
         return self.context
 
+    def _run_enabled_city_tasks(self) -> None:
+        """Return to the city and perform the currently enabled chores."""
+
+        collect_resources = city_resources_enabled()
+        forge_material = forge_material_to_produce()
+        if not collect_resources and forge_material is None:
+            return
+
+        self._run_city_tasks_from_current_screen(
+            collect_resources=collect_resources, forge_material=forge_material,
+        )
+
+    def _run_city_tasks_from_current_screen(
+        self, *, collect_resources: bool, forge_material: str | None,
+    ) -> None:
+        """Reach the city and run the requested city tasks."""
+
+        from rok_automation.automation.daily_reward import DailyRewardClaimer
+
+        self._log("Returning to City View for city tasks")
+        try:
+            returned = DailyRewardClaimer(
+                self.game, self.detector, log=self._log,
+            ).ensure_city_view(max_attempts=3)
+            if not returned:
+                self._log("Could not reach City View; skipping city tasks")
+                return
+            self._run_city_tasks(
+                collect_resources=collect_resources,
+                forge_material=forge_material,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._log(f"Could not return to City View; skipping city tasks: {exc}")
+
     def _run_city_tasks(
         self,
         *,
         collect_resources: bool,
         forge_material: str | None,
     ) -> None:
-        """Run optional city chores without letting a missed icon stop farming."""
+        """Run optional city chores without letting a missed icon stop the run."""
 
         from rok_automation.automation.city_tasks import CityTaskRunner
 
@@ -1028,7 +1052,7 @@ class FarmingController:
                         )
                         continue
 
-                    if self._dispatch_army(target, army_number):
+                    if self._dispatch_army(target, army_number, coordinates=coordinates):
                         if coordinates is not None:
                             seen_resource_coordinates.add(coordinates)
                             self._remember_farmed_node(coordinates)
@@ -1100,11 +1124,19 @@ class FarmingController:
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
+        from rok_automation.game.popups import close_scout_manager
+        popup_closes = 0
         while True:
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
                 expected_states=expected_states,
             )
+            if (detection.state is ScreenState.UNKNOWN or ambiguous) and popup_closes < 3:
+                if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                    popup_closes += 1
+                    screenshot = self.game.screenshot()
+                    previous = None
+                    continue
             if (
                 detection.state is not ScreenState.UNKNOWN
                 and not ambiguous
@@ -1186,28 +1218,6 @@ class FarmingController:
             raise FarmingError(f"Unsupported resource level: {desired_level}")
 
         resource = self._selected_resource
-        cached_level = (
-            self._resource_levels.get(resource)
-            if resource is not None
-            else None
-        )
-        if cached_level == desired_level:
-            return initial_screenshot
-
-        if cached_level is not None and resource is not None:
-            direction = "plus" if cached_level < desired_level else "minus"
-            click_count = abs(desired_level - cached_level)
-            self._log(f"Changing search level {cached_level} → {desired_level}")
-            self._click_template(
-                _SEARCH_TEMPLATES / f"level_{direction}.png",
-                expected_state=ScreenState.RESOURCE_SEARCH,
-                confidence_threshold=0.60,
-                repeat=click_count,
-                initial_screenshot=initial_screenshot,
-            )
-            self._resource_levels[resource] = desired_level
-            return None
-
         screenshot_hint = initial_screenshot
         for _attempt in range(_MAX_ACTION_ATTEMPTS):
             screenshot, detection = self._wait_for_search_menu_level(
@@ -1236,13 +1246,20 @@ class FarmingController:
 
             # Check up to 5 times with a small delay so the slider/label update
             # is detected before deciding another click is needed.
-            for _verify in range(_MAX_ACTION_ATTEMPTS):
+            last_level = current_level
+            for _verify in range(2):
                 verify_screenshot, verify_detection = self._wait_for_search_menu_level()
                 if verify_detection.resource_level is not None and resource is not None:
                     self._resource_levels[resource] = verify_detection.resource_level
                 if verify_detection.resource_level == desired_level:
                     return verify_screenshot
+                if verify_detection.resource_level is not None:
+                    last_level = verify_detection.resource_level
                 self.game.wait(_ACTION_RETRY_DELAY)
+            if last_level == current_level:
+                template = _SEARCH_TEMPLATES / f"level_{direction}.png"
+                self.detector.invalidate_position(template, context_key=resource)
+                self._log(f"Search level did not change; finding {direction} again for {resource.value if resource else 'current resource'}")
 
         final_screenshot, final_detection = self._wait_for_search_menu_level()
         if final_detection.resource_level != desired_level:
@@ -1303,6 +1320,8 @@ class FarmingController:
         self,
         target: SearchTarget,
         army_number: int,
+        *,
+        coordinates: tuple[int, int] | None = None,
     ) -> bool:
         """Drive Thu thập → Quân mới → Hành quân by re-reading the screen.
 
@@ -1336,6 +1355,9 @@ class FarmingController:
             last_state = detection.state
 
             if detection.state is ScreenState.UNKNOWN:
+                from rok_automation.game.popups import close_scout_manager
+                if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                    continue
                 fallback_since = None
                 self.game.wait(self.game.timing.poll_interval)
                 continue
@@ -1357,10 +1379,15 @@ class FarmingController:
                     self.session_targets.append(target)
                     self._save_session_summary(status="running")
                     node_yield = resource_node_yield(target.resource, target.level)
+                    location = (
+                        f"X:{coordinates[0]} Y:{coordinates[1]}"
+                        if coordinates is not None
+                        else "unreadable; duplicate check unavailable"
+                    )
                     self._log(
                         f"Army {army_number}/5 dispatched to "
                         f"{target.resource.value} Lv{target.level} "
-                        f"(+{node_yield:,} resources)"
+                        f"(+{node_yield:,} resources); node coordinates: {location}"
                     )
                     return True
                 if not marched:
@@ -1617,9 +1644,8 @@ class FarmingController:
     ) -> Path:
         if repeat < 1:
             raise ValueError("repeat must be at least 1")
-        # A menu can briefly classify as UNKNOWN while its animation settles.
-        # Retry that transient state, but never click from a different known
-        # screen. Revalidate both state and target before every attempt.
+        # The detector validates its resource-specific cached position against
+        # the current frame before returning it.
         deadline = time.monotonic() + self._budget(_CONTROL_READY_TIMEOUT)
         last_state = ScreenState.UNKNOWN
         attempts = 0

@@ -9,9 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from rok_automation.game.adb import AdbError
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
-from rok_automation.vision.screen import ScreenDetector, ScreenState
+from rok_automation.vision.screen import ScreenDetector, ScreenState, load_gray_frame
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +24,10 @@ _RESOURCE_TEMPLATES = {
     for resource in ("Food", "Wood", "Stone", "Gold")
 }
 _FORGE_READY_TEMPLATE = _CITY_TEMPLATES / "forge_ready_icon.png"
-_FORGE_BUILDING_TEMPLATE = _CITY_TEMPLATES / "forge_building.png"
+_FORGE_BUILDING_TEMPLATES = (
+    _CITY_TEMPLATES / "forge_building.png",
+    _CITY_TEMPLATES / "forge_building_alternate.png",
+)
 _FORGE_MATERIALS_BUTTON_TEMPLATE = _CITY_TEMPLATES / "forge_materials_button.png"
 _FORGE_MATERIALS_CLOSE_TEMPLATE = _CITY_TEMPLATES / "forge_materials_close.png"
 _MATERIAL_TEMPLATES = {
@@ -34,10 +38,13 @@ _MATERIAL_TEMPLATES = {
 }
 
 _MENU_WAIT_SECONDS = 1.0
+# Fractions of the canonical frame that avoid the top bar, side controls and
+# bottom chat overlay while retaining the visible city buildings.
+_RESOURCE_SCAN_AREA = (0.072, 0.143, 0.978, 0.892)
 
 
 class CityTaskRunner:
-    """Perform the enabled city actions once before a farming pass."""
+    """Perform the enabled city actions once after a farming pass."""
 
     def __init__(
         self,
@@ -58,9 +65,8 @@ class CityTaskRunner:
     ) -> None:
         """Collect each visible resource type and optionally refill the forge.
 
-        A forge task starts only after its ready-output icon is found and
-        claimed. If the output is not ready, there is no safe action to take,
-        so the forge is skipped for this account.
+        Claim a completed forge output if present, then open the forge and
+        select the requested material regardless of output readiness.
         """
 
         material = (forge_material or "").casefold()
@@ -76,7 +82,10 @@ class CityTaskRunner:
             self._log("City view changed; skipping city tasks")
             return
         self._log("Zooming out slightly to reveal city icons")
-        self.game.zoom_out_city()
+        try:
+            self.game.zoom_out_city()
+        except AdbError as exc:
+            self._log(f"Could not zoom out ({exc}); scanning the current city view")
         self.game.wait(0.50)
         screenshot = self.game.screenshot()
         if not self._is_still_in_city(screenshot):
@@ -92,58 +101,90 @@ class CityTaskRunner:
                 "No ready city icon found for " + ", ".join(sorted(remaining_resources))
             )
         if forge_pending:
-            self._log("Forge output was not ready or the forge was not visible; skipped")
+            self._log("Forge task could not be started; skipped")
 
     def _collect_visible_resources(self, remaining_resources: set[str]) -> None:
         for resource, templates in _RESOURCE_TEMPLATES.items():
             if resource not in remaining_resources:
                 continue
             screenshot = self.game.screenshot()
+            frame = load_gray_frame(screenshot)
+            if frame is None:
+                self._log("Could not read the city view; skipping resource collection")
+                return
+            frame_height, frame_width = frame.shape[:2]
+            left, top, right, bottom = (
+                round(value * dimension)
+                for value, dimension in zip(
+                    _RESOURCE_SCAN_AREA,
+                    (frame_width, frame_height, frame_width, frame_height),
+                )
+            )
+            city_area = frame[top:bottom, left:right]
             hits = [
                 hit for template in templates
-                if (hit := self.detector.locate_template(
-                    screenshot,
+                if (hit := self.detector._locate_in_frame(
+                    city_area,
                     template,
-                    confidence_threshold=0.64,
+                    confidence_threshold=0.82,
                     context_key=f"city-resource-{resource}",
+                    maximum_scale=1.35,
                 )) is not None
             ]
             hit = max(hits, key=lambda candidate: candidate.confidence, default=None)
             if hit is None:
                 continue
-            self.game.click(hit.bounds, screenshot)
+            x, y, width, height = hit.bounds
+            self.game.click((left + x, top + y, width, height), screenshot)
             self.game.wait(0.25)
             remaining_resources.remove(resource)
             self._log(f"Collected ready {resource.lower()} buildings")
 
     def _claim_and_start_forge(self, material: str) -> bool:
-        """Claim a completed forge output, then select the next material."""
+        """Claim any completed output and select the requested material."""
 
         screenshot = self.game.screenshot()
-        ready = self.detector.locate_template(
-            screenshot,
-            _FORGE_READY_TEMPLATE,
-            confidence_threshold=0.64,
-            context_key="forge-ready",
-        )
-        if ready is None:
-            return False
-
-        self.game.click(ready.bounds, screenshot)
-        self.game.wait(0.45)
-        self._log("Claimed completed forge output")
-
-        screenshot = self.game.screenshot()
-        forge = self.detector.locate_template(
-            screenshot,
-            _FORGE_BUILDING_TEMPLATE,
-            confidence_threshold=0.62,
-            context_key="forge-building",
-        )
+        forge_hits = [
+            hit for template in _FORGE_BUILDING_TEMPLATES
+            if (hit := self.detector.locate_template(
+                screenshot, template, confidence_threshold=0.70,
+                context_key="forge-building",
+            )) is not None
+        ]
+        forge = max(forge_hits, key=lambda hit: hit.confidence, default=None)
         if forge is None:
-            self._log("Forge building was not visible after claiming output; skipped")
-            return True
+            self._log("Forge building was not visible; skipped")
+            return False
+        frame = load_gray_frame(screenshot)
+        if frame is None:
+            self._log("Could not read the city view; skipped forge")
+            return False
+        x, y, width, height = forge.bounds
+        frame_height, frame_width = frame.shape[:2]
+        left = max(0, x - width // 3)
+        top = max(0, y - height)
+        right = min(frame_width, x + width + width // 3)
+        bottom = min(frame_height, y + height // 2)
+        ready = self.detector._locate_in_frame(
+            frame[top:bottom, left:right],
+            _FORGE_READY_TEMPLATE,
+            confidence_threshold=0.80,
+            context_key="forge-ready-near-building",
+            maximum_scale=1.35,
+        )
+        if ready is not None:
+            rx, ry, rw, rh = ready.bounds
+            self.game.click((left + rx, top + ry, rw, rh), screenshot)
+            self.game.wait(0.45)
+            self._log("Claimed completed forge output")
+        else:
+            self._log("No completed forge output found; opening forge anyway")
+
+        # The output disappears when claimed, so retain the building's
+        # position from the same frame and open it after claiming.
+        screenshot = self.game.screenshot()
         self.game.click(forge.bounds, screenshot)
+        self._log("Opened forge building")
         self.game.wait(_MENU_WAIT_SECONDS)
 
         screenshot = self.game.screenshot()
@@ -169,10 +210,13 @@ class CityTaskRunner:
         if material_hit is None:
             self._log(f"Could not find the {material} material card; skipped")
             return True
-        self.game.click(material_hit.bounds, screenshot)
+        for selection in range(5):
+            self.game.click(material_hit.bounds, screenshot)
+            if selection < 4:
+                self.game.wait(0.08)
         self.game.wait(0.50)
         self._dismiss_material_menu()
-        self._log(f"Started forge production: {material.title()}")
+        self._log(f"Selected forge material five times: {material.title()}")
         return True
 
     def _dismiss_material_menu(self) -> None:

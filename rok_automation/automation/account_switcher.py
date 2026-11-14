@@ -115,7 +115,7 @@ class AccountSwitcher:
         self.detector = detector
         self.log = log
 
-    def switch_to_next(self, traversal: AccountTraversal) -> str | None:
+    def switch_to_next(self, traversal: AccountTraversal, *, on_initialized=None) -> str | None:
         """Select the next starred card using 6-account top/bottom pages."""
 
         self._open_character_list()
@@ -127,6 +127,7 @@ class AccountSwitcher:
         at_top = self._starred_accounts_header_bounds(frame) is not None
         at_bottom = self._regular_accounts_header_bounds(frame) is not None
 
+        initializing = traversal.direction is None
         if traversal.direction is None:
             if active_position is not None and (at_top or not at_bottom):
                 # Green tick is visible in the first 6 accounts (1/12 .. 6/12).
@@ -261,6 +262,13 @@ class AccountSwitcher:
                     if bottom_idx != traversal.skipped_index:
                         traversal.current_index = bottom_idx
             target_index = traversal.next_target_index()
+
+        if initializing and on_initialized is not None:
+            # For a mid-list start, the initial character has already been
+            # farmed even though the next target is at the nearest end.
+            initial_index = (traversal.skipped_index if traversal.skipped_index is not None
+                             else traversal.current_index)
+            on_initialized(initial_index, traversal.total_accounts, traversal.direction)
 
         if target_index is None:
             self._log(

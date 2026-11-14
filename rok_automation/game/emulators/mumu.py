@@ -52,9 +52,7 @@ class MuMuFamily(EmulatorFamily):
     install_locations = _INSTALL_LOCATIONS
     adb_locations = _ADB_LOCATIONS
     registry_markers = ("mumuplayer.exe", "nemumain.exe", "nemulauncher.exe")
-    # The MuMu capture library has to be verified against the installed
-    # version before it can be used.
-    supports_native_capture = False
+    supports_native_capture = True
 
     def install_folders(self) -> list[Path]:
         folders = super().install_folders()
@@ -206,6 +204,7 @@ class MuMuFamily(EmulatorFamily):
                 "shell/sdk/external_renderer_ipc.dll",
                 "nx_device/12.0/shell/sdk/external_renderer_ipc.dll",
                 "nx_main/sdk/external_renderer_ipc.dll",
+                "nx_device/15.0/shell/sdk/external_renderer_ipc.dll",
             ):
                 candidate = folder / relative
                 if candidate.is_file():
@@ -216,13 +215,11 @@ class MuMuFamily(EmulatorFamily):
         )
 
     def open_capture(self, instance: EmulatorInstance):
-        """Open a native capture of the MuMu framebuffer.
+        """Open the renderer connection for the selected instance."""
+        from rok_automation.game.mumu_capture import MuMuFrameSource
 
-        The MuMu capture library has to be verified against the installed
-        version before it can be used, so this refuses for now.
-        """
-
-        raise EmulatorError(
-            "Native capture for MuMu Player is not verified yet. Use "
-            "ADB screenshot capture is available instead."
-        )
+        library = self.capture_library()
+        root = next((folder for folder in self.install_folders() if library.is_relative_to(folder)), None)
+        if root is None:
+            raise EmulatorError("Could not determine the MuMu installation folder")
+        return MuMuFrameSource(root, library, instance.index)

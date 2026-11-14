@@ -13,6 +13,7 @@ import numpy as np
 
 from rok_automation.game.adb import AdbError, AdbInput, _run, _run_global, find_adb_executable
 from rok_automation.game.emulators import (
+    EmulatorError,
     EmulatorFamily,
     EmulatorInstance,
     select_family,
@@ -35,6 +36,35 @@ class AdbFrameSource:
         if frame is None:
             raise AdbError("ADB returned an invalid screenshot. Check that MuMu is running.")
         return frame
+
+
+class FallbackFrameSource:
+    """Use the verified renderer until it fails, then continue over ADB."""
+
+    def __init__(self, primary, fallback: AdbFrameSource, log=None) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.log = log
+
+    def capture(self):
+        if self.primary is not None:
+            try:
+                return self.primary.capture()
+            except (EmulatorError, OSError, ValueError, cv2.error) as exc:
+                if self.log is not None:
+                    self.log(f"Native capture failed ({exc}); switching to ADB screenshots")
+                self.primary.close()
+                self.primary = None
+        return self.fallback.capture()
+
+
+def _matching_displays(native_frame, adb_frame) -> bool:
+    """Reject a different display, orientation or colour order before tapping."""
+    if native_frame.shape != adb_frame.shape or native_frame.ndim != 3:
+        return False
+    native_small = cv2.resize(native_frame, (160, 90), interpolation=cv2.INTER_AREA)
+    adb_small = cv2.resize(adb_frame, (160, 90), interpolation=cv2.INTER_AREA)
+    return float(np.mean(cv2.absdiff(native_small, adb_small))) < 25.0
 
 
 class NativeInterface(AdbInput):
@@ -85,12 +115,16 @@ class NativeInterface(AdbInput):
     def screenshot(self) -> Path:
         """Capture the emulator and store a canonical 1280x720 frame."""
 
+        was_native = isinstance(self.source, FallbackFrameSource) and self.source.primary is not None
+        started = time.perf_counter()
         frame = self.source.capture()
-        if isinstance(self.source, AdbFrameSource):
-            # ADB input uses the current display orientation, while wm size
-            # can report the device's unrotated (portrait) dimensions.
-            height, width = frame.shape[:2]
-            self._guest_size = (width, height)
+        if was_native and self.source.primary is None:
+            self.timing = replace(self.timing, capture_latency=time.perf_counter() - started)
+            if self.log is not None:
+                self.log(f"Screen timeouts scaled {self.timeout_scale:.1f}x for ADB capture")
+        # ADB input follows the display orientation, unlike `wm size`.
+        height, width = frame.shape[:2]
+        self._guest_size = (width, height)
         normalized = normalize_capture(frame)
         destination = self.screenshot_path.expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +164,21 @@ def create_native_interface(
     if serial is None:
         serial = f"127.0.0.1:{instance.details['adb_port']}"
         _run_global(adb_path, ["connect", serial], timeout=25)
-    source = AdbFrameSource(adb_path, serial)
+    adb_source = AdbFrameSource(adb_path, serial)
+    source = adb_source
+    native_source = None
+    try:
+        native_source = family.open_capture(instance)
+        if not _matching_displays(native_source.capture(), adb_source.capture()):
+            raise EmulatorError("native and ADB frames do not match")
+        source = FallbackFrameSource(native_source, adb_source, log)
+        if log is not None:
+            log("Using verified MuMu native renderer capture")
+    except (EmulatorError, OSError, ValueError, cv2.error) as exc:
+        if native_source is not None:
+            native_source.close()
+        if log is not None:
+            log(f"MuMu native capture unavailable ({exc}); using ADB screenshots")
 
     if log is not None:
         log(

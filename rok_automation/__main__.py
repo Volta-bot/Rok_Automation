@@ -176,6 +176,19 @@ def main() -> int:
         help="claim daily VIP and campaign rewards on the current account and exit",
     )
     parser.add_argument(
+        "--city-tasks-only",
+        action="store_true",
+        help="collect enabled city resources and forge on the current account without farming",
+    )
+    parser.add_argument(
+        "--test-city-resources", action="store_true",
+        help="test city resource collection on the current account",
+    )
+    parser.add_argument(
+        "--test-forge-material", choices=("Leather", "Iron", "Wood", "Bone"),
+        help="test forge production of the selected material on the current account",
+    )
+    parser.add_argument(
         "--no-switch-gmail",
         action="store_true",
         help="farm characters in the current Gmail only (do not switch Gmail accounts)",
@@ -317,6 +330,26 @@ def main() -> int:
                     print(f"Armies already marching: {detection.armies_out}/5")
                 else:
                     print("Armies already marching: not recognized")
+
+    if args.test_city_resources or args.test_forge_material:
+        clear_paused()
+        try:
+            FarmingController(game)._run_city_tasks_from_current_screen(
+                collect_resources=args.test_city_resources,
+                forge_material=args.test_forge_material,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"City task test stopped safely: {exc}")
+            return 1
+        return 0
+
+    if args.city_tasks_only and not args.farm:
+        clear_paused()
+        try:
+            FarmingController(game)._run_enabled_city_tasks()
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"City tasks stopped safely: {exc}")
+            return 1
 
     if args.daily_reward_only or (args.daily_reward and not args.farm):
         from rok_automation.automation.daily_reward import DailyRewardClaimer

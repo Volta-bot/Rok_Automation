@@ -297,6 +297,7 @@ class GmailRotation:
     current: GmailIdentity | None = None
     completed: bool = False
     switches: int = 0
+    character_progress: list[dict] = field(default_factory=list)
     started_at: str | None = None
     path: Path | None = None
 
@@ -330,6 +331,7 @@ class GmailRotation:
             current=GmailIdentity.from_dict(data.get("current")),
             completed=bool(data.get("completed")),
             switches=int(data.get("switches", 0)),
+            character_progress=data.get("character_progress", []) if isinstance(data.get("character_progress", []), list) else [],
             started_at=data.get("started_at"),
             path=path,
         )
@@ -405,6 +407,28 @@ class GmailRotation:
             self.farmed.append(identity)
         self.save()
 
+    def get_character_progress(self, identity: GmailIdentity) -> dict | None:
+        for entry in self.character_progress:
+            if not isinstance(entry, dict):
+                continue
+            saved = GmailIdentity.from_dict(entry.get("identity"))
+            if saved and saved.matches(identity):
+                return entry
+        return None
+
+    def set_character_progress(self, identity: GmailIdentity, index: int,
+                               total: int | None, direction: int) -> None:
+        self.character_progress = [
+            entry for entry in self.character_progress
+            if not (isinstance(entry, dict)
+                    and (saved := GmailIdentity.from_dict(entry.get("identity")))
+                    and saved.matches(identity))
+        ]
+        self.character_progress.append({"identity": identity.to_dict(),
+                                        "index": index, "total": total,
+                                        "direction": direction})
+        self.save()
+
     def save(self) -> None:
         if self.path is None:
             return
@@ -416,6 +440,7 @@ class GmailRotation:
             "current": self.current.to_dict() if self.current else None,
             "completed": self.completed,
             "switches": self.switches,
+            "character_progress": self.character_progress,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         temporary = self.path.with_suffix(".tmp")

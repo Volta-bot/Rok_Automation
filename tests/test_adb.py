@@ -58,6 +58,34 @@ class TestAdbInput(unittest.TestCase):
         interface._guest_size = guest
         return interface
 
+    def test_zoom_finds_touchscreen_with_another_name(self) -> None:
+        interface = self._interface()
+        listing = (b'add device 1: /dev/input/event4\n  name: "virtio touchscreen"\n'
+                   b' ABS_MT_SLOT ABS_MT_TRACKING_ID ABS_MT_POSITION_X ABS_MT_POSITION_Y\n')
+        with patch("rok_automation.game.adb._run", return_value=listing), \
+             patch.object(interface, "_input") as send:
+            interface.zoom_out_city()
+        self.assertIn("sendevent /dev/input/event4", send.call_args.args[0][-1])
+
+    def test_zoom_rejects_device_without_multitouch_axes(self) -> None:
+        interface = self._interface()
+        with patch("rok_automation.game.adb._run", return_value=b'add device 1: /dev/input/event1\n ABS_MT_SLOT\n'):
+            with self.assertRaises(AdbError):
+                interface.zoom_out_city()
+
+    def test_zoom_maps_landscape_display_to_rotated_touch_axes(self) -> None:
+        interface = self._interface()
+        listing = (b'add device 1: /dev/input/event4\n'
+                   b' ABS_MT_SLOT ABS_MT_TRACKING_ID\n'
+                   b' ABS_MT_POSITION_X : value 0, min 0, max 1080\n'
+                   b' ABS_MT_POSITION_Y : value 0, min 0, max 1920\n')
+        with patch("rok_automation.game.adb._run", side_effect=[listing, b'Viewport INTERNAL: orientation=1']), \
+             patch.object(interface, "_input") as send:
+            interface.zoom_out_city()
+        command = send.call_args.args[0][-1]
+        self.assertIn("sendevent /dev/input/event4 3 53 539", command)
+        self.assertIn("sendevent /dev/input/event4 3 54 795", command)
+
     def test_canonical_point_maps_to_guest_pixels(self) -> None:
         interface = self._interface()
         # The canonical centre is the guest centre.

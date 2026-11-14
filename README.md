@@ -9,8 +9,8 @@ ROKauto is a Windows desktop automation tool for **Rise of Kingdoms** on **MuMu 
 - **Node search:** Searches levels 8 down to 5, falls back to other resources, avoids green incoming routes and duplicate coordinates, and remembers recently farmed nodes across cycles for 30 minutes. Run summaries estimate yields from dispatched resource types and levels.
 - **Character and Gmail rotation:** Traverses starred characters and switches through signed-in Gmail accounts. Rotation progress is saved and can be resumed after interruption. The GUI can maintain a signed-in account list, mark accounts complete, remove entries and reset run progress.
 - **Daily rewards:** Optionally claims available VIP points, the free VIP chest and the campaign chest, handling already-claimed rewards and common dialogs.
-- **City tasks:** The GUI can collect visible ready Food, Wood, Stone and Gold icons after a small zoom out. It can also claim a ready forge output and start a new Leather, Iron, Wood or Bone material; it skips the forge if the ready output is unavailable.
-- **Background operation:** Screenshots and taps use MuMu's local ADB connection, so the host mouse is not moved and the emulator can be covered. Captures are normalized to 1280×720, with corresponding coordinate mapping for input. Capture latency is measured to scale timeouts, and ADB input retries after reconnection.
+- **City tasks:** The GUI can collect visible ready Food, Wood, Stone and Gold icons after a small zoom out. It can also claim a ready forge output and select Leather, Iron, Wood or Bone for production, whether or not an output was ready. Enabled city tasks run after farming each account, or immediately on the current account when farming is disabled.
+- **Background operation:** Screenshots use MuMu's native renderer when available, checked against an ADB screenshot at startup; capture falls back to ADB if necessary. Taps use MuMu's local ADB connection, so the host mouse is not moved and the emulator can be covered. Captures are normalized to 1280×720, with corresponding coordinate mapping for input. Capture latency is measured to scale timeouts, and ADB input retries after reconnection.
 - **Control center:** Start, pause and stop a run, choose the account scope and optional tasks, view logs and resource totals, and run screenshot, screen-detection and stockpile diagnostics. Alliance help/technology and troop training are marked as planned, not implemented.
 
 ## Requirements and setup
@@ -40,6 +40,9 @@ python -m rok_automation --farm --current-rok-only
 # Claim daily rewards before farming, or claim them on the current account only
 python -m rok_automation --farm --daily-reward
 python -m rok_automation --daily-reward-only
+
+# Run city tasks previously enabled in the GUI on the current account
+python -m rok_automation --city-tasks-only
 
 # Diagnostics
 python -m rok_automation --screenshot artifacts/mumu.png

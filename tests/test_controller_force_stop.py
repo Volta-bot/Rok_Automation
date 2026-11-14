@@ -74,7 +74,7 @@ class TestControllerForceStop(unittest.TestCase):
             SearchTarget(resource=Resource.STONE, level=6),
         ]
 
-        with patch.object(
+        with patch("rok_automation.automation.controller.GmailSwitcher"), patch.object(
             self.controller,
             "_farm_linked_characters",
             side_effect=KeyboardInterrupt,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -370,33 +371,63 @@ class AdbInput:
     def zoom_out_city(self) -> None:
         """Send one short two-finger pinch to the emulator touchscreen."""
         listing = _run(self.adb_path, self.serial, ["shell", "getevent", "-pl"]).decode("utf-8", "replace")
-        import re
         devices = re.split(r"(?=add device \d+: )", listing)
-        device = next((m.group(1) for block in devices
-                       if 'name:     "input"' in block and "ABS_MT_SLOT" in block
+        selected = next(((m.group(1), block) for block in devices
+                       if all(axis in block for axis in
+                              ("ABS_MT_SLOT", "ABS_MT_TRACKING_ID", "ABS_MT_POSITION_X", "ABS_MT_POSITION_Y"))
                        and (m := re.search(r"add device \d+: (/dev/input/event\d+)", block))), None)
-        if device is None:
+        if selected is None:
             raise AdbError("A multitouch input device is unavailable")
-        left, y = self._to_guest(530, 360)
-        right, _ = self._to_guest(750, 360)
-        end_left, _ = self._to_guest(555, 360)
-        end_right, _ = self._to_guest(725, 360)
+        device, block = selected
+        # Linux touch axes follow the physical panel, while _to_guest returns
+        # coordinates in the rotated Android display. Convert back to raw axes.
+        def axis_range(axis: str) -> tuple[int, int] | None:
+            match = re.search(rf"{axis}\s*:\s*value\s+-?\d+,\s*min\s+(-?\d+),\s*max\s+(-?\d+)", block)
+            return (int(match.group(1)), int(match.group(2))) if match else None
+
+        raw_x, raw_y = axis_range("ABS_MT_POSITION_X"), axis_range("ABS_MT_POSITION_Y")
+        rotation = 0
+        if raw_x and raw_y:
+            dump = _run(self.adb_path, self.serial, ["shell", "dumpsys", "input"]).decode("utf-8", "replace")
+            match = re.search(r"Viewport INTERNAL:.*?orientation=(\d)", dump)
+            if match:
+                rotation = int(match.group(1))
+
+        def raw_point(x: int, y: int) -> tuple[int, int]:
+            gx, gy = self._to_guest(x, y)
+            width, height = self._guest_size
+            u, v = gx / max(width - 1, 1), gy / max(height - 1, 1)
+            if rotation == 1:
+                u, v = 1 - v, u
+            elif rotation == 2:
+                u, v = 1 - u, 1 - v
+            elif rotation == 3:
+                u, v = v, 1 - u
+            if raw_x and raw_y:
+                return (round(raw_x[0] + u * (raw_x[1] - raw_x[0])),
+                        round(raw_y[0] + v * (raw_y[1] - raw_y[0])))
+            return gx, gy
+
+        left = raw_point(530, 360)
+        right = raw_point(750, 360)
+        end_left = raw_point(555, 360)
+        end_right = raw_point(725, 360)
         events = [
-            (3, 47, 0), (3, 57, 101), (3, 53, left), (3, 54, y), (3, 58, 1),
-            (3, 47, 1), (3, 57, 102), (3, 53, right), (3, 54, y), (3, 58, 1),
-            (1, 330, 1), (0, 0, 0),
+            (3, 47, 0), (3, 57, 101), (3, 53, left[0]), (3, 54, left[1]),
+            (3, 47, 1), (3, 57, 102), (3, 53, right[0]), (3, 54, right[1]),
+            (0, 0, 0),
         ]
         commands = [f"sendevent {device} {a} {b} {c}" for a, b, c in events]
         commands.append("sleep 0.1")
         for step in range(1, 6):
-            x1 = round(left + (end_left - left) * step / 5)
-            x2 = round(right + (end_right - right) * step / 5)
+            x1, y1 = (round(left[i] + (end_left[i] - left[i]) * step / 5) for i in (0, 1))
+            x2, y2 = (round(right[i] + (end_right[i] - right[i]) * step / 5) for i in (0, 1))
             commands.extend(f"sendevent {device} {a} {b} {c}" for a, b, c in
-                            [(3, 47, 0), (3, 53, x1), (3, 47, 1), (3, 53, x2), (0, 0, 0)])
+                            [(3, 47, 0), (3, 53, x1), (3, 54, y1), (3, 47, 1), (3, 53, x2), (3, 54, y2), (0, 0, 0)])
             commands.append("sleep 0.05")
         commands.extend(f"sendevent {device} {a} {b} {c}" for a, b, c in
-                        [(3, 47, 0), (3, 57, -1), (3, 47, 1), (3, 57, -1), (1, 330, 0), (0, 0, 0)])
-        self._input(["shell", "sh", "-c", "; ".join(commands)])
+                        [(3, 47, 0), (3, 57, -1), (3, 47, 1), (3, 57, -1), (0, 0, 0)])
+        self._input(["shell", "sh", "-c", "set -e; " + "; ".join(commands)])
 
     def wait(self, seconds: float) -> None:
         """Sleep, honouring a pause request from the user."""
