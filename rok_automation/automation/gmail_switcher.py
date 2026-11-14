@@ -32,7 +32,7 @@ from rok_automation.automation.account_switcher import AccountSwitcher
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
-from rok_automation.vision.screen import ScreenDetector, load_color_frame
+from rok_automation.vision.screen import ScreenDetector, load_color_frame, load_gray_frame
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -992,15 +992,7 @@ class GmailSwitcher:
                     return
                 if last_state in {"settings_menu", "governor_profile"}:
                     key = last_state
-                    hit = self.detector.locate_template(
-                        screenshot, _MENU_CLOSE_TEMPLATE, confidence_threshold=0.75
-                    )
-                    if hit is not None:
-                        bounds = hit.bounds
-                    else:
-                        height, width = frame.shape[:2]
-                        bounds = (round(width * 0.94), round(height * 0.015),
-                                  round(width * 0.045), round(height * 0.055))
+                    bounds = self._find_game_menu_close(frame)
                 else:
                     key, bounds = None, None
 
@@ -1013,6 +1005,25 @@ class GmailSwitcher:
             lilith = self._read_lilith_screen(frame)
 
         raise RuntimeError(f"Could not return to the city or map; last screen: {last_state}")
+
+    @staticmethod
+    def _find_game_menu_close(frame: Any) -> Box | None:
+        """Find the X on a centered settings or governor panel."""
+        height, width = frame.shape[:2]
+        template = load_gray_frame(_MENU_CLOSE_TEMPLATE)
+        if template is None:
+            raise RuntimeError("Could not load the menu close-button template")
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        left, right = round(width * 0.65), round(width * 0.99)
+        bottom = round(height * 0.20)
+        region = gray[:bottom, left:right]
+        score, (x, y, scale) = ScreenDetector._best_scale_match(
+            region, template, maximum_scale=1.35
+        )
+        if score < 0.75:
+            return None
+        return (left + x, y, round(template.shape[1] * scale),
+                round(template.shape[0] * scale))
 
     def _wait_for_state_change(self, previous_state: str) -> None:
         """Wait briefly until the screen advances past ``previous_state``."""

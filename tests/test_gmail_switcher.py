@@ -98,7 +98,8 @@ class TestRedesignedUserCenter(unittest.TestCase):
             ("settings_menu", None, 1.0), ("governor_profile", None, 1.0),
             ("map_or_city", None, 1.0),
         ])
-        with patch.object(switcher, "_capture", side_effect=captures), \
+        with patch.object(switcher, "_find_game_menu_close", return_value=(1200, 10, 35, 35)), \
+                patch.object(switcher, "_capture", side_effect=captures), \
                 patch.object(switcher, "_read_lilith_screen", return_value=None):
             switcher._close_lilith_ui(Path("center.png"),
                                       _LilithScreen(state="user_center", user_center_close=back))
@@ -113,11 +114,23 @@ class TestRedesignedUserCenter(unittest.TestCase):
         switcher = GmailSwitcher(game, detector, log=lambda _: None)
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         switcher.rok_menus._detect_menu_state = MagicMock(return_value=("settings_menu", None, 1.0))
-        with patch.object(switcher, "_capture", return_value=(Path("settings.png"), frame)), \
+        with patch.object(switcher, "_find_game_menu_close", return_value=(1200, 10, 35, 35)), \
+                patch.object(switcher, "_capture", return_value=(Path("settings.png"), frame)), \
                 patch.object(switcher, "_read_lilith_screen", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "settings_menu close button did not respond"):
                 switcher._close_lilith_ui(Path("settings.png"), None)
         self.assertEqual(len(game.clicks), 5)
+
+    def test_finds_close_x_on_centered_panel(self):
+        template = cv2.imread(str(Path(__file__).resolve().parents[1] / "templates/daily_reward/vip_close_x.png"))
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        height, width = template.shape[:2]
+        frame[35:35 + height, 1087:1087 + width] = template
+        bounds = GmailSwitcher._find_game_menu_close(frame)
+        self.assertIsNotNone(bounds)
+        x, y, w, h = bounds
+        self.assertTrue(x <= 1087 + width // 2 <= x + w)
+        self.assertTrue(y <= 35 + height // 2 <= y + h)
 
 
 class TestGmailRotation(unittest.TestCase):
