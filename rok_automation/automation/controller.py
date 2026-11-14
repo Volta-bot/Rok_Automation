@@ -52,6 +52,7 @@ from rok_automation.logic.resource_selector import (
     search_plan,
 )
 from rok_automation.vision.account_label import read_text_region
+from rok_automation.performance import PerformanceStats, collect_performance, record_event
 from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
     ScreenDetection,
@@ -59,6 +60,7 @@ from rok_automation.vision.screen import (
     ScreenState,
     load_color_frame,
     load_gray_frame,
+    save_frame,
 )
 
 
@@ -133,6 +135,9 @@ _MAX_ARMY_STEPS = 80
 _SCREEN_READ_TIMEOUT = 3.0
 _CITY_TO_MAP_TIMEOUT = 6.0
 _DIRECT_MAP_SETTLE_DELAY = 1.0
+_FAST_PROBE_SECONDS = 0.20
+_READY_SCREEN_MAX_AGE = 0.75
+_STOCKPILE_CACHE_SECONDS = 30.0
 # The City map button is fixed at the lower-left corner of the game view.
 _NORM_CITY_MAP_BUTTON = (0.008, 0.825, 0.085, 0.165)
 
@@ -177,6 +182,9 @@ class FarmingController:
         self._selected_resource: Resource | None = None
         self._resource_levels: dict[Resource, int] = {}
         self.session_targets: list[SearchTarget] = []
+        self.session_performance: list[dict] = []
+        self._next_world_screen: tuple[Path, ScreenDetection, float] | None = None
+        self._stockpile_cache: tuple[float, dict[Resource, int | None]] | None = None
 
     # Screen-wait budgets scale with how slow a capture is, so a slower
     # frame still gets the same number of samples of a transition as a
@@ -339,6 +347,10 @@ class FarmingController:
             else:
                 self._log("No resource armies were dispatched before force stop.")
             return self.context
+
+        except (OSError, RuntimeError, ValueError):
+            self._save_session_summary(status="error")
+            raise
 
     def _check_skip_request(self) -> None:
         """Accept requests only between actions, when the game is navigable."""
@@ -550,6 +562,56 @@ class FarmingController:
         *,
         expected_account_name: str | None = None,
     ) -> FarmContext:
+        self._invalidate_observations()
+        stats = PerformanceStats()
+        started = time.perf_counter()
+        with collect_performance(stats):
+            try:
+                context = self._farm_account(expected_account_name=expected_account_name)
+                if context.last_error:
+                    self._save_failure_frame()
+                return context
+            except (OSError, RuntimeError, ValueError):
+                self._save_failure_frame()
+                raise
+            finally:
+                elapsed = time.perf_counter() - started
+                snapshot = stats.snapshot()
+                self.session_performance.append({
+                    "account": self.context.account_name,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "operations": snapshot,
+                })
+                self._save_session_summary(status="running")
+                details = ", ".join(
+                    f"{name} {sample['total_ms'] / 1000:.2f}s/{sample['calls']} calls"
+                    for name, sample in snapshot.items()
+                )
+                self._log(f"Account timing: {elapsed:.2f}s; {details or 'no measured operations'}")
+                self._invalidate_observations()
+
+    def _save_failure_frame(self) -> None:
+        path = getattr(self.game, "screenshot_path", None)
+        if not isinstance(path, (str, Path)):
+            return
+        try:
+            output = save_frame(path, _PROJECT_ROOT / "artifacts/farming_error.png")
+            self._log(f"Last available frame saved: {output}")
+        except (OSError, ValueError, cv2.error) as exc:
+            self._log(f"Could not save the failure frame: {exc}")
+
+    def _invalidate_observations(self) -> None:
+        self._next_world_screen = None
+        self._stockpile_cache = None
+        self._selected_resource = None
+        self._resource_levels.clear()
+        self.detector.clear_reading_cache()
+
+    def _farm_account(
+        self,
+        *,
+        expected_account_name: str | None = None,
+    ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
         if self._should_claim_daily_rewards():
             self._transition(
@@ -631,7 +693,7 @@ class FarmingController:
             # already open): still read the account label/army count if visible,
             # and default armies_out to 0 so _farm_one_army continues from the
             # current screen state.
-            color_frame = cv2.imread(str(screenshot), cv2.IMREAD_COLOR)
+            color_frame = load_color_frame(screenshot)
             if color_frame is not None:
                 from rok_automation.vision.account_label import (
                     read_account_label,
@@ -728,12 +790,22 @@ class FarmingController:
                     "account farmed in the last 30 minutes"
                 )
 
+        if detection.state is ScreenState.WORLD_MAP and world_detection.state is ScreenState.WORLD_MAP:
+            self._next_world_screen = (screenshot, detection, time.monotonic())
+
         for army_number in range(1, dispatch_limit + 1):
             total_army_number = self.context.starting_armies_out + army_number
+            started = time.perf_counter()
             dispatched = self._farm_one_army(
                 total_army_number,
                 highest_candidate_level,
                 seen_resource_coordinates,
+            )
+            elapsed = time.perf_counter() - started
+            record_event("dispatch" if dispatched else "exhausted_search", elapsed)
+            self._log(
+                f"Army {total_army_number}/5 timing: {elapsed:.2f}s "
+                f"({'dispatched' if dispatched else 'no usable node'})"
             )
             if dispatched:
                 self._check_skip_request()
@@ -849,7 +921,14 @@ class FarmingController:
         target_index = 0
         fallback_ordered = False
         pending_result: ScreenDetection | None = None
-        pending_screen: tuple[Path, ScreenDetection] | None = None
+        ready = self._next_world_screen
+        self._next_world_screen = None
+        pending_screen = (
+            (ready[0], ready[1])
+            if ready is not None and time.monotonic() - ready[2] <= _READY_SCREEN_MAX_AGE
+            else None
+        )
+        expected_start = (ScreenState.WORLD_MAP,) if ready is not None else None
         recoveries = 0
         unknown_reads = 0
         last_error = "none"
@@ -880,7 +959,8 @@ class FarmingController:
                     screenshot, screen = pending_screen
                     pending_screen = None
                 else:
-                    screenshot, screen = self._read_screen()
+                    screenshot, screen = self._read_screen(expected_states=expected_start)
+                expected_start = None
                 state = screen.state
 
                 if state is ScreenState.UNKNOWN:
@@ -942,8 +1022,8 @@ class FarmingController:
                         and target_list[target_index].resource
                         != self.context.preferred_resource
                     ):
-                        # Refresh stockpiles when the preferred resource has
-                        # no usable node. Preserve random order for ties and
+                        # Reuse recent stockpiles for this character.
+                        # Preserve random order for ties and
                         # resources whose stockpile could not be read.
                         fallback_ordered = True
                         stockpiles = (
@@ -1141,6 +1221,8 @@ class FarmingController:
                             self._remember_farmed_node(coordinates)
                         return True
                     recoveries += 1
+                    record_event("recovery")
+                    self._invalidate_observations()
                     last_error = "gather flow fell back before Hành quân"
                     continue
 
@@ -1154,6 +1236,8 @@ class FarmingController:
                     if self._dispatch_army(current_target(), army_number):
                         return True
                     recoveries += 1
+                    record_event("recovery")
+                    self._invalidate_observations()
                     last_error = "gather flow fell back before Hành quân"
                     continue
 
@@ -1162,10 +1246,11 @@ class FarmingController:
                 pending_result = None
                 pending_screen = None
                 recoveries += 1
+                record_event("recovery")
                 last_error = str(error)
                 # The resource choice may or may not have been applied.
                 self._selected_resource = None
-                self._resource_levels.clear()
+                self._invalidate_observations()
                 self._log(
                     f"Step failed ({error}); checking which screen is showing "
                     f"and continuing from there ({recoveries}/{_MAX_RECOVERY_ATTEMPTS})"
@@ -1183,15 +1268,22 @@ class FarmingController:
     ) -> dict[Resource, int | None]:
         """Read the top-bar resource amounts from the current screenshot.
 
+        Readable amounts are cached for at most 30 seconds within one account.
         An unreadable frame or a missing OCR engine yields an empty dict so
         the caller can fall back to the random resource choice.
         """
 
+        cached = self._stockpile_cache
+        if cached is not None and time.monotonic() - cached[0] < _STOCKPILE_CACHE_SECONDS:
+            return dict(cached[1])
         color_frame = load_color_frame(screenshot)
         if color_frame is None:
             return {}
         try:
-            return read_resource_bar(color_frame)
+            amounts = read_resource_bar(color_frame)
+            if any(amount is not None for amount in amounts.values()):
+                self._stockpile_cache = (time.monotonic(), dict(amounts))
+            return amounts
         except RuntimeError as error:
             self._log(f"Could not read the top-bar stockpiles: {error}")
             return {}
@@ -1303,6 +1395,8 @@ class FarmingController:
         resource = self._selected_resource
         screenshot_hint = initial_screenshot
         for _attempt in range(_MAX_ACTION_ATTEMPTS):
+            if _attempt:
+                record_event("level_retry")
             screenshot, detection = self._wait_for_search_menu_level(
                 initial_screenshot=screenshot_hint
             )
@@ -1457,6 +1551,7 @@ class FarmingController:
                 ScreenState.RESOURCE_SEARCH,
             }:
                 if marched and state is ScreenState.WORLD_MAP:
+                    self._next_world_screen = (screenshot, detection, time.monotonic())
                     self.context.armies_dispatched += 1
                     self.context.dispatched_targets.append(target)
                     self.session_targets.append(target)
@@ -1500,6 +1595,8 @@ class FarmingController:
                     f"{template_name} did not respond after "
                     f"{_MAX_ACTION_ATTEMPTS} clicks"
                 )
+            if clicks[state] > 1:
+                record_event("input_retry")
             if state is ScreenState.TROOP_COMPOSITION and not marched:
                 self._transition(FarmState.VERIFY_GATHERING, "Checking the march screen")
             retry_note = f" (retry {clicks[state] - 1})" if clicks[state] > 1 else ""
@@ -1528,6 +1625,7 @@ class FarmingController:
         screenshot: Path,
         *,
         expected_states: tuple[ScreenState, ...] | None = None,
+        fast_only: bool = False,
     ) -> tuple[ScreenDetection, bool]:
         """Identify which gather-flow screen is showing.
 
@@ -1545,6 +1643,7 @@ class FarmingController:
                         _DISPATCH_TEMPLATE_DIRS[exp_state] / f"{template_name}.png",
                         confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
                         context_key=self._selected_resource,
+                        fast_only=fast_only,
                     )
                     if hit is not None:
                         active_res = None
@@ -1577,6 +1676,7 @@ class FarmingController:
                             screenshot,
                             _NAVIGATION_TEMPLATES / "world_search_button.png",
                             confidence_threshold=0.75,
+                            fast_only=fast_only,
                         )
                         if world_hit is not None:
                             return (
@@ -1588,6 +1688,9 @@ class FarmingController:
                                 ),
                                 False,
                             )
+
+        if fast_only:
+            return ScreenDetection(ScreenState.UNKNOWN, 0.0, "expected control not ready"), False
 
         hits: list[tuple[float, ScreenState, Any, Any]] = []
         for state, template_name in _DISPATCH_BUTTONS.items():
@@ -1689,12 +1792,17 @@ class FarmingController:
             timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         self.game.wait(_STEP_SETTLE_DELAY)
         deadline = time.monotonic() + timeout
+        next_full_scan = time.monotonic() + min(_FAST_PROBE_SECONDS, timeout / 2)
         while time.monotonic() < deadline:
             screenshot = self.game.screenshot()
+            fast_only = bool(expected_states) and time.monotonic() < next_full_scan
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
                 expected_states=expected_states,
+                fast_only=fast_only,
             )
+            if not fast_only:
+                next_full_scan = time.monotonic() + _FAST_PROBE_SECONDS
             if detection.state is not ScreenState.UNKNOWN:
                 if expected_states and detection.state in expected_states:
                     return screenshot, detection, ambiguous
@@ -1973,6 +2081,7 @@ class FarmingController:
                 "totals": {r.value: totals[r] for r in Resource},
                 "grand_total": grand_total,
                 "grand_total_formatted": format_resource_amount(grand_total),
+                "performance": self.session_performance,
             }
             temp_path = self.session_summary_path.with_suffix(".tmp")
             temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

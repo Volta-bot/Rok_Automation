@@ -1,7 +1,6 @@
 """Command-line entry point for emulator detection and screenshot capture."""
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ from rok_automation.game.emulators import families
 from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE
 from rok_automation.game.native import create_native_interface
 from rok_automation.game.pause import clear_paused
-from rok_automation.vision.screen import ScreenDetector
+from rok_automation.vision.screen import ScreenDetector, save_frame
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
     Resource,
@@ -44,6 +43,7 @@ def _run_stockpile_check(game: Any) -> int:
 
     try:
         screenshot_path = game.screenshot()
+        save_frame(screenshot_path)
     except (OSError, RuntimeError) as exc:
         print(f"Screenshot failed: {exc}")
         return 1
@@ -267,14 +267,10 @@ def main() -> int:
         screenshot_path = args.screenshot or Path("artifacts/mumu.png")
         try:
             output_path = game.screenshot()
+            output_path = save_frame(output_path, screenshot_path)
         except (OSError, RuntimeError) as exc:
             print(f"Screenshot failed: {exc}")
             return 1
-        if args.screenshot is not None:
-            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-            if output_path.resolve() != screenshot_path.resolve():
-                shutil.copyfile(output_path, screenshot_path)
-            output_path = screenshot_path
         print(f"Screenshot saved: {output_path}")
         print(
             "  (normalised to "

@@ -12,7 +12,9 @@ class GameInterface(Protocol):
 
     timing: TimingConfig
 
-    def screenshot(self) -> Path: ...
+    def screenshot(self) -> Path:
+        """Return a frame handle; use load_color/gray_frame or save_frame."""
+        ...
 
     def click(
         self,

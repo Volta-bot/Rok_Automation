@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import cv2
+from rok_automation.performance import timed
 
 from rok_automation.logic.resource_selector import (
     Resource,
@@ -44,6 +45,7 @@ def _get_ocr_engine() -> Any:
     return _OCR_ENGINE
 
 
+@timed("ocr")
 def read_text_region(
     frame: Any,
     bounds: tuple[int, int, int, int],
@@ -75,6 +77,7 @@ def read_text_region(
     return tuple(result.txts or ()) if result is not None else ()
 
 
+@timed("ocr")
 def read_text_detections(
     frame: Any,
     bounds: tuple[int, int, int, int],
@@ -138,6 +141,7 @@ def read_army_count(frame: Any) -> int | None:
     return int(match.group(1)) if match else None
 
 
+@timed("ocr")
 def read_account_label(
     frame: Any,
 ) -> tuple[str | None, Resource | None]:

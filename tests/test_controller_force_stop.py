@@ -94,6 +94,15 @@ class TestControllerForceStop(unittest.TestCase):
         full_log = "\n".join(logged_lines)
         self.assertIn("TOTAL RESOURCES FARMED BEFORE FORCE STOP", full_log)
 
+    def test_run_persists_error_status_after_an_exception(self) -> None:
+        with patch("rok_automation.automation.controller.GmailSwitcher"), patch.object(
+            self.controller, "_farm_linked_characters", side_effect=RuntimeError("capture failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "capture failed"):
+                self.controller.run()
+        data = json.loads(self.summary_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

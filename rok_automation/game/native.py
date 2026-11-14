@@ -21,6 +21,7 @@ from rok_automation.game.emulators import (
 from rok_automation.game.frame import normalize_capture
 from rok_automation.game.interface import TimingConfig
 from rok_automation.vision.screen import cache_captured_frame
+from rok_automation.performance import timed
 
 
 class AdbFrameSource:
@@ -112,8 +113,13 @@ class NativeInterface(AdbInput):
                 f"screen timeouts scaled {self.timeout_scale:.1f}x"
             )
 
+    @timed("capture")
     def screenshot(self) -> Path:
-        """Capture the emulator and store a canonical 1280x720 frame."""
+        """Capture into memory; the returned path is a handle for frame loaders.
+
+        Use vision.screen.save_frame to materialize a diagnostic PNG.
+        Like the old screenshot file, this handle refers to the latest capture.
+        """
 
         was_native = isinstance(self.source, FallbackFrameSource) and self.source.primary is not None
         started = time.perf_counter()
@@ -127,10 +133,8 @@ class NativeInterface(AdbInput):
         self._guest_size = (width, height)
         normalized = normalize_capture(frame)
         destination = self.screenshot_path.expanduser()
-        destination.parent.mkdir(parents=True, exist_ok=True)
         resolved = destination.resolve()
-        cv2.imwrite(str(resolved), normalized)
-        cache_captured_frame(resolved, normalized)
+        cache_captured_frame(resolved, normalized, memory_only=True)
         return resolved
 
 

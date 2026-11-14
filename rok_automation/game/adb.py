@@ -26,6 +26,7 @@ from rok_automation.game.interface import TimingConfig
 from rok_automation.game.pause import wait_while_paused
 from rok_automation.game.process import run_hidden
 from rok_automation.vision.screen import load_gray_frame
+from rok_automation.performance import record_event, timed
 
 
 class AdbError(RuntimeError):
@@ -277,12 +278,14 @@ class AdbInput:
 
     # -- input ---------------------------------------------------------- #
 
+    @timed("adb_input")
     def _input(self, args: Sequence[str], *, timeout: float = 30.0) -> None:
         """Send an input command, reconnecting once if the link went stale."""
 
         try:
             _run(self.adb_path, self.serial, args, timeout=timeout)
         except AdbError:
+            record_event("adb_retry")
             if self.log is not None:
                 self.log(f"ADB input failed ({' '.join(args)}); reconnecting.")
             self.reconnect()
@@ -429,6 +432,7 @@ class AdbInput:
                         [(3, 47, 0), (3, 57, -1), (3, 47, 1), (3, 57, -1), (0, 0, 0)])
         self._input(["shell", "sh", "-c", "set -e; " + "; ".join(commands)])
 
+    @timed("wait")
     def wait(self, seconds: float) -> None:
         """Sleep, honouring a pause request from the user."""
 

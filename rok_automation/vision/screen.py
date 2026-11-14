@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
+from rok_automation.performance import timed
 from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
 from rok_automation.vision.account_label import (
     read_account_label,
@@ -102,8 +104,9 @@ _TEMPLATE_CACHE: dict[Path, Any] = {}
 _SCALE_CACHE: dict[tuple[int, ...], int] = {}
 # (frame_h, frame_w, template_name, context_key) -> (x, y, w, h, scale_step)
 _POSITION_CACHE: dict[tuple[int, int, str, Any], tuple[int, int, int, int, int]] = {}
-# In-memory decoded screenshot cache: Path -> (mtime_ns, size, bgr_frame, gray_frame)
-_FRAME_CACHE: dict[Path, tuple[int, int, Any, Any]] = {}
+# A None file timestamp marks a live frame that has not been written to disk.
+_FRAME_CACHE: dict[Path, tuple[int | None, int, Any, Any]] = {}
+
 
 # Normalized (left, top, right, bottom) search regions for static UI controls.
 _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
@@ -158,22 +161,34 @@ _BLUE_TEXT_TEMPLATES = frozenset({
 })
 
 
-def cache_captured_frame(path: str | Path, bgr_frame: Any) -> None:
+def _trim_file_frames() -> None:
+    # Live handles must remain readable even when diagnostics load other files.
+    # One live entry is overwritten on every capture by each connected interface.
+    file_paths = [path for path, entry in _FRAME_CACHE.items() if entry[0] is not None]
+    for path in file_paths[:-5]:
+        del _FRAME_CACHE[path]
+
+
+def cache_captured_frame(
+    path: str | Path, bgr_frame: Any, *, memory_only: bool = False,
+) -> None:
     """Store a freshly captured BGR frame in memory to avoid disk re-reads."""
 
     resolved = Path(path).resolve()
-    try:
-        stat = resolved.stat()
-        mtime_ns, size = stat.st_mtime_ns, stat.st_size
-    except OSError:
-        mtime_ns, size = -1, -1
+    if memory_only:
+        mtime_ns, size = None, 0
+    else:
+        try:
+            stat = resolved.stat()
+            mtime_ns, size = stat.st_mtime_ns, stat.st_size
+        except OSError:
+            mtime_ns, size = -1, -1
     gray_frame = (
         cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         if bgr_frame.ndim == 3
         else bgr_frame
     )
-    if len(_FRAME_CACHE) >= 6:
-        _FRAME_CACHE.clear()
+    _trim_file_frames()
     _FRAME_CACHE[resolved] = (mtime_ns, size, bgr_frame, gray_frame)
 
 
@@ -181,6 +196,9 @@ def load_color_frame(path: str | Path) -> Any:
     """Load a BGR screenshot, serving from memory when unchanged on disk."""
 
     resolved = Path(path).resolve()
+    cached = _FRAME_CACHE.get(resolved)
+    if cached is not None and cached[0] is None:
+        return cached[2]
     try:
         stat = resolved.stat()
         mtime_ns, size = stat.st_mtime_ns, stat.st_size
@@ -193,8 +211,7 @@ def load_color_frame(path: str | Path) -> Any:
     if bgr is None:
         return None
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    if len(_FRAME_CACHE) >= 6:
-        _FRAME_CACHE.clear()
+    _trim_file_frames()
     _FRAME_CACHE[resolved] = (mtime_ns, size, bgr, gray)
     return bgr
 
@@ -203,6 +220,9 @@ def load_gray_frame(path: str | Path) -> Any:
     """Load a grayscale screenshot, serving from memory when unchanged on disk."""
 
     resolved = Path(path).resolve()
+    cached = _FRAME_CACHE.get(resolved)
+    if cached is not None and cached[0] is None:
+        return cached[3]
     try:
         stat = resolved.stat()
         mtime_ns, size = stat.st_mtime_ns, stat.st_size
@@ -215,10 +235,23 @@ def load_gray_frame(path: str | Path) -> Any:
     if bgr is None:
         return None
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    if len(_FRAME_CACHE) >= 6:
-        _FRAME_CACHE.clear()
+    _trim_file_frames()
     _FRAME_CACHE[resolved] = (mtime_ns, size, bgr, gray)
     return gray
+
+
+def save_frame(path: str | Path, destination: str | Path | None = None) -> Path:
+    """Explicitly export a live or file-backed frame for diagnostics."""
+    frame = load_color_frame(path)
+    if frame is None:
+        raise FileNotFoundError(f"Could not read screenshot: {path}")
+    output = Path(destination if destination is not None else path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(output), frame):
+        raise OSError(f"Could not save screenshot: {output}")
+    # The exported path is file-backed and must notice later edits on disk.
+    cache_captured_frame(output, frame)
+    return output
 
 
 def _load_gray_template(path: Path) -> Any:
@@ -239,7 +272,12 @@ class ScreenDetector:
         if not 0.0 < confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
         self.confidence_threshold = confidence_threshold
+        self._level_readings: dict[Any, tuple[Any, int]] = {}
 
+    def clear_reading_cache(self) -> None:
+        self._level_readings.clear()
+
+    @timed("detection")
     def detect(
         self,
         screenshot_path: str | Path,
@@ -304,7 +342,7 @@ class ScreenDetector:
                 best.bounds,
             )
         if best.state is ScreenState.RESOURCE_SEARCH and best.bounds is not None:
-            level = self._read_search_level(frame, best.bounds)
+            level = self._cached_search_level(frame, best.bounds, context_key)
             active_res = self.identify_active_search_resource(best.bounds, frame.shape[1])
             evidence = best.evidence
             if isinstance(active_res, Resource):
@@ -411,6 +449,7 @@ class ScreenDetector:
                 del _POSITION_CACHE[key]
 
     @classmethod
+    @timed("detection")
     def locate_template(
         cls,
         screenshot_path: str | Path,
@@ -418,6 +457,7 @@ class ScreenDetector:
         *,
         confidence_threshold: float = 0.68,
         context_key: Any = None,
+        fast_only: bool = False,
     ) -> TemplateHit | None:
         """Locate a supplied visual control in a screenshot for safe clicking."""
 
@@ -430,6 +470,7 @@ class ScreenDetector:
             confidence_threshold=confidence_threshold,
             context_key=context_key,
             maximum_scale=1.35,
+            fast_only=fast_only,
         )
 
     @classmethod
@@ -441,6 +482,7 @@ class ScreenDetector:
         confidence_threshold: float,
         context_key: Any = None,
         maximum_scale: float = 1.35,
+        fast_only: bool = False,
     ) -> TemplateHit | None:
         """Fast ROI + pinned-position template matcher for static UI buttons."""
 
@@ -477,6 +519,9 @@ class ScreenDetector:
                 ):
                     continue
                 return TemplateHit(score, (hit_x, hit_y, pw, ph))
+
+        if fast_only:
+            return None
 
         # 2. ROI scan: crop to the control's static region (narrowed above the
         # selected resource icon for Tìm kiếm / + / - when that icon's position
@@ -606,6 +651,36 @@ class ScreenDetector:
             return Resource.STONE
         else:
             return Resource.GOLD
+
+    def _cached_search_level(
+        self,
+        frame: Any,
+        bounds: tuple[int, int, int, int],
+        context_key: Any,
+    ) -> int | None:
+        # Cover both OCR crops, including the label's low-level position.
+        # Exact pixel equality avoids trusting a stale level after a missed tap.
+        x, y, width, height = bounds
+        fallback_left = max(0, round(x - width * 0.9))
+        fallback_top = max(0, round(y - height * 1.7))
+        # Use the same rounded origin + size as read_text_region's fallback,
+        # including its last row when rounding the two terms differs by a pixel.
+        patch = frame[
+            fallback_top:max(round(y - height * 0.55), fallback_top + round(height * 1.25)),
+            fallback_left:max(round(x + width * 2.0), fallback_left + round(width * 2.5)),
+        ]
+        key = (frame.shape, bounds, context_key)
+        cached = self._level_readings.get(key)
+        if patch.size and cached is not None and np.array_equal(patch, cached[0]):
+            return cached[1]
+        level = self._read_search_level(frame, bounds)
+        if level is not None and patch.size:
+            if len(self._level_readings) >= 8:
+                self._level_readings.clear()
+            self._level_readings[key] = (patch.copy(), level)
+        else:
+            self._level_readings.pop(key, None)
+        return level
 
     @staticmethod
     def _read_search_level(
