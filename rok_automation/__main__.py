@@ -3,21 +3,20 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from rok_automation.automation.controller import FarmingController
-from rok_automation.game.backends import (
-    BACKEND_ADB,
-    BACKEND_CHOICES,
-    BACKEND_DESKTOP,
-    BACKEND_NATIVE,
-    create_game_interface,
-)
-from rok_automation.game.desktop import describe_window_tree, find_emulator_window
-from rok_automation.game.emulators import families, select_family
+from rok_automation.automation.gmail_switcher import DEFAULT_GMAIL_STATE_PATH
+from rok_automation.game.emulators import families
 from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE
+from rok_automation.game.native import create_native_interface
 from rok_automation.game.pause import clear_paused
 from rok_automation.vision.screen import ScreenDetector
-from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
+from rok_automation.logic.resource_selector import (
+    RESOURCE_LEVELS,
+    Resource,
+    format_resource_amount,
+)
 
 _RESOURCE_DISPLAY_NAMES = {
     Resource.GOLD: "Gold (Vàng)",
@@ -27,12 +26,86 @@ _RESOURCE_DISPLAY_NAMES = {
 }
 
 
-def _build_game(backend: str, args):
-    """Create the requested capture backend, or report why it failed."""
+def _run_stockpile_check(game: Any) -> int:
+    """Capture the current screen and report stockpiles + farming choice.
+
+    Mirrors the controller's fallback: a resource keyword in the account
+    name wins, otherwise the lowest top-bar stockpile is farmed, and the
+    weighted-random pick is only used when nothing could be read.
+    """
+
+    from rok_automation.logic.resource_selector import (
+        lowest_stockpile_resource,
+        random_preferred_resource,
+    )
+    from rok_automation.vision.resource_bar import read_resource_bar
+    from rok_automation.vision.screen import ScreenDetector, load_color_frame
 
     try:
-        interface = create_game_interface(
-            backend,
+        screenshot_path = game.screenshot()
+    except (OSError, RuntimeError) as exc:
+        print(f"Screenshot failed: {exc}")
+        return 1
+    print(f"Screenshot saved: {screenshot_path}")
+
+    frame = load_color_frame(screenshot_path)
+    if frame is None:
+        print(f"Could not read the captured frame: {screenshot_path}")
+        return 1
+
+    try:
+        stockpiles = read_resource_bar(frame)
+    except RuntimeError as exc:
+        print(f"Stockpile OCR failed: {exc}")
+        stockpiles = {}
+
+    print("Stockpiles (top bar):")
+    for resource in Resource:
+        amount = stockpiles.get(resource)
+        if amount is None:
+            print(f"  {resource.value}: not readable")
+        else:
+            print(f"  {resource.value}: {format_resource_amount(amount)}")
+
+    keyword_resource: Resource | None = None
+    account_name: str | None = None
+    try:
+        detection = ScreenDetector().detect(screenshot_path)
+        if detection.state.value == "world_map":
+            account_name = detection.account_name
+            keyword_resource = detection.preferred_resource
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+    if account_name:
+        print(f"Account: {account_name}")
+    if keyword_resource is not None:
+        print(
+            f"Would farm: {keyword_resource.value} — resource keyword in "
+            "the account name"
+        )
+        return 0
+
+    chosen = lowest_stockpile_resource(stockpiles)
+    if chosen is not None:
+        print(
+            f"Would farm: {chosen.value} — lowest top-bar stockpile "
+            f"({format_resource_amount(stockpiles[chosen] or 0)})"
+        )
+    else:
+        fallback = random_preferred_resource()
+        print(
+            f"Would farm: {fallback.value} — stockpiles unreadable, "
+            "random choice (Gold weighted higher)"
+        )
+    return 0
+
+
+def _build_game(args):
+    """Open the emulator's native capture, or report why it failed."""
+
+    try:
+        interface = create_native_interface(
             emulator=args.emulator,
             index=args.emulator_index,
             adb_path=args.adb_path,
@@ -68,17 +141,20 @@ def main() -> int:
         const=Path("artifacts/ldplayer.png"),
         type=Path,
         metavar="PATH",
-        help="capture the LDPlayer game area using the selected backend",
-    )
-    parser.add_argument(
-        "--diagnose-window",
-        action="store_true",
-        help="list the LDPlayer window and child-window bounds",
+        help="capture the LDPlayer game area through the native capture library",
     )
     parser.add_argument(
         "--detect-screen",
         action="store_true",
         help="capture LDPlayer and classify the visible game screen",
+    )
+    parser.add_argument(
+        "--check-stockpiles",
+        action="store_true",
+        help=(
+            "capture the game and report the top-bar stockpiles plus the "
+            "resource the automation would choose to farm"
+        ),
     )
     parser.add_argument(
         "--farm",
@@ -109,13 +185,9 @@ def main() -> int:
         help="farm the currently active RoK character only (do not switch characters)",
     )
     parser.add_argument(
-        "--reset-gmail-run",
-        action="store_true",
-        help="clear saved Gmail rotation progress and start a fresh full run",
-    )
-    parser.add_argument(
         "--gmail-state",
         type=Path,
+        default=DEFAULT_GMAIL_STATE_PATH,
         metavar="PATH",
         help="custom path for Gmail rotation progress JSON",
     )
@@ -124,26 +196,6 @@ def main() -> int:
         type=int,
         choices=RESOURCE_LEVELS,
         help="known active level from controller context for a found resource",
-    )
-    parser.add_argument(
-        "--adb",
-        action="store_true",
-        help=(
-            "drive the emulator over ADB so the LDPlayer window may be "
-            "minimised, hidden or covered by other windows (same as "
-            "--backend adb)"
-        ),
-    )
-    parser.add_argument(
-        "--backend",
-        choices=BACKEND_CHOICES,
-        default=BACKEND_NATIVE,
-        help=(
-            "how frames are captured: "
-            "'native' reads the emulator's own framebuffer (fastest, "
-            "background), 'adb' pulls frames over ADB, 'desktop' captures the "
-            "visible window. Falls back automatically when unavailable."
-        ),
     )
     parser.add_argument(
         "--emulator",
@@ -186,19 +238,12 @@ def main() -> int:
         from rok_automation.ui.app import launch_gui
         return launch_gui(hide_console=not args.show_console)
 
-    backend = BACKEND_ADB if args.adb else args.backend
-    game = _build_game(backend, args)
+    game = _build_game(args)
     if game is None:
         return 1
 
-    window = None
-    if backend == BACKEND_DESKTOP or args.diagnose_window:
-        family, _ = select_family(args.emulator)
-        window = find_emulator_window(family.window_terms, family.window_classes)
-
-    if args.diagnose_window and window is not None:
-        for description in describe_window_tree(window):
-            print(description)
+    if args.check_stockpiles:
+        return _run_stockpile_check(game)
 
     if args.screenshot is not None or args.detect_screen:
         screenshot_path = args.screenshot or Path("artifacts/ldplayer.png")
@@ -282,7 +327,6 @@ def main() -> int:
                 daily_rewards=args.daily_reward,
                 switch_gmail=not args.no_switch_gmail,
                 switch_rok_accounts=not args.current_rok_only,
-                reset_gmail_run=args.reset_gmail_run,
                 gmail_state_path=args.gmail_state,
             )
             context = controller.run()

@@ -1,9 +1,9 @@
-"""Game-frame geometry shared by every capture backend.
+"""Game-frame geometry shared by the capture path.
 
 The UI templates and OCR regions are authored against a 1280x720 game
 frame. Normalising every capture to that size keeps detection identical
-no matter which emulator, resolution or window size produced it, so this
-module is deliberately free of any emulator or backend specifics.
+no matter which emulator or resolution produced it, so this module is
+deliberately free of any emulator specifics.
 """
 
 from __future__ import annotations

@@ -9,18 +9,16 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
 
-from rok_automation.game.desktop import (
+from rok_automation.game.frame import (
     CANONICAL_CAPTURE_SIZE,
-    EmulatorWindow,
-    click_window_point,
     compute_capture_crop,
     normalize_capture,
 )
+from rok_automation.game.interface import TimingConfig
 from rok_automation.vision.screen import ScreenDetector
 
 
@@ -138,93 +136,65 @@ class TestDetectionIsResolutionIndependent(unittest.TestCase):
 class TestClickMappingAfterNormalization(unittest.TestCase):
     """Verify clicks still land on the same game content at any window size."""
 
-    RENDER_RECTS = {
-        "current 1278x718": (100, 200, 1378, 918),
-        "1080p 1920x1080": (0, 0, 1920, 1080),
-        "small 960x540": (50, 50, 1010, 590),
-        "wide 2560x1440": (10, 10, 2570, 1450),
-        "tall 1920x1200": (0, 0, 1920, 1200),
+    GUEST_SIZES = {
+        "current 1278x718": (1278, 718),
+        "1080p 1920x1080": (1920, 1080),
+        "small 960x540": (960, 540),
+        "wide 2560x1440": (2560, 1440),
+        "tall 1920x1200": (1920, 1200),
     }
 
     @staticmethod
-    def _mock_user32(rect):
-        left, top, right, bottom = rect
-        mock = MagicMock()
-        mock.IsWindow.return_value = True
-        mock.IsWindowVisible.return_value = True
-        mock.IsIconic.return_value = False
-        mock.GetWindowRect.return_value = True
-        captured: list[tuple[int, int]] = []
+    def _interface(guest: tuple[int, int]):
+        from rok_automation.game.adb import AdbInput
 
-        def get_rect(_hwnd, pointer):
-            pointer._obj.left = left
-            pointer._obj.top = top
-            pointer._obj.right = right
-            pointer._obj.bottom = bottom
-            return True
-
-        def set_cursor(x, y):
-            captured.append((x, y))
-            return True
-
-        mock.GetWindowRect.side_effect = get_rect
-        mock.SetCursorPos.side_effect = set_cursor
-        return mock, captured
-
-    def _click(self, rect, point):
-        mock, captured = self._mock_user32(rect)
-        with patch(
-            "rok_automation.game.desktop.find_render_window_handle",
-            return_value=999,
-        ), patch("ctypes.WinDLL", return_value=mock), patch("time.sleep"):
-            click_window_point(
-                EmulatorWindow(handle=1, title="LDPlayer"),
-                point,
-                CANONICAL_CAPTURE_SIZE[::-1],
-                offset_range=0,
-            )
-        return captured[0]
+        interface = AdbInput.__new__(AdbInput)
+        interface.adb_path = "adb"
+        interface.serial = "emulator-5554"
+        interface.timing = TimingConfig()
+        interface.pause_flag_path = None
+        interface.log = None
+        interface._guest_size = guest
+        return interface
 
     def test_centre_click_lands_on_render_centre(self) -> None:
-        """The canonical centre must map to the centre of the render window."""
-        centre_x, centre_y = CANONICAL_CAPTURE_SIZE[0] // 2, CANONICAL_CAPTURE_SIZE[1] // 2
-        for label, rect in self.RENDER_RECTS.items():
+        """The canonical centre must map to the centre of the render."""
+        centre_x = CANONICAL_CAPTURE_SIZE[0] // 2
+        centre_y = CANONICAL_CAPTURE_SIZE[1] // 2
+        for label, guest in self.GUEST_SIZES.items():
             with self.subTest(label):
-                left, top, right, bottom = rect
-                screen_x, screen_y = self._click(rect, (centre_x, centre_y))
-                self.assertEqual(
-                    (screen_x, screen_y),
-                    (left + (right - left) // 2, top + (bottom - top) // 2),
-                )
+                interface = self._interface(guest)
+                x, y = interface._to_guest(centre_x, centre_y)
+                self.assertAlmostEqual(x, guest[0] / 2, delta=1.5)
+                self.assertAlmostEqual(y, guest[1] / 2, delta=1.5)
 
     def test_click_relative_position_is_preserved(self) -> None:
-        """A canonical point must keep its relative position in the window."""
-        for label, rect in self.RENDER_RECTS.items():
+        """A canonical point must keep its relative position in the frame."""
+        for label, guest in self.GUEST_SIZES.items():
             with self.subTest(label):
-                left, top, right, bottom = rect
-                render_width, render_height = right - left, bottom - top
+                interface = self._interface(guest)
                 point = (320, 180)
-                screen_x, screen_y = self._click(rect, point)
+                x, y = interface._to_guest(*point)
                 crop_left, crop_top, crop_width, crop_height = compute_capture_crop(
-                    render_width,
-                    render_height,
+                    guest[0],
+                    guest[1],
                 )
                 expected_x = (
                     point[0] / CANONICAL_CAPTURE_SIZE[0] * crop_width + crop_left
-                ) / render_width
+                ) / guest[0]
                 expected_y = (
                     point[1] / CANONICAL_CAPTURE_SIZE[1] * crop_height + crop_top
-                ) / render_height
-                # Allow one screen pixel of rounding slack.
+                ) / guest[1]
+                # Allow one pixel of rounding slack.
                 self.assertAlmostEqual(
-                    (screen_x - left) / render_width,
+                    x / guest[0],
                     expected_x,
-                    delta=1.5 / render_width,
+                    delta=1.5 / guest[0],
                 )
                 self.assertAlmostEqual(
-                    (screen_y - top) / render_height,
+                    y / guest[1],
                     expected_y,
-                    delta=1.5 / render_height,
+                    delta=1.5 / guest[1],
                 )
 
 

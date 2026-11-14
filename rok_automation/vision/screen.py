@@ -624,17 +624,19 @@ class ScreenDetector:
         )
         match = ScreenDetector._parse_level_text(lines)
         if match is None:
-            # Accommodate slight panel/layout shifts while still requiring
-            # OCR to read the Cấp label adjacent to the digit.
+            # The level label follows the slider handle. At low levels it
+            # moves left of the search button, outside the first crop.
+            # Still require the Cấp label adjacent to the digit so unrelated
+            # numbers in the popup cannot be mistaken for the level.
             lines = read_text_region(
                 frame,
                 (
-                    max(0, round(x - width * 0.15)),
-                    max(0, round(y - height * 2.9)),
-                    round(width * 1.9),
-                    round(height * 2.55),
+                    max(0, round(x - width * 0.9)),
+                    max(0, round(y - height * 1.7)),
+                    round(width * 2.5),
+                    round(height * 1.25),
                 ),
-                upscale=2.0,
+                upscale=3.0,
             )
             match = ScreenDetector._parse_level_text(lines)
         if match is None:
@@ -652,7 +654,7 @@ class ScreenDetector:
         # RapidOCR occasionally drops or misreads the small accented "ấ" in
         # "Cấp: 8" as "Cp: 8" or "CEp.8"; accept those variants while still
         # requiring the C/p prefix next to the level digit.
-        return re.search(r"\bc(?:[aei])?p\s*[:：.]?\s*([5-8])\b", folded)
+        return re.search(r"\bc(?:[aei])?p\s*[:：.]?\s*([1-8])\b", folded)
 
     @staticmethod
     def _scaled_size(template: Any, scale: float) -> tuple[int, int]:

@@ -2,9 +2,8 @@
 
 Every emulator family is a small module in this package that subclasses
 :class:`EmulatorFamily` and registers itself. A family only has to answer
-four questions:
+three questions:
 
-* which window titles identify it on screen,
 * where its bundled ``adb`` lives,
 * which instances are running, and
 * how to open a native capture of the emulator's own framebuffer.
@@ -21,7 +20,6 @@ Adding a new emulator is therefore a single new file::
     class BlueStacksFamily(EmulatorFamily):
         key = "bluestacks"
         label = "BlueStacks"
-        window_terms = ("bluestacks", "hd-player")
         ...
 """
 
@@ -77,10 +75,6 @@ class EmulatorFamily:
     key: str = ""
     # Human readable name.
     label: str = ""
-    # Substrings that identify this emulator's window title.
-    window_terms: tuple[str, ...] = ()
-    # Window classes of the emulator's main frame, when they are known.
-    window_classes: tuple[str, ...] = ()
     # Folders the emulator may be installed in. An entry may contain a "*"
     # wildcard for a version folder.
     install_locations: tuple[str, ...] = ()
@@ -126,8 +120,7 @@ class EmulatorFamily:
     def preferred_serials(self) -> list[str]:
         """ADB serials this emulator is likely to appear as.
 
-        When more than one emulator is connected, the ADB backend uses
-        this to pick the right one.
+        When more than one emulator is connected, this picks the right one.
         """
 
         return []
@@ -341,7 +334,7 @@ def select_family(
     """Work out which emulator family to drive.
 
     The order is: the explicit request, then the environment, then the
-    remembered selection, then the first family that is installed.
+    remembered selection, then MuMu Player by default.
     """
 
     if preferred:
@@ -360,11 +353,4 @@ def select_family(
     if saved_family:
         return get_family(saved_family), saved_index
 
-    for family in families():
-        if family.is_installed():
-            return family, None
-
-    raise EmulatorError(
-        "No supported emulator was detected. Install one of: "
-        + ", ".join(family.label or family.key for family in families())
-    )
+    return get_family("mumu"), None

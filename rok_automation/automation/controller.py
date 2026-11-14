@@ -19,7 +19,9 @@ from rok_automation.automation.account_switcher import (
     AccountTraversal,
 )
 from rok_automation.automation.gmail_switcher import (
+    DEFAULT_SIGNED_IN_ACCOUNTS_PATH,
     DEFAULT_GMAIL_STATE_PATH,
+    GmailAccountRegistry,
     GmailRotation,
     GmailSwitcher,
 )
@@ -29,7 +31,11 @@ from rok_automation.game.farmed_nodes import (
     load_recent_farmed_nodes,
     remember_farmed_node,
 )
-from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
+from rok_automation.game.flags import (
+    DEFAULT_DAILY_REWARD_FLAG_PATH,
+    city_resources_enabled,
+    forge_material_to_produce,
+)
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
@@ -38,12 +44,14 @@ from rok_automation.logic.resource_selector import (
     account_name_without_guild,
     calculate_farmed_resources,
     format_resource_amount,
+    lowest_stockpile_resource,
     random_preferred_resource,
     resource_for_account,
     resource_node_yield,
     search_plan,
 )
 from rok_automation.vision.account_label import read_text_region
+from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
     ScreenDetection,
     ScreenDetector,
@@ -139,7 +147,7 @@ class FarmingController:
         switch_gmail: bool = True,
         switch_rok_accounts: bool = True,
         gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
-        reset_gmail_run: bool = False,
+        signed_in_accounts_path: Path | None = DEFAULT_SIGNED_IN_ACCOUNTS_PATH,
         session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
     ) -> None:
         if not 1 <= max_armies <= 5:
@@ -155,7 +163,7 @@ class FarmingController:
         self.switch_gmail = switch_gmail
         self.switch_rok_accounts = switch_rok_accounts
         self.gmail_state_path = gmail_state_path
-        self.reset_gmail_run = reset_gmail_run
+        self.signed_in_accounts = GmailAccountRegistry(signed_in_accounts_path)
         self.session_summary_path = (
             session_summary_path or DEFAULT_SESSION_SUMMARY_PATH
         )
@@ -164,9 +172,9 @@ class FarmingController:
         self._resource_levels: dict[Resource, int] = {}
         self.session_targets: list[SearchTarget] = []
 
-    # Screen-wait budgets scale with how slow a capture is, so the ADB
-    # backend (about 350 ms per frame) still gets the same number of
-    # samples of a transition as the desktop backend (about 21 ms).
+    # Screen-wait budgets scale with how slow a capture is, so a slower
+    # frame still gets the same number of samples of a transition as a
+    # fast one.
     def _budget(self, seconds: float) -> float:
         return self.game.timing.scaled(seconds)
 
@@ -180,10 +188,7 @@ class FarmingController:
 
         rotation: GmailRotation | None = None
         if self.switch_gmail:
-            rotation = GmailRotation.load(
-                self.gmail_state_path,
-                reset=self.reset_gmail_run,
-            )
+            rotation = GmailRotation.load(self.gmail_state_path)
             if rotation.is_resumed:
                 self._log(
                     f"Resuming Gmail run started from {rotation.first.label()}; "
@@ -196,10 +201,27 @@ class FarmingController:
         total_dispatched = 0
         total_characters = 0
         gmail_accounts = 0
+        known_current = None
         self._save_session_summary(status="running")
         try:
+            progress = rotation
+            if progress is None and self.switch_rok_accounts:
+                progress = GmailRotation.load(self.gmail_state_path)
+            if progress is not None and progress.farmed:
+                known_current = GmailSwitcher(
+                    self.game, self.detector, log=self._log,
+                    signed_in_accounts=self.signed_in_accounts,
+                ).switch_to_next(progress, observe_only=True).identity
             while True:
-                context, characters, dispatched = self._farm_linked_characters()
+                skip_current = (
+                    progress is not None and known_current is not None
+                    and progress.is_farmed(known_current)
+                )
+                if skip_current:
+                    self._log(f"Skipping {known_current.label()}: already farmed this run")
+                    context, characters, dispatched = self.context, 0, 0
+                else:
+                    context, characters, dispatched = self._farm_linked_characters()
                 total_dispatched += dispatched
                 total_characters += characters
                 if context.last_error:
@@ -212,15 +234,25 @@ class FarmingController:
                             gmail_accounts=gmail_accounts or 1,
                         )
                     return context
-                gmail_accounts += 1
+                if not skip_current:
+                    gmail_accounts += 1
 
                 if rotation is None:
+                    if self.switch_rok_accounts and not skip_current:
+                        progress = GmailRotation.load(
+                            self.gmail_state_path, include_completed=True
+                        )
+                        GmailSwitcher(
+                            self.game, self.detector, log=self._log,
+                            signed_in_accounts=self.signed_in_accounts,
+                        ).switch_to_next(progress, record_only=True)
                     context.armies_dispatched = total_dispatched
                     context.dispatched_targets = list(self.session_targets)
                     self._save_session_summary(status="complete")
                     self._transition(
                         FarmState.COMPLETE,
-                        f"Finished {characters} RoK account(s) linked to this Gmail account",
+                        ("Gmail already marked as farmed; skipped" if skip_current else
+                         f"Finished {characters} RoK account(s) linked to this Gmail account"),
                     )
                     self._log_resource_summary(
                         total_characters=total_characters,
@@ -228,16 +260,20 @@ class FarmingController:
                     )
                     return context
 
+                switcher = GmailSwitcher(
+                    self.game, self.detector, log=self._log,
+                    signed_in_accounts=self.signed_in_accounts,
+                )
+                if known_current is not None and not skip_current:
+                    switcher._register_current(rotation, known_current)
                 self._transition(
                     FarmState.SWITCH_GMAIL,
-                    f"Finished {characters} RoK account(s) in this Gmail; "
-                    "switching Gmail account",
+                    ("Gmail already marked as farmed; switching Gmail account" if skip_current else
+                     f"Finished {characters} RoK account(s) in this Gmail; switching Gmail account"),
                 )
-                result = GmailSwitcher(
-                    self.game,
-                    self.detector,
-                    log=self._log,
-                ).switch_to_next(rotation)
+                result = switcher.switch_to_next(rotation)
+                known_current = result.identity
+                self.signed_in_accounts.verify_many(rotation.farmed)
                 if result.run_complete:
                     context.armies_dispatched = total_dispatched
                     context.dispatched_targets = list(self.session_targets)
@@ -254,11 +290,17 @@ class FarmingController:
                         gmail_accounts=len(rotation.farmed),
                     )
                     return context
-                self._log(
-                    f"Switched to Gmail {result.identity.label()}; "
-                    f"farming its RoK accounts ({gmail_accounts + 1} Gmail "
-                    "account(s) this session)"
-                )
+                if rotation.is_farmed(result.identity):
+                    self._log(
+                        f"Switched to Gmail {result.identity.label()}; already farmed, "
+                        "switching to the next Gmail"
+                    )
+                else:
+                    self._log(
+                        f"Switched to Gmail {result.identity.label()}; "
+                        f"farming its RoK accounts ({gmail_accounts + 1} Gmail "
+                        "account(s) this session)"
+                    )
         except KeyboardInterrupt:
             self._log("Force stop requested by user (KeyboardInterrupt).")
             self.context.armies_dispatched = total_dispatched
@@ -414,6 +456,9 @@ class FarmingController:
         expected_account_name: str | None = None,
     ) -> FarmContext:
         self._transition(FarmState.DETECT_ACCOUNT)
+        collect_city_resources = city_resources_enabled()
+        forge_material = forge_material_to_produce()
+        run_city_tasks = collect_city_resources or forge_material is not None
         if self._should_claim_daily_rewards():
             self._transition(
                 FarmState.CLAIM_DAILY_REWARD,
@@ -428,9 +473,15 @@ class FarmingController:
             )
             claimer.claim_all()
             self.game.wait(1.5)
-            screenshot, detection = self._open_world_map_directly()
+            if run_city_tasks:
+                screenshot, detection = self._read_screen()
+            else:
+                screenshot, detection = self._open_world_map_directly()
         elif expected_account_name is None:
-            screenshot, detection = self._open_world_map_directly()
+            if run_city_tasks:
+                screenshot, detection = self._read_screen()
+            else:
+                screenshot, detection = self._open_world_map_directly()
         else:
             screenshot, detection = self._read_screen()
             for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
@@ -439,7 +490,27 @@ class FarmingController:
                 self.game.wait(_ACTION_RETRY_DELAY)
                 screenshot, detection = self._read_screen()
 
+        if run_city_tasks and detection.state is not ScreenState.CITY:
+            self._log("Returning to City View before running city tasks")
+            from rok_automation.automation.daily_reward import DailyRewardClaimer
+
+            returned_to_city = DailyRewardClaimer(
+                self.game,
+                self.detector,
+                log=self._log,
+            ).ensure_city_view(max_attempts=3)
+            if returned_to_city:
+                screenshot, detection = self._read_screen()
+            else:
+                self._log("Could not reach City View; skipping city tasks")
+
         if detection.state is ScreenState.CITY:
+            if run_city_tasks:
+                self._run_city_tasks(
+                    collect_resources=collect_city_resources,
+                    forge_material=forge_material,
+                )
+                screenshot, detection = self._read_screen()
             for _attempt in range(_MAX_ACTION_ATTEMPTS):
                 self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
                 self._press_and_wait(
@@ -522,14 +593,25 @@ class FarmingController:
         if not self.context.account_name:
             self.context.account_name = "current account"
         if self.context.preferred_resource is None:
-            self.context.preferred_resource = random_preferred_resource(
-                self.rng
-            )
-            self._log(
-                f"No resource keyword in {self.context.account_name!r}; "
-                f"randomly selected {self.context.preferred_resource.value} "
-                "(Gold weighted higher)"
-            )
+            stockpiles = self._read_stockpiles(screenshot)
+            chosen = lowest_stockpile_resource(stockpiles)
+            if chosen is not None:
+                self.context.preferred_resource = chosen
+                self._log(
+                    f"No resource keyword in {self.context.account_name!r}; "
+                    f"selected {chosen.value} — lowest top-bar stockpile "
+                    f"({format_resource_amount(stockpiles[chosen] or 0)})"
+                )
+            else:
+                self.context.preferred_resource = random_preferred_resource(
+                    self.rng
+                )
+                self._log(
+                    f"No resource keyword in {self.context.account_name!r} "
+                    "and the top-bar stockpiles were unreadable; randomly "
+                    f"selected {self.context.preferred_resource.value} "
+                    "(Gold weighted higher)"
+                )
         if armies_out is None:
             raise FarmingError(
                 "Could not read the world-map troop counter (x/5); "
@@ -604,6 +686,34 @@ class FarmingController:
         )
         return self.context
 
+    def _run_city_tasks(
+        self,
+        *,
+        collect_resources: bool,
+        forge_material: str | None,
+    ) -> None:
+        """Run optional city chores without letting a missed icon stop farming."""
+
+        from rok_automation.automation.city_tasks import CityTaskRunner
+
+        activities = []
+        if collect_resources:
+            activities.append("collect resources")
+        if forge_material:
+            activities.append(f"forge {forge_material.title()}")
+        self._log("Checking city tasks: " + ", ".join(activities))
+        try:
+            CityTaskRunner(
+                self.game,
+                self.detector,
+                log=self._log,
+            ).run(
+                collect_resources=collect_resources,
+                forge_material=forge_material,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            self._log(f"City tasks skipped: {exc}")
+
     def _farm_one_army(
         self,
         army_number: int,
@@ -630,6 +740,7 @@ class FarmingController:
             rng=self.rng,
         ))
         target_index = 0
+        fallback_ordered = False
         pending_result: ScreenDetection | None = None
         pending_screen: tuple[Path, ScreenDetection] | None = None
         recoveries = 0
@@ -719,6 +830,47 @@ class FarmingController:
                     skip_unavailable_targets()
                     if target_index >= len(target_list):
                         return False
+                    if (
+                        not fallback_ordered
+                        and target_list[target_index].resource
+                        != self.context.preferred_resource
+                    ):
+                        # Refresh stockpiles when the preferred resource has
+                        # no usable node. Preserve random order for ties and
+                        # resources whose stockpile could not be read.
+                        fallback_ordered = True
+                        stockpiles = (
+                            self._read_stockpiles(screenshot)
+                            if screenshot is not None else {}
+                        )
+                        remaining = target_list[target_index:]
+                        available = {
+                            target.resource for target in remaining
+                            if target.level <= highest_candidate_level[target.resource]
+                        }
+                        known = {
+                            resource: amount for resource, amount in stockpiles.items()
+                            if resource in available and amount is not None
+                        }
+                        if known:
+                            remaining.sort(
+                                key=lambda target: (
+                                    target.resource not in known,
+                                    known.get(target.resource, 0),
+                                )
+                            )
+                            target_list[target_index:] = remaining
+                            chosen = remaining[0].resource
+                            self._log(
+                                f"No usable {self.context.preferred_resource.value} node; "
+                                f"trying {chosen.value} next — lowest readable "
+                                f"available stockpile ({format_resource_amount(known[chosen])})"
+                            )
+                        else:
+                            self._log(
+                                "No fallback stockpiles could be read; "
+                                "trying remaining resources in random order"
+                            )
                     target = target_list[target_index]
                     self.context.current_target = target
                     self._transition(
@@ -917,6 +1069,25 @@ class FarmingController:
             f"Army {army_number}/5 did not finish within {_MAX_ARMY_STEPS} steps; "
             f"last error: {last_error}"
         )
+
+    def _read_stockpiles(
+        self,
+        screenshot: Path,
+    ) -> dict[Resource, int | None]:
+        """Read the top-bar resource amounts from the current screenshot.
+
+        An unreadable frame or a missing OCR engine yields an empty dict so
+        the caller can fall back to the random resource choice.
+        """
+
+        color_frame = load_color_frame(screenshot)
+        if color_frame is None:
+            return {}
+        try:
+            return read_resource_bar(color_frame)
+        except RuntimeError as error:
+            self._log(f"Could not read the top-bar stockpiles: {error}")
+            return {}
 
     def _read_screen(
         self,

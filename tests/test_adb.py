@@ -1,13 +1,12 @@
-"""Unit tests for the ADB backend.
+"""Unit tests for the ADB input layer.
 
-The emulator is not required: the adb client is replaced by a fake that
-returns recorded bytes, so the parsing, coordinate mapping and timeout
-scaling can all be checked offline.
+The emulator is not required: the adb client is replaced by a fake, so
+the coordinate mapping, the connection recovery and the timeout scaling
+can all be checked offline.
 """
 
 from __future__ import annotations
 
-import struct
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,43 +16,9 @@ import numpy as np
 from rok_automation.game.adb import (
     AdbError,
     AdbInput,
-    AdbInterface,
     find_adb_device,
-    parse_screencap,
 )
 from rok_automation.game.interface import TimingConfig
-
-
-def make_raw_frame(width: int, height: int, value: int = 128) -> bytes:
-    """Build a raw ADB screencap payload (header + BGRA pixels)."""
-
-    header = struct.pack("<IIII", width, height, 1, 0)
-    pixels = np.full((height, width, 4), value, dtype=np.uint8)
-    return header + pixels.tobytes()
-
-
-class TestParseScreencap(unittest.TestCase):
-    """Verify the raw screencap payload is decoded correctly."""
-
-    def test_parses_dimensions_and_pixels(self) -> None:
-        data = make_raw_frame(1920, 1080, value=200)
-        frame = parse_screencap(data)
-        self.assertEqual(frame.shape, (1080, 1920, 3))
-        self.assertEqual(int(frame[0, 0, 0]), 200)
-
-    def test_rejects_truncated_payload(self) -> None:
-        with self.assertRaises(AdbError):
-            parse_screencap(b"\x00" * 8)
-
-    def test_rejects_short_pixel_data(self) -> None:
-        header = struct.pack("<IIII", 1920, 1080, 1, 0)
-        with self.assertRaises(AdbError):
-            parse_screencap(header + b"\x00" * 1000)
-
-    def test_rejects_empty_size(self) -> None:
-        header = struct.pack("<IIII", 0, 0, 1, 0)
-        with self.assertRaises(AdbError):
-            parse_screencap(header)
 
 
 class TestDeviceDiscovery(unittest.TestCase):
@@ -79,11 +44,11 @@ class TestDeviceDiscovery(unittest.TestCase):
                 find_adb_device("adb")
 
 
-class TestAdbInterface(unittest.TestCase):
+class TestAdbInput(unittest.TestCase):
     """Verify coordinate mapping and the timeout scaling."""
 
-    def _interface(self, guest=(1920, 1080)) -> AdbInterface:
-        interface = AdbInterface.__new__(AdbInterface)
+    def _interface(self, guest=(1920, 1080)) -> AdbInput:
+        interface = AdbInput.__new__(AdbInput)
         interface.adb_path = "adb"
         interface.serial = "emulator-5554"
         interface.screenshot_path = Path("artifacts/_test.png")
@@ -122,8 +87,7 @@ class TestAdbInterface(unittest.TestCase):
             return b""
 
         with patch("rok_automation.game.adb._run", side_effect=fake_run), \
-             patch("rok_automation.game.adb.time.sleep"), \
-             patch("rok_automation.game.adb.random.randint", return_value=0):
+             patch("rok_automation.game.adb.time.sleep"):
             # A synthetic 1280x720 screenshot file for the frame shape.
             import cv2
 
@@ -141,8 +105,8 @@ class TestAdbInterface(unittest.TestCase):
 class TestStaleConnectionRecovery(unittest.TestCase):
     """Verify a stale adb connection is re-established instead of hanging."""
 
-    def _interface(self, serial: str = "emulator-5554") -> AdbInterface:
-        interface = AdbInterface.__new__(AdbInterface)
+    def _interface(self, serial: str = "emulator-5554") -> AdbInput:
+        interface = AdbInput.__new__(AdbInput)
         interface.adb_path = "adb"
         interface.serial = serial
         interface.timing = TimingConfig()
@@ -175,23 +139,6 @@ class TestStaleConnectionRecovery(unittest.TestCase):
 
         self.assertEqual(calls, [["connect", "127.0.0.1:5555"]])
 
-    def test_a_stale_capture_is_retried_after_reconnecting(self) -> None:
-        interface = self._interface()
-        attempts = {"count": 0}
-
-        def fake_run(adb_path, serial, args, **kwargs):
-            attempts["count"] += 1
-            if attempts["count"] == 1:
-                raise AdbError("adb command timed out: exec-out screencap")
-            return make_raw_frame(1280, 720, value=90)
-
-        with patch("rok_automation.game.adb._run", side_effect=fake_run), \
-             patch.object(AdbInterface, "reconnect") as reconnect:
-            frame = interface._capture_raw()
-
-        reconnect.assert_called_once()
-        self.assertEqual(frame.shape, (720, 1280, 3))
-
     def test_a_stale_tap_is_retried_after_reconnecting(self) -> None:
         interface = self._interface()
         calls: list[list[str]] = []
@@ -214,7 +161,7 @@ class TestStaleConnectionRecovery(unittest.TestCase):
 class TestTimeoutScaling(unittest.TestCase):
     """Verify slower captures scale the screen-wait budgets."""
 
-    def test_desktop_path_does_not_scale(self) -> None:
+    def test_a_fast_capture_does_not_scale(self) -> None:
         timing = TimingConfig()
         self.assertEqual(timing.timeout_scale, 1.0)
 

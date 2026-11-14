@@ -9,7 +9,6 @@ description = "Desktop automation for Rise of Kingdoms in LDPlayer"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mss>=10.0",
     "numpy>=1.26",
     "opencv-python>=4.10",
     "rapidocr>=3.9.0",

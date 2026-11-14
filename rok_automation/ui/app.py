@@ -23,18 +23,21 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from rok_automation.automation.controller import DEFAULT_SESSION_SUMMARY_PATH
-from rok_automation.game.backends import (
-    BACKEND_ADB,
-    BACKEND_DESKTOP,
-    BACKEND_LABELS,
-    BACKEND_NATIVE,
+from rok_automation.automation.gmail_switcher import (
+    GMAIL_PROGRESS_UPDATED,
+    DEFAULT_GMAIL_STATE_PATH,
+    DEFAULT_SIGNED_IN_ACCOUNTS_PATH,
+    GmailAccountRegistry,
+    GmailIdentity,
+    GmailRotation,
 )
-from rok_automation.game.desktop import find_emulator_window
 from rok_automation.game.display import enable_dpi_awareness
 from rok_automation.game.emulators import families, get_family, select_family
 from rok_automation.game.flags import (
     DEFAULT_DAILY_REWARD_FLAG_PATH,
+    set_city_resources,
     set_daily_rewards,
+    set_forge_material,
 )
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.game.process import run_hidden
@@ -121,7 +124,7 @@ def _default_emulator_key() -> str:
     try:
         family, _ = select_family()
     except Exception:
-        return families()[0].key
+        return "mumu"
     return family.key
 
 
@@ -134,12 +137,16 @@ class ROKAutomationApp:
         session_summary_path: Path | None = DEFAULT_SESSION_SUMMARY_PATH,
         display_scale: float = 1.0,
         daily_reward_flag_path: Path | None = DEFAULT_DAILY_REWARD_FLAG_PATH,
+        gmail_state_path: Path | None = DEFAULT_GMAIL_STATE_PATH,
+        signed_in_accounts_path: Path | None = DEFAULT_SIGNED_IN_ACCOUNTS_PATH,
     ) -> None:
         hide_console_window()
         self.root = root
         self.session_summary_path = session_summary_path
         self.display_scale = display_scale
         self.daily_reward_flag_path = daily_reward_flag_path
+        self.gmail_state_path = gmail_state_path
+        self.signed_in_accounts = GmailAccountRegistry(signed_in_accounts_path)
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         # Wide enough for the whole layout: the two option cards side by
         # side need about 1160px, and the button row needs the rest.
@@ -162,14 +169,15 @@ class ROKAutomationApp:
         # Options state
         self.opt_farm = tk.BooleanVar(value=True)
         self.opt_switch_gmail = tk.BooleanVar(value=True)
-        self.opt_reset_gmail = tk.BooleanVar(value=False)
-        # How frames are captured: native (fastest), adb, or desktop window.
-        self.opt_backend = tk.StringVar(value=BACKEND_NATIVE)
+        self.gmail_account_entry = tk.StringVar()
         # Which emulator family to drive.
         self.opt_emulator = tk.StringVar(value=_default_emulator_key())
 
-        # Temporary / Planned options (not yet implemented)
+        # Additional automation options.
         self.opt_daily_reward = tk.BooleanVar(value=False)
+        self.opt_collect_city_resources = tk.BooleanVar(value=False)
+        self.opt_auto_forge = tk.BooleanVar(value=False)
+        self.opt_forge_material = tk.StringVar(value="Leather")
         self.opt_alliance = tk.BooleanVar(value=False)
         self.opt_train_troops = tk.BooleanVar(value=False)
 
@@ -238,7 +246,7 @@ class ROKAutomationApp:
             foreground=[("active", ModernColors.TEXT_PRIMARY)],
         )
 
-        # Combobox styles (the capture backend picker)
+        # Combobox styles (the emulator picker)
         style.configure(
             "Dark.TCombobox",
             background=ModernColors.BG_CARD_LIGHT,
@@ -531,29 +539,7 @@ class ROKAutomationApp:
         )
         cb_switch_gmail.pack(fill=tk.X, pady=1)
 
-        lbl_backend = tk.Label(
-            parent,
-            text="Capture Backend (how game frames are read)",
-            font=("Segoe UI", 9),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_MUTED,
-        )
-        lbl_backend.pack(anchor="w", pady=(6, 1))
-
-        self.backend_display = tk.StringVar(value=BACKEND_LABELS[BACKEND_NATIVE])
-        combo_backend = ttk.Combobox(
-            parent,
-            textvariable=self.backend_display,
-            state="readonly",
-            values=[
-                BACKEND_LABELS[backend]
-                for backend in (BACKEND_NATIVE, BACKEND_ADB, BACKEND_DESKTOP)
-            ],
-            style="Dark.TCombobox",
-            font=("Segoe UI", 9),
-        )
-        combo_backend.pack(fill=tk.X, pady=1)
-        combo_backend.bind("<<ComboboxSelected>>", self._on_backend_changed)
+        self._build_signed_in_accounts_panel(parent)
 
         lbl_emulator = tk.Label(
             parent,
@@ -575,20 +561,6 @@ class ROKAutomationApp:
         )
         combo_emulator.pack(fill=tk.X, pady=1)
         combo_emulator.bind("<<ComboboxSelected>>", self._on_emulator_changed)
-
-        cb_reset = tk.Checkbutton(
-            parent,
-            text="Reset Gmail Run Progress (Start fresh rotation from first Gmail)",
-            variable=self.opt_reset_gmail,
-            font=("Segoe UI", 9),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_PRIMARY,
-            selectcolor=ModernColors.BG_DARK,
-            activebackground=ModernColors.BG_CARD,
-            activeforeground=ModernColors.TEXT_PRIMARY,
-            anchor="w",
-        )
-        cb_reset.pack(fill=tk.X, pady=1)
 
         # Quick Utility Diagnostics Tools
         tools_lbl = tk.Label(
@@ -637,9 +609,9 @@ class ROKAutomationApp:
         )
         btn_detect.pack(side=tk.LEFT, padx=(0, 4))
 
-        btn_diag = tk.Button(
+        btn_stock = tk.Button(
             tools_box,
-            text="📋 Diagnose Window",
+            text="💰 Check Stockpiles",
             font=("Segoe UI", 8),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
@@ -648,11 +620,275 @@ class ROKAutomationApp:
             bd=1,
             relief=tk.SOLID,
             cursor="hand2",
-            command=self.run_diagnose_window,
+            command=self.run_check_stockpiles,
             padx=8,
             pady=3,
         )
-        btn_diag.pack(side=tk.LEFT)
+        btn_stock.pack(side=tk.LEFT, padx=(4, 0))
+
+    def _build_signed_in_accounts_panel(self, parent: tk.Widget) -> None:
+        """Build the persistent Gmail account list and progress controls."""
+
+        panel = tk.Frame(
+            parent,
+            bg=ModernColors.BG_CARD_LIGHT,
+            highlightthickness=1,
+            highlightbackground=ModernColors.BG_BORDER,
+            padx=8,
+            pady=7,
+        )
+        panel.pack(fill=tk.X, pady=(8, 6))
+
+        header = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
+        header.pack(fill=tk.X, pady=(0, 5))
+        tk.Label(
+            header,
+            text="Signed-in accounts",
+            font=("Segoe UI", 9, "bold"),
+            bg=ModernColors.BG_CARD_LIGHT,
+            fg=ModernColors.TEXT_PRIMARY,
+        ).pack(side=tk.LEFT)
+        self.btn_reset_gmail_progress = tk.Button(
+            header,
+            text="Reset Gmail Run Progress",
+            font=("Segoe UI", 8, "bold"),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.ACCENT_AMBER,
+            activebackground=ModernColors.BG_BORDER,
+            activeforeground=ModernColors.ACCENT_AMBER,
+            bd=1,
+            relief=tk.SOLID,
+            cursor="hand2",
+            command=self.reset_gmail_run_progress,
+            padx=6,
+            pady=2,
+        )
+        self.btn_reset_gmail_progress.pack(side=tk.RIGHT)
+
+        add_row = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
+        add_row.pack(fill=tk.X, pady=(0, 6))
+        self.entry_gmail_account = tk.Entry(
+            add_row,
+            textvariable=self.gmail_account_entry,
+            font=("Segoe UI", 9),
+            bg=ModernColors.BG_DARK,
+            fg=ModernColors.TEXT_PRIMARY,
+            insertbackground=ModernColors.TEXT_PRIMARY,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=ModernColors.BG_BORDER,
+            highlightcolor=ModernColors.ACCENT_BLUE,
+        )
+        self.entry_gmail_account.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.entry_gmail_account.bind("<Return>", self._add_signed_in_account)
+        self.btn_add_gmail_account = tk.Button(
+            add_row,
+            text="Add",
+            font=("Segoe UI", 8, "bold"),
+            bg=ModernColors.ACCENT_BLUE,
+            fg="#ffffff",
+            activebackground=ModernColors.ACCENT_BLUE_HOVER,
+            activeforeground="#ffffff",
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._add_signed_in_account,
+            padx=10,
+            pady=3,
+        )
+        self.btn_add_gmail_account.pack(side=tk.LEFT, padx=(5, 0))
+
+        list_box = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
+        list_box.pack(fill=tk.X)
+        self.signed_in_accounts_canvas = tk.Canvas(
+            list_box,
+            height=112,
+            bg=ModernColors.BG_CARD_LIGHT,
+            highlightthickness=0,
+            bd=0,
+        )
+        scrollbar = tk.Scrollbar(
+            list_box,
+            orient=tk.VERTICAL,
+            command=self.signed_in_accounts_canvas.yview,
+        )
+        self.signed_in_accounts_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.signed_in_accounts_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.signed_in_accounts_rows = tk.Frame(
+            self.signed_in_accounts_canvas,
+            bg=ModernColors.BG_CARD_LIGHT,
+        )
+        self._signed_in_accounts_window = self.signed_in_accounts_canvas.create_window(
+            (0, 0),
+            anchor="nw",
+            window=self.signed_in_accounts_rows,
+        )
+        self.signed_in_accounts_rows.bind(
+            "<Configure>", self._resize_signed_in_accounts_scroll_region
+        )
+        self.signed_in_accounts_canvas.bind(
+            "<Configure>", self._resize_signed_in_accounts_rows
+        )
+        self.refresh_signed_in_accounts()
+
+    def _resize_signed_in_accounts_scroll_region(self, _event: object = None) -> None:
+        self.signed_in_accounts_canvas.configure(
+            scrollregion=self.signed_in_accounts_canvas.bbox("all")
+        )
+
+    def _resize_signed_in_accounts_rows(self, event: tk.Event[tk.Misc]) -> None:
+        self.signed_in_accounts_canvas.itemconfigure(
+            self._signed_in_accounts_window,
+            width=event.width,
+        )
+
+    def _add_signed_in_account(self, _event: object = None) -> None:
+        """Save a manually supplied Gmail address as an unverified account."""
+
+        value = self.gmail_account_entry.get()
+        try:
+            account = self.signed_in_accounts.add_manual(value)
+        except OSError as exc:
+            self.log_error(f"Could not save the signed-in Gmail list: {exc}")
+            return
+        if account is None:
+            self.log_warning("Enter a Gmail address before adding it.")
+            return
+        self.gmail_account_entry.set("")
+        self.refresh_signed_in_accounts()
+        self.log_info(
+            f"Added {account.identity.label()} as unknown until verified in-game."
+        )
+
+    def _remove_signed_in_account(self, identity: GmailIdentity) -> None:
+        try:
+            removed = self.signed_in_accounts.remove(identity)
+        except OSError as exc:
+            self.log_error(f"Could not update the signed-in Gmail list: {exc}")
+            return
+        if removed:
+            self.refresh_signed_in_accounts()
+            self.log_info(f"Removed {identity.label()} from the signed-in list.")
+
+    def reset_gmail_run_progress(self) -> None:
+        """Clear saved Gmail completion status while retaining the account list."""
+
+        if self._is_running:
+            self.log_warning("Stop the automation before resetting Gmail progress.")
+            return
+        try:
+            GmailRotation.reset_progress(self.gmail_state_path)
+        except OSError as exc:
+            self.log_error(f"Could not reset Gmail run progress: {exc}")
+            return
+        self.refresh_signed_in_accounts()
+        self.log_info("Gmail run progress reset. All signed-in accounts are pending.")
+
+    def _toggle_gmail_progress(self, identity: GmailIdentity) -> None:
+        """Toggle the saved completion mark while automation is stopped."""
+        if self._is_running:
+            return
+        try:
+            rotation = GmailRotation.load(self.gmail_state_path, include_completed=True)
+            completed = not rotation.is_farmed(identity)
+            rotation.set_manual_farmed(identity, completed)
+        except OSError as exc:
+            self.log_error(f"Could not update Gmail account progress: {exc}")
+            return
+        self.refresh_signed_in_accounts()
+        self.log_info(f"Marked {identity.label()} as {'farmed' if completed else 'pending'}.")
+
+    def refresh_signed_in_accounts(self) -> None:
+        """Render saved accounts with their verification and run-progress state."""
+
+        for child in self.signed_in_accounts_rows.winfo_children():
+            child.destroy()
+        try:
+            accounts = self.signed_in_accounts.load()
+            farmed = GmailRotation.farmed_from_path(self.gmail_state_path)
+        except OSError as exc:
+            self.log_error(f"Could not read Gmail account progress: {exc}")
+            accounts, farmed = [], []
+
+        if not accounts:
+            tk.Label(
+                self.signed_in_accounts_rows,
+                text="(empty)",
+                font=("Segoe UI", 9, "italic"),
+                bg=ModernColors.BG_CARD_LIGHT,
+                fg=ModernColors.TEXT_MUTED,
+                anchor="w",
+            ).pack(fill=tk.X, padx=3, pady=4)
+            self._resize_signed_in_accounts_scroll_region()
+            return
+
+        for account in accounts:
+            row = tk.Frame(
+                self.signed_in_accounts_rows,
+                bg=ModernColors.BG_CARD_LIGHT,
+            )
+            row.pack(fill=tk.X, pady=1)
+            completed = any(account.identity.matches(identity) for identity in farmed)
+            tk.Button(
+                row,
+                text="✓" if completed else "✕",
+                font=("Segoe UI", 10, "bold"),
+                bg=ModernColors.BG_CARD_LIGHT,
+                fg=(
+                    ModernColors.ACCENT_GREEN
+                    if completed
+                    else ModernColors.ACCENT_RED
+                ),
+                width=2,
+                bd=0,
+                relief=tk.FLAT,
+                activebackground=ModernColors.BG_CARD_LIGHT,
+                cursor="hand2",
+                state=tk.DISABLED if self._is_running else tk.NORMAL,
+                disabledforeground=(ModernColors.ACCENT_GREEN if completed else ModernColors.ACCENT_RED),
+                command=lambda identity=account.identity: self._toggle_gmail_progress(identity),
+            ).pack(side=tk.LEFT)
+            tk.Label(
+                row,
+                text=account.identity.label(),
+                font=("Segoe UI", 8),
+                bg=ModernColors.BG_CARD_LIGHT,
+                fg=ModernColors.TEXT_PRIMARY,
+                anchor="w",
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Label(
+                row,
+                text="verified" if account.verified else "unknown",
+                font=("Segoe UI", 7, "bold"),
+                bg=("#064e3b" if account.verified else ModernColors.BG_BORDER),
+                fg=(
+                    ModernColors.ACCENT_GREEN
+                    if account.verified
+                    else ModernColors.TEXT_SECONDARY
+                ),
+                padx=4,
+                pady=1,
+            ).pack(side=tk.LEFT, padx=(4, 4))
+            tk.Button(
+                row,
+                text="Remove",
+                font=("Segoe UI", 7),
+                bg=ModernColors.BG_CARD,
+                fg=ModernColors.TEXT_SECONDARY,
+                activebackground=ModernColors.BG_BORDER,
+                activeforeground=ModernColors.TEXT_PRIMARY,
+                bd=1,
+                relief=tk.SOLID,
+                cursor="hand2",
+                command=lambda identity=account.identity: self._remove_signed_in_account(
+                    identity
+                ),
+                padx=4,
+                pady=1,
+                state=(tk.DISABLED if self._is_running else tk.NORMAL),
+            ).pack(side=tk.RIGHT)
+        self._resize_signed_in_accounts_scroll_region()
 
     def _build_planned_options_card(self, parent: tk.Widget) -> None:
         """Build the section for temporary & planned feature option toggles."""
@@ -670,7 +906,7 @@ class ROKAutomationApp:
 
         badge = tk.Label(
             header_row,
-            text="Modular / Future",
+            text="Optional",
             font=("Segoe UI", 8),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.ACCENT_PURPLE,
@@ -681,7 +917,7 @@ class ROKAutomationApp:
 
         desc_lbl = tk.Label(
             parent,
-            text="Enable upcoming features (temporary placeholders for future routines):",
+            text="Configure optional routines to run for each RoK account:",
             font=("Segoe UI", 8),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_MUTED,
@@ -690,26 +926,34 @@ class ROKAutomationApp:
         )
         desc_lbl.pack(fill=tk.X, pady=(0, 6))
 
-        # List of upcoming option toggles
-        planned_options = [
+        optional_features = [
             (
                 "Collect Daily Rewards",
                 self.opt_daily_reward,
                 "Claim daily login gifts, quest rewards, and daily VIP points & free chest",
+                True,
+            ),
+            (
+                "Collect City Resources",
+                self.opt_collect_city_resources,
+                "Collect one ready icon for Food, Wood, Stone, and Gold after a small zoom out",
+                True,
             ),
             (
                 "Alliance Help & Tech",
                 self.opt_alliance,
                 "Auto-click alliance help hand and donate to recommended technology",
+                False,
             ),
             (
                 "Auto Train Troops",
                 self.opt_train_troops,
                 "Queue troop training in Infantry, Cavalry, Archery, and Siege camps",
+                False,
             ),
         ]
 
-        for title, var, tooltip in planned_options:
+        for title, var, tooltip, is_ready in optional_features:
             row = tk.Frame(parent, bg=ModernColors.BG_CARD)
             row.pack(fill=tk.X, pady=1)
 
@@ -728,7 +972,6 @@ class ROKAutomationApp:
             )
             cb.pack(side=tk.LEFT)
 
-            is_ready = (title == "Collect Daily Rewards")
             tag = tk.Label(
                 row,
                 text="[Ready]" if is_ready else "[Planned]",
@@ -737,6 +980,53 @@ class ROKAutomationApp:
                 fg=ModernColors.ACCENT_GREEN if is_ready else ModernColors.ACCENT_PURPLE,
             )
             tag.pack(side=tk.LEFT, padx=4)
+
+        forge_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
+        forge_row.pack(fill=tk.X, pady=(5, 1))
+        tk.Checkbutton(
+            forge_row,
+            text="Auto Forge Material",
+            variable=self.opt_auto_forge,
+            font=("Segoe UI", 9),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.TEXT_PRIMARY,
+            selectcolor=ModernColors.BG_DARK,
+            activebackground=ModernColors.BG_CARD,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            command=self._on_auto_forge_toggled,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            forge_row,
+            text="[Ready]",
+            font=("Segoe UI", 8),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.ACCENT_GREEN,
+        ).pack(side=tk.LEFT, padx=4)
+
+        forge_material_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
+        forge_material_row.pack(fill=tk.X, pady=(0, 3))
+        tk.Label(
+            forge_material_row,
+            text="Forge material",
+            font=("Segoe UI", 8),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.TEXT_MUTED,
+        ).pack(side=tk.LEFT)
+        self.combo_forge_material = ttk.Combobox(
+            forge_material_row,
+            textvariable=self.opt_forge_material,
+            values=("Leather", "Iron", "Wood", "Bone"),
+            state="readonly",
+            width=13,
+            style="Dark.TCombobox",
+            font=("Segoe UI", 8),
+        )
+        self.combo_forge_material.pack(side=tk.LEFT, padx=(8, 0))
+        self.combo_forge_material.bind(
+            "<<ComboboxSelected>>",
+            self._on_forge_material_changed,
+        )
 
         # Temporary Quick Action Buttons (for testing upcoming modules)
         action_lbl = tk.Label(
@@ -974,15 +1264,6 @@ class ROKAutomationApp:
         self.root.clipboard_append(content)
         self.log_info("Full console output copied to clipboard.")
 
-    def selected_backend(self) -> str:
-        """Return the backend value behind the displayed label."""
-
-        display = self.backend_display.get()
-        for backend, label in BACKEND_LABELS.items():
-            if label == display:
-                return backend
-        return BACKEND_NATIVE
-
     def selected_emulator(self) -> str:
         """Return the emulator family key behind the displayed label."""
 
@@ -1011,98 +1292,75 @@ class ROKAutomationApp:
                 "Install it, or pick another emulator."
             )
 
-    def check_emulator_connection(self) -> bool:
-        """Check if the emulator is reachable and update the status badge.
+        self._check_adb_ready()
 
-        The ADB and native backends count the emulator as connected even
-        when its window is minimised or covered, because the frames come
-        from the emulator itself rather than from the screen.
-        """
+    def _check_adb_ready(self) -> None:
+        """Report whether the emulator accepts input over ADB."""
 
-        backend = self.selected_backend()
-        if backend in (BACKEND_ADB, BACKEND_NATIVE):
-            try:
-                from rok_automation.game.adb import (
-                    find_adb_device,
-                    find_adb_executable,
-                )
-
-                device = find_adb_device(find_adb_executable())
-            except Exception as exc:
-                self.emulator_status_badge.config(
-                    text=f"Emulator: ADB unavailable ({exc})"[:60],
-                    fg=ModernColors.ACCENT_RED,
-                    bg="#450a0a",
-                )
-                return False
-            self.emulator_status_badge.config(
-                text=f"Emulator: Connected ({backend.upper()} {device})",
-                fg=ModernColors.ACCENT_GREEN,
-                bg="#064e3b",
-            )
-            return True
-
-        try:
-            family = get_family(self.selected_emulator())
-        except Exception:
-            family = None
-        terms = family.window_terms if family is not None else ("ldplayer",)
-        classes = family.window_classes if family is not None else ()
-        window = find_emulator_window(terms, classes)
-        if window is not None:
-            self.emulator_status_badge.config(
-                text=f"Emulator: Connected ({window.title})",
-                fg=ModernColors.ACCENT_GREEN,
-                bg="#064e3b",
-            )
-            return True
-        else:
-            self.emulator_status_badge.config(
-                text="Emulator: Disconnected (No LDPlayer found)",
-                fg=ModernColors.ACCENT_RED,
-                bg="#450a0a",
-            )
-            return False
-
-    def _on_backend_changed(self, _event: object = None) -> None:
-        """Explain the selected backend and check the emulator is reachable."""
-
-        backend = self.selected_backend()
-        self.opt_backend.set(backend)
-
-        if backend == BACKEND_DESKTOP:
-            self.log_info(
-                "Desktop backend: the LDPlayer window must stay visible and "
-                "uncovered. Frames are read from the screen."
-            )
-            return
-
-        if backend == BACKEND_NATIVE:
-            self.log_info(
-                "Native backend: frames are read from the emulator's own "
-                "renderer (about 20 ms per frame), so the LDPlayer window may "
-                "be minimised, hidden or covered. Input is sent over ADB."
-            )
-        else:
-            self.log_info(
-                "ADB backend: the LDPlayer window may be minimised, hidden or "
-                "covered while farming, but every frame is transferred over "
-                "ADB and costs about a quarter of a second."
-            )
+        self.log_info("MuMu uses ADB for screenshots and input." if self.selected_emulator() == "mumu" else "LDPlayer uses native capture and ADB input.")
 
         try:
             from rok_automation.game.adb import find_adb_device, find_adb_executable
 
-            adb_path = find_adb_executable()
-            device = find_adb_device(adb_path)
+            family = get_family(self.selected_emulator())
+            adb_path = find_adb_executable(family)
+            preferred = family.preferred_serials()
+            if family.key == "mumu":
+                if not preferred:
+                    raise RuntimeError("No running MuMu instance was found")
+                from rok_automation.game.adb import _run_global
+                _run_global(adb_path, ["connect", preferred[0]], timeout=25)
+            device = find_adb_device(adb_path, preferred=preferred)
+            if family.key == "mumu" and device not in preferred:
+                raise RuntimeError("MuMu is not connected to ADB")
         except Exception as exc:
             self.log_error(
                 f"Input over ADB is not available: {exc}. Enable 'ADB "
-                "debugging' with a local connection in the LDPlayer settings "
+                "debugging' with a local connection in the emulator settings "
                 "and restart the emulator."
             )
             return
         self.log_success(f"ADB ready: {device} via {adb_path}")
+
+    def check_emulator_connection(self) -> bool:
+        """Check if the emulator is reachable and update the status badge.
+
+        Frames come from the emulator's own renderer, so the emulator
+        counts as connected even when its window is minimised or covered.
+        The ADB connection is checked too, because the input still travels
+        through the Android input pipeline.
+        """
+
+        try:
+            from rok_automation.game.adb import (
+                find_adb_device,
+                find_adb_executable,
+            )
+
+            family = get_family(self.selected_emulator())
+            adb_path = find_adb_executable(family)
+            preferred = family.preferred_serials()
+            if family.key == "mumu":
+                if not preferred:
+                    raise RuntimeError("No running MuMu instance was found")
+                from rok_automation.game.adb import _run_global
+                _run_global(adb_path, ["connect", preferred[0]], timeout=25)
+            device = find_adb_device(adb_path, preferred=preferred)
+            if family.key == "mumu" and device not in preferred:
+                raise RuntimeError("MuMu is not connected to ADB")
+        except Exception:
+            self.emulator_status_badge.config(
+                text="No emulator found",
+                fg=ModernColors.ACCENT_RED,
+                bg="#450a0a",
+            )
+            return False
+        self.emulator_status_badge.config(
+            text=f"Emulator: Connected ({device})",
+            fg=ModernColors.ACCENT_GREEN,
+            bg="#064e3b",
+        )
+        return True
 
     def _on_planned_option_toggled(self, title: str, var: tk.BooleanVar) -> None:
         """Handle toggling of optional / future features."""
@@ -1131,10 +1389,60 @@ class ROKAutomationApp:
             )
             return
 
+        if title == "Collect City Resources":
+            enabled = bool(var.get())
+            try:
+                set_city_resources(enabled)
+            except OSError as exc:
+                self.log_error(f"Could not update city resource collection: {exc}")
+                return
+            self.log(
+                f"[Option] {title} set to {state_str}. "
+                + (
+                    "Ready city icons will be collected from the next account."
+                    if enabled
+                    else "No more city resources will be collected."
+                ),
+                tag="info" if enabled else "warning",
+            )
+            return
+
         self.log(
             f"[Option] {title} set to {state_str}. "
             f"(Note: Feature module is prepared for a future update and will be executed when implemented)",
             tag="planned",
+        )
+
+    def _on_auto_forge_toggled(self) -> None:
+        """Persist the selected forge material for the worker process."""
+
+        enabled = bool(self.opt_auto_forge.get())
+        try:
+            set_forge_material(self.opt_forge_material.get() if enabled else None)
+        except OSError as exc:
+            self.log_error(f"Could not update the forge option: {exc}")
+            return
+        state = "ENABLED" if enabled else "DISABLED"
+        detail = (
+            f"Next ready forge will produce {self.opt_forge_material.get()}."
+            if enabled
+            else "No more forge production will be started."
+        )
+        self.log(f"[Option] Auto Forge Material set to {state}. {detail}")
+
+    def _on_forge_material_changed(self, _event: object = None) -> None:
+        """Apply a changed material immediately when automatic forging is on."""
+
+        if not self.opt_auto_forge.get():
+            return
+        try:
+            set_forge_material(self.opt_forge_material.get())
+        except OSError as exc:
+            self.log_error(f"Could not select forge material: {exc}")
+            return
+        self.log_info(
+            f"Forge material changed to {self.opt_forge_material.get()}; "
+            "it takes effect from the next account."
         )
 
     def trigger_planned_feature_test(self, feature_name: str) -> None:
@@ -1214,8 +1522,9 @@ class ROKAutomationApp:
             )
 
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
-        cmd.extend(["--backend", self.selected_backend()])
         cmd.extend(["--emulator", self.selected_emulator()])
+        if self.gmail_state_path is not None:
+            cmd.extend(["--gmail-state", str(self.gmail_state_path)])
         if farm_enabled:
             cmd.append("--farm")
             # The reward option is handed over through the flag file, so
@@ -1225,16 +1534,20 @@ class ROKAutomationApp:
                     bool(self.opt_daily_reward.get()),
                     self.daily_reward_flag_path,
                 )
+                set_city_resources(bool(self.opt_collect_city_resources.get()))
+                set_forge_material(
+                    self.opt_forge_material.get()
+                    if self.opt_auto_forge.get()
+                    else None
+                )
             except OSError as exc:
-                self.log_error(f"Could not apply the daily reward option: {exc}")
+                self.log_error(f"Could not apply automation options: {exc}")
         elif self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
         if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
             cmd.append("--no-switch-gmail")
         if scope == "rok":
             cmd.append("--current-rok-only")
-        if scope == "all" and self.opt_reset_gmail.get():
-            cmd.append("--reset-gmail-run")
 
         self.log_info(f"Starting automation with command: {' '.join(cmd)}")
         self._start_worker(cmd)
@@ -1297,8 +1610,6 @@ class ROKAutomationApp:
             "-m",
             "rok_automation",
             "--screenshot",
-            "--backend",
-            self.selected_backend(),
             "--emulator",
             self.selected_emulator(),
         ]
@@ -1316,21 +1627,27 @@ class ROKAutomationApp:
             "-m",
             "rok_automation",
             "--detect-screen",
-            "--backend",
-            self.selected_backend(),
             "--emulator",
             self.selected_emulator(),
         ]
         self.log_info("Executing screen detection diagnostic...")
         self._launch_utility_command(cmd)
 
-    def run_diagnose_window(self) -> None:
-        """Run window hierarchy diagnostic command."""
+    def run_check_stockpiles(self) -> None:
+        """Run the stockpile diagnostic: top-bar amounts + farming choice."""
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--diagnose-window"]
-        self.log_info("Diagnosing LDPlayer window structure...")
+        cmd = [
+            _get_python_cli_executable(),
+            "-u",
+            "-m",
+            "rok_automation",
+            "--check-stockpiles",
+            "--emulator",
+            self.selected_emulator(),
+        ]
+        self.log_info("Reading the top-bar stockpiles...")
         self._launch_utility_command(cmd)
 
     def _launch_utility_command(self, cmd: list[str]) -> None:
@@ -1371,8 +1688,12 @@ class ROKAutomationApp:
                 if line is None:
                     # Sentinel received: process finished
                     self._set_running_state(False)
+                    self.refresh_signed_in_accounts()
                     self.check_emulator_connection()
                 else:
+                    if GMAIL_PROGRESS_UPDATED in line:
+                        self.refresh_signed_in_accounts()
+                        continue
                     self.log(line)
                     # Live tracking of dispatched resource armies
                     match = re.search(
@@ -1593,6 +1914,9 @@ class ROKAutomationApp:
             self.btn_start.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
             self.btn_farm_current_gmail.config(state=tk.DISABLED)
             self.btn_farm_current_rok.config(state=tk.DISABLED)
+            self.btn_reset_gmail_progress.config(state=tk.DISABLED)
+            self.btn_add_gmail_account.config(state=tk.DISABLED)
+            self.entry_gmail_account.config(state=tk.DISABLED)
             self.btn_stop.config(state=tk.NORMAL, bg=ModernColors.ACCENT_RED)
             self.btn_pause.config(state=tk.NORMAL)
             self.lbl_run_state.config(
@@ -1603,6 +1927,9 @@ class ROKAutomationApp:
             self.btn_start.config(state=tk.NORMAL, bg=ModernColors.ACCENT_GREEN)
             self.btn_farm_current_gmail.config(state=tk.NORMAL)
             self.btn_farm_current_rok.config(state=tk.NORMAL)
+            self.btn_reset_gmail_progress.config(state=tk.NORMAL)
+            self.btn_add_gmail_account.config(state=tk.NORMAL)
+            self.entry_gmail_account.config(state=tk.NORMAL)
             self.btn_stop.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
             self.btn_pause.config(state=tk.DISABLED)
             # Reset the pause button so the next run starts unpaused.
@@ -1614,6 +1941,7 @@ class ROKAutomationApp:
             )
             self.lbl_run_state.config(text="● Idle", fg=ModernColors.TEXT_MUTED)
             self.console_line_count.config(text="(Ready)", fg=ModernColors.TEXT_MUTED)
+        self.refresh_signed_in_accounts()
 
     def on_close(self) -> None:
         """Handle application close event."""

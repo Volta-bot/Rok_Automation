@@ -328,7 +328,7 @@ class DailyRewardClaimer:
             self._log("VIP daily points already claimed today or no popup shown.")
 
     def _dismiss_vip_reward_popup(self, size: tuple[int, int]) -> None:
-        """Dismiss a VIP reward popup at a fixed point without click jitter."""
+        """Dismiss a VIP reward popup at a fixed point."""
 
         w, h = size
         dismiss_pt = (
@@ -338,12 +338,7 @@ class DailyRewardClaimer:
             1,
         )
         screenshot = self.game.screenshot()
-        try:
-            self.game.click(dismiss_pt, screenshot, offset_range=0)
-        except TypeError:
-            # Lightweight test and alternate game interfaces may not expose
-            # LDPlayerInterface's optional offset_range argument.
-            self.game.click(dismiss_pt, screenshot)
+        self.game.click(dismiss_pt, screenshot)
 
     def _locate_wooden_nhan(
         self,

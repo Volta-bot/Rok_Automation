@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator
@@ -160,6 +161,28 @@ def random_preferred_resource(
         weights=_RANDOM_RESOURCE_WEIGHTS,
         k=1,
     )[0]
+
+
+def lowest_stockpile_resource(
+    amounts: Mapping[Resource, int | None],
+) -> Resource | None:
+    """Return the resource with the smallest known stockpile amount.
+
+    ``None`` entries (unreadable labels) are ignored. Returns ``None``
+    when nothing could be read at all, so the caller can fall back to
+    its random choice. A tie favours Gold, matching the random
+    fallback's preference.
+    """
+
+    order = list(Resource)
+    known = [
+        (amount, order.index(resource), resource)
+        for resource, amount in amounts.items()
+        if amount is not None
+    ]
+    if not known:
+        return None
+    return min(known)[2]
 
 
 def search_plan(

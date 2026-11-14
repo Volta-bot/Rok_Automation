@@ -1,7 +1,6 @@
-"""Unit tests for the shared input helpers.
+"""Unit tests for shared swipe timing helpers.
 
-These cover the click jitter and the swipe timing that both the ADB and
-the desktop backends rely on.
+These cover swipe timing that both the ADB and desktop backends rely on.
 """
 
 from __future__ import annotations
@@ -9,46 +8,6 @@ from __future__ import annotations
 import unittest
 
 from rok_automation.game.adb import swipe_duration_ms
-from rok_automation.game.interface import jittered_click_point
-
-
-class TestJitteredClickPoint(unittest.TestCase):
-    """Verify the click point stays inside the control it belongs to."""
-
-    def test_stays_inside_the_bounds(self) -> None:
-        for _ in range(50):
-            x, y = jittered_click_point((100, 200, 80, 40), (720, 1280), 3)
-            self.assertGreaterEqual(x, 100)
-            self.assertLess(x, 180)
-            self.assertGreaterEqual(y, 200)
-            self.assertLess(y, 240)
-
-    def test_never_leaves_the_frame(self) -> None:
-        x, y = jittered_click_point((0, 0, 4, 4), (720, 1280), 3)
-        self.assertGreaterEqual(x, 0)
-        self.assertGreaterEqual(y, 0)
-
-    def test_falls_back_to_the_centre_without_a_jitter(self) -> None:
-        x, y = jittered_click_point((100, 200, 80, 40), (720, 1280), 0)
-        self.assertEqual((x, y), (140, 220))
-
-    def test_a_tiny_control_still_gets_a_single_pixel_offset(self) -> None:
-        for _ in range(50):
-            x, y = jittered_click_point((10, 10, 2, 2), (720, 1280), 3)
-            self.assertGreaterEqual(x, 10)
-            self.assertLess(x, 12)
-            self.assertGreaterEqual(y, 10)
-            self.assertLess(y, 12)
-
-    def test_a_control_at_the_frame_edge_stays_inside(self) -> None:
-        for _ in range(50):
-            x, y = jittered_click_point((0, 0, 6, 6), (720, 1280), 3)
-            self.assertGreaterEqual(x, 0)
-            self.assertLess(x, 6)
-            self.assertGreaterEqual(y, 0)
-            self.assertLess(y, 6)
-
-
 class TestSwipeDuration(unittest.TestCase):
     """Verify a drag is stretched so the game reads it as a drag."""
 

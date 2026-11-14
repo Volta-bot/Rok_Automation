@@ -37,6 +37,8 @@ from rok_automation.vision.screen import ScreenDetector, load_color_frame
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GMAIL_STATE_PATH = _PROJECT_ROOT / "state/gmail_rotation.json"
+DEFAULT_SIGNED_IN_ACCOUNTS_PATH = _PROJECT_ROOT / "state/signed_in_gmail_accounts.json"
+GMAIL_PROGRESS_UPDATED = "[GMAIL_PROGRESS_UPDATED]"
 
 _SWITCH_TIMEOUT = 120.0
 _LOGIN_UI_TIMEOUT = 60.0
@@ -130,6 +132,156 @@ class GmailIdentity:
         return identity if identity.email or identity.uid else None
 
 
+@dataclass(frozen=True)
+class SignedInGmailAccount:
+    """A Gmail account shown in the UI's persistent signed-in list."""
+
+    identity: GmailIdentity
+    verified: bool = False
+
+
+class GmailAccountRegistry:
+    """Persist accounts supplied manually or observed in Lilith's account UI.
+
+    A manual entry stays in this list even when it cannot be found in the
+    game.  Once the game exposes the same identity, it is upgraded to a
+    verified entry and any UID read from the game is retained.
+    """
+
+    def __init__(
+        self,
+        path: Path | None = DEFAULT_SIGNED_IN_ACCOUNTS_PATH,
+    ) -> None:
+        self.path = path
+
+    def load(self) -> list[SignedInGmailAccount]:
+        if self.path is None or not self.path.exists():
+            return []
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        raw_accounts = data.get("accounts", []) if isinstance(data, dict) else []
+        if not isinstance(raw_accounts, list):
+            return []
+        accounts: list[SignedInGmailAccount] = []
+        for raw in raw_accounts:
+            if not isinstance(raw, dict):
+                continue
+            identity = GmailIdentity.from_dict(raw)
+            if identity is None:
+                continue
+            accounts.append(
+                SignedInGmailAccount(
+                    identity=identity,
+                    verified=bool(raw.get("verified", False)),
+                )
+            )
+        return accounts
+
+    def add_manual(self, value: str) -> SignedInGmailAccount | None:
+        """Add a user-entered address as unknown until the game verifies it."""
+
+        address = value.strip()
+        if not address:
+            return None
+        return self._upsert(GmailIdentity(email=address), verified=False)
+
+    def verify(self, identity: GmailIdentity) -> SignedInGmailAccount | None:
+        """Record an account positively observed in the game."""
+
+        if not identity.email and not identity.uid:
+            return None
+        return self._upsert(identity, verified=True)
+
+    def verify_many(self, identities: list[GmailIdentity]) -> None:
+        for identity in identities:
+            try:
+                self.verify(identity)
+            except OSError:
+                # The farming rotation remains authoritative if the optional
+                # UI registry cannot be written at this instant.
+                continue
+
+    def remove(self, identity: GmailIdentity) -> bool:
+        accounts = self.load()
+        kept = [
+            account
+            for account in accounts
+            if not self._matches(account.identity, identity)
+        ]
+        if len(kept) == len(accounts):
+            return False
+        self._save(kept)
+        return True
+
+    def _upsert(
+        self,
+        identity: GmailIdentity,
+        *,
+        verified: bool,
+    ) -> SignedInGmailAccount:
+        accounts = self.load()
+        for index, account in enumerate(accounts):
+            if not self._matches(account.identity, identity):
+                continue
+            merged = GmailIdentity(
+                # Prefer the game's reading when it verifies an entry: it
+                # corrects harmless manual typos such as gmai1.com.
+                email=(
+                    identity.email
+                    if verified and identity.email
+                    else account.identity.email
+                )
+                or identity.email,
+                uid=identity.uid or account.identity.uid,
+            )
+            updated = SignedInGmailAccount(
+                identity=merged,
+                verified=account.verified or verified,
+            )
+            accounts[index] = updated
+            self._save(accounts)
+            return updated
+
+        created = SignedInGmailAccount(identity=identity, verified=verified)
+        accounts.append(created)
+        self._save(accounts)
+        return created
+
+    @staticmethod
+    def _matches(left: GmailIdentity, right: GmailIdentity) -> bool:
+        if left.matches(right):
+            return True
+        # Keep manually entered malformed addresses from being duplicated.
+        return bool(
+            left.email
+            and right.email
+            and left.email.strip().casefold() == right.email.strip().casefold()
+        )
+
+    def _save(self, accounts: list[SignedInGmailAccount]) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "accounts": [
+                {
+                    **account.identity.to_dict(),
+                    "verified": account.verified,
+                }
+                for account in accounts
+            ],
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(self.path)
+
+
 @dataclass
 class GmailRotation:
     """Remembers which Gmail started the run and which have been farmed.
@@ -151,17 +303,17 @@ class GmailRotation:
         cls,
         path: Path | None = DEFAULT_GMAIL_STATE_PATH,
         *,
-        reset: bool = False,
+        include_completed: bool = False,
     ) -> GmailRotation:
         """Resume an unfinished run, or start a new one."""
 
-        if path is None or reset or not path.exists():
+        if path is None or not path.exists():
             return cls._new(path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls._new(path)
-        if data.get("completed"):
+        if data.get("completed") and not include_completed:
             return cls._new(path)
         rotation = cls(
             first=GmailIdentity.from_dict(data.get("first")),
@@ -174,7 +326,7 @@ class GmailRotation:
                 if identity is not None
             ],
             current=GmailIdentity.from_dict(data.get("current")),
-            completed=False,
+            completed=bool(data.get("completed")),
             switches=int(data.get("switches", 0)),
             started_at=data.get("started_at"),
             path=path,
@@ -187,6 +339,32 @@ class GmailRotation:
             started_at=datetime.now().isoformat(timespec="seconds"),
             path=path,
         )
+
+    @classmethod
+    def farmed_from_path(cls, path: Path | None) -> list[GmailIdentity]:
+        """Read progress for display, including a completed run's final state."""
+
+        if path is None or not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        return [
+            identity
+            for identity in (
+                GmailIdentity.from_dict(item) for item in data.get("farmed", [])
+            )
+            if identity is not None
+        ]
+
+    @classmethod
+    def reset_progress(cls, path: Path | None = DEFAULT_GMAIL_STATE_PATH) -> None:
+        """Replace the saved Gmail run with an empty, fresh rotation."""
+
+        cls._new(path).save()
 
     @property
     def is_resumed(self) -> bool:
@@ -211,6 +389,18 @@ class GmailRotation:
         else:
             self.farmed.append(identity)
         self.current = identity
+        self.save()
+
+    def set_manual_farmed(self, identity: GmailIdentity, completed: bool) -> None:
+        """Change a display/skip mark without claiming this is the current login."""
+        if self.completed:
+            self.completed = False
+            self.first = None
+            self.current = None
+            self.switches = 0
+        self.farmed = [item for item in self.farmed if not item.matches(identity)]
+        if completed:
+            self.farmed.append(identity)
         self.save()
 
     def save(self) -> None:
@@ -287,10 +477,12 @@ class GmailSwitcher:
         detector: ScreenDetector,
         *,
         log=safe_print,
+        signed_in_accounts: GmailAccountRegistry | None = None,
     ) -> None:
         self.game = game
         self.detector = detector
         self.log = log
+        self.signed_in_accounts = signed_in_accounts
         # Reuse the RoK menu-chain detection (portrait → Cài đặt → settings)
         # and the game-load wait from the character switcher.
         self.rok_menus = AccountSwitcher(game, detector, log=log)
@@ -299,7 +491,8 @@ class GmailSwitcher:
     # Public entry point
     # ------------------------------------------------------------------ #
 
-    def switch_to_next(self, rotation: GmailRotation) -> GmailSwitchResult:
+    def switch_to_next(self, rotation: GmailRotation, *, record_only: bool = False,
+                       observe_only: bool = False) -> GmailSwitchResult:
         """Record the current Gmail as farmed and log into the next one.
 
         Returns ``run_complete=True`` when every Gmail has been farmed: either
@@ -389,7 +582,11 @@ class GmailSwitcher:
                 background = self._read_user_center(frame)
                 if background is not None and background.current is not None:
                     current = background.current
-                    self._register_current(rotation, current)
+                    if not observe_only:
+                        self._register_current(rotation, current)
+                    if record_only or observe_only:
+                        self._close_lilith_ui(screenshot, lilith)
+                        return GmailSwitchResult(identity=current, run_complete=False)
                 else:
                     identity_reads += 1
                     if identity_reads >= _MAX_IDENTITY_READS:
@@ -416,8 +613,13 @@ class GmailSwitcher:
                                 "in Trung Tâm Người Dùng"
                             )
                         current = lilith.current
-                    self._register_current(rotation, current)
+                    if not observe_only:
+                        self._register_current(rotation, current)
+                    if record_only or observe_only:
+                        self._close_lilith_ui(screenshot, lilith)
+                        return GmailSwitchResult(identity=current, run_complete=False)
 
+                self._record_verified(current)
                 if lilith.switch_link is None:
                     self.game.wait(_ACTION_RETRY_DELAY)
                     continue
@@ -431,6 +633,7 @@ class GmailSwitcher:
                 continue
 
             if lilith.state == "dropdown_open":
+                self._record_verified_entries(lilith.entries)
                 if not scroll_settled:
                     signature = tuple(
                         (email_key(entry.email) or entry.email, round(entry.center_y / 15))
@@ -464,9 +667,12 @@ class GmailSwitcher:
                         # not another scroll. If the reading never
                         # repeats, continue with the latest one after a
                         # few attempts rather than hanging the switch.
+                        # stability_waits is deliberately NOT reset here:
+                        # a list whose rows appear/disappear between OCR
+                        # reads never repeats, and resetting the cap made
+                        # the switch loop until the timeout.
                         if not unchanged:
                             stable_reads = 0
-                            stability_waits = 0
                         stable_reads += 1
                         if stability_waits < _MAX_STABILITY_WAITS:
                             stability_waits += 1
@@ -582,16 +788,33 @@ class GmailSwitcher:
         current: GmailIdentity,
     ) -> None:
         first_time = rotation.first is None
+        self._record_verified(current)
         rotation.mark_farmed(current)
+        self._log(GMAIL_PROGRESS_UPDATED)
         if first_time:
             self._log(
                 f"Gmail run started from {current.label()}; this account "
                 "completes the run when the rotation returns to it"
             )
-        self._log(
-            f"Finished all RoK accounts in Gmail {current.label()}; "
-            f"{len(rotation.farmed)} Gmail account(s) farmed this run"
-        )
+        else:
+            self._log(
+                f"Finished all RoK accounts in Gmail {current.label()}; "
+                f"{len(rotation.farmed)} Gmail account(s) farmed this run"
+            )
+
+    def _record_verified(self, identity: GmailIdentity | None) -> None:
+        """Save a Gmail identity positively observed in the game."""
+
+        if self.signed_in_accounts is None or identity is None:
+            return
+        try:
+            self.signed_in_accounts.verify(identity)
+        except OSError as exc:
+            self._log(f"Could not save the signed-in Gmail list: {exc}")
+
+    def _record_verified_entries(self, entries: list[_DropdownEntry]) -> None:
+        for entry in entries:
+            self._record_verified(entry.identity)
 
     def _choose_target(
         self,
@@ -601,30 +824,15 @@ class GmailSwitcher:
     ) -> tuple[_DropdownEntry, bool] | None:
         """Pick the bottom-most Gmail; returns (entry, returning_to_first).
 
-        Normally the bottom entry is an unfarmed account. When every other
-        account in the list has been farmed, we pick the run's first account
-        to switch back to it and finish the run.
+        The account list is ordered by recent login, so always visit the
+        least-recently used account even when it was already farmed.
         """
 
-        # 1. Look from bottom up for any account that has NOT been farmed yet.
         for entry in sorted(entries, key=lambda item: item.center_y, reverse=True):
             identity = entry.identity
             if identity.matches(current):
                 continue
-            if rotation.first is not None and identity.matches(rotation.first):
-                continue
-            if rotation.is_farmed(identity):
-                self._log(
-                    f"Skipping {identity.label()}: already farmed this run"
-                )
-                continue
-            return entry, False
-
-        # 2. If all other accounts are farmed, return to the run's first account.
-        if rotation.first is not None and not rotation.first.matches(current):
-            for entry in sorted(entries, key=lambda item: item.center_y, reverse=True):
-                if entry.identity.matches(rotation.first):
-                    return entry, True
+            return entry, bool(rotation.first and identity.matches(rotation.first))
 
         return None
 
@@ -945,6 +1153,10 @@ class GmailSwitcher:
         )
 
         below = [item for item in detections if item[1][1] > title[1] + title[3] * 0.5]
+        # Wrapped rows must be joined before matching, or the wrapped
+        # account vanishes from the list and the dropdown reading
+        # alternates between frames (see _merge_wrapped_email_lines).
+        below = _merge_wrapped_email_lines(below)
         emails: list[tuple[str, Box]] = []
         uids: list[tuple[str, Box]] = []
         login_button: Box | None = self._find_red_login_button(frame)
@@ -1170,6 +1382,66 @@ def _compact(text: str) -> str:
 
 def _email_text(text: str) -> str:
     return "".join(_fold(text).split())
+
+
+def _merge_wrapped_email_lines(
+    detections: list[tuple[str, Box, float]],
+) -> list[tuple[str, Box, float]]:
+    """Join the OCR lines of an e-mail row that wrapped onto two lines.
+
+    The dropdown draws long addresses on two lines (``...@gmail`` over
+    ``.com``), and no single line then matches the e-mail pattern, so
+    that account silently disappears from the reading. A line holding
+    the left part of an address (an ``@`` with no full domain) is merged
+    with the short line directly below it when they form a valid address.
+    """
+
+    merged: list[tuple[str, Box, float]] = []
+    skip_next = False
+    ordered = sorted(detections, key=lambda item: (item[1][1], item[1][0]))
+    for index, (text, bounds, score) in enumerate(ordered):
+        if skip_next:
+            skip_next = False
+            continue
+        candidate = _email_text(text)
+        if (
+            "@" in candidate
+            and _EMAIL_PATTERN.search(candidate) is None
+            and index + 1 < len(ordered)
+        ):
+            next_text, next_bounds, next_score = ordered[index + 1]
+            fragment = _email_text(next_text)
+            gap = next_bounds[1] - (bounds[1] + bounds[3])
+            overlaps_x = (
+                next_bounds[0] < bounds[0] + bounds[2]
+                and bounds[0] < next_bounds[0] + next_bounds[2]
+            )
+            if (
+                0 <= gap <= max(1, bounds[3])
+                and overlaps_x
+                and fragment
+                and "@" not in fragment
+                and len(fragment) <= 6
+            ):
+                joined = candidate + fragment
+                if _EMAIL_PATTERN.search(joined):
+                    x1 = min(bounds[0], next_bounds[0])
+                    y1 = min(bounds[1], next_bounds[1])
+                    x2 = max(
+                        bounds[0] + bounds[2],
+                        next_bounds[0] + next_bounds[2],
+                    )
+                    y2 = max(
+                        bounds[1] + bounds[3],
+                        next_bounds[1] + next_bounds[3],
+                    )
+                    merged.append(
+                        (joined, (x1, y1, x2 - x1, y2 - y1), min(score, next_score))
+                    )
+                    skip_next = True
+                    continue
+        merged.append((text, bounds, score))
+    return merged
 
 
 def _is_account_label(text: str) -> bool:

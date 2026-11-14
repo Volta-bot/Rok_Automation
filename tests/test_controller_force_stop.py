@@ -23,6 +23,7 @@ class TestControllerForceStop(unittest.TestCase):
             self.mock_game,
             detector=self.mock_detector,
             switch_gmail=False,
+            gmail_state_path=Path(self.tmp_dir.name) / "gmail_rotation.json",
             session_summary_path=self.summary_path,
         )
 

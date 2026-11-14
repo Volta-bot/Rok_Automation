@@ -1,4 +1,4 @@
-"""Unit tests for the emulator registry and the native capture backend.
+"""Unit tests for the emulator registry and the native capture.
 
 The emulator is not required: the instance list is parsed from recorded
 ``ldconsole.exe list2`` output, and the framebuffer handling is checked
@@ -14,12 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from rok_automation.game.backends import (
-    BACKEND_ADB,
-    BACKEND_DESKTOP,
-    BACKEND_NATIVE,
-    create_game_interface,
-)
 from rok_automation.game.emulators import (
     EmulatorError,
     EmulatorInstance,
@@ -142,9 +136,8 @@ class TestEmulatorRegistry(unittest.TestCase):
         self.assertIn("ldplayer", keys)
         self.assertIn("mumu", keys)
 
-    def test_families_expose_their_window_terms(self) -> None:
+    def test_families_expose_a_label(self) -> None:
         for family in families():
-            self.assertTrue(family.window_terms, f"{family.key} has no window terms")
             self.assertTrue(family.label, f"{family.key} has no label")
 
     def test_get_family_rejects_an_unknown_key(self) -> None:
@@ -181,89 +174,126 @@ class TestEmulatorRegistry(unittest.TestCase):
         self.assertEqual(family.key, "mumu")
 
 
-class TestBackendFallback(unittest.TestCase):
-    """Verify the capture backends fall back to each other."""
+class TestNativeCapture(unittest.TestCase):
+    """Verify the native capture is the only capture path."""
 
-    def test_rejects_an_unknown_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            create_game_interface("nonsense")
+    def test_the_interface_is_built_from_the_native_frame_source(self) -> None:
+        from rok_automation.game.native import create_native_interface
 
-    def test_native_falls_back_to_adb(self) -> None:
-        adb_interface = MagicMock()
+        source = MagicMock()
+        instance = EmulatorInstance(
+            0, "A", running=True, pid=1, width=1920, height=1080
+        )
+        interface = MagicMock()
         with patch(
-            "rok_automation.game.backends._native_interface",
+            "rok_automation.game.native.select_family",
+            return_value=(get_family("ldplayer"), None),
+        ), patch(
+            "rok_automation.game.emulators.ldplayer.LDPlayerFamily.discover",
+            return_value=[instance],
+        ), patch(
+            "rok_automation.game.emulators.ldplayer.LDPlayerFamily.open_capture",
+            return_value=source,
+        ), patch(
+            "rok_automation.game.native.NativeInterface",
+            return_value=interface,
+        ) as native_build:
+            result = create_native_interface(emulator="ldplayer")
+
+        self.assertIs(result, interface)
+        native_build.assert_called_once()
+        self.assertIs(native_build.call_args.kwargs["source"], source)
+        self.assertIs(native_build.call_args.kwargs["instance"], instance)
+
+    def test_a_missing_capture_library_is_reported(self) -> None:
+        from rok_automation.game.native import create_native_interface
+
+        with patch(
+            "rok_automation.game.native.select_family",
+            return_value=(get_family("ldplayer"), None),
+        ), patch(
+            "rok_automation.game.emulators.ldplayer.LDPlayerFamily.discover",
+            return_value=[
+                EmulatorInstance(0, "A", running=True, pid=1, width=1920, height=1080)
+            ],
+        ), patch(
+            "rok_automation.game.emulators.ldplayer.LDPlayerFamily.open_capture",
             side_effect=EmulatorError("no capture library"),
-        ), patch(
-            "rok_automation.game.backends._adb_interface",
-            return_value=adb_interface,
-        ) as adb_build:
-            result = create_game_interface(BACKEND_NATIVE, emulator="ldplayer")
-        self.assertIs(result, adb_interface)
-        adb_build.assert_called_once()
-
-    def test_native_falls_back_to_the_desktop_window(self) -> None:
-        desktop_interface = MagicMock()
-        with patch(
-            "rok_automation.game.backends._native_interface",
-            side_effect=EmulatorError("no capture library"),
-        ), patch(
-            "rok_automation.game.backends._adb_interface",
-            side_effect=RuntimeError("no adb"),
-        ), patch(
-            "rok_automation.game.backends._desktop_interface",
-            return_value=desktop_interface,
         ):
-            result = create_game_interface(BACKEND_NATIVE, emulator="ldplayer")
-        self.assertIs(result, desktop_interface)
+            with self.assertRaises(EmulatorError):
+                create_native_interface(emulator="ldplayer")
 
-    def test_adb_backend_does_not_try_native_capture(self) -> None:
-        adb_interface = MagicMock()
-        with patch(
-            "rok_automation.game.backends._native_interface",
-            side_effect=AssertionError("native must not be used"),
-        ), patch(
-            "rok_automation.game.backends._adb_interface",
-            return_value=adb_interface,
-        ):
-            result = create_game_interface(BACKEND_ADB, emulator="ldplayer")
-        self.assertIs(result, adb_interface)
 
-    def test_desktop_backend_is_the_last_resort(self) -> None:
-        desktop_interface = MagicMock()
-        with patch(
-            "rok_automation.game.backends._adb_interface",
-            side_effect=RuntimeError("no adb"),
-        ), patch(
-            "rok_automation.game.backends._desktop_interface",
-            return_value=desktop_interface,
-        ):
-            result = create_game_interface(BACKEND_ADB, emulator="ldplayer")
-        self.assertIs(result, desktop_interface)
+class TestMuMuAdbCapture(unittest.TestCase):
+    def test_discovers_current_mumu_install_and_instance_ports(self) -> None:
+        import tempfile
 
-    def test_reports_when_every_backend_fails(self) -> None:
-        with patch(
-            "rok_automation.game.backends._adb_interface",
-            side_effect=RuntimeError("no adb"),
-        ), patch(
-            "rok_automation.game.backends._desktop_interface",
-            side_effect=RuntimeError("no window"),
-        ):
-            with self.assertRaises(RuntimeError):
-                create_game_interface(BACKEND_ADB, emulator="ldplayer")
+        family = get_family("mumu")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            manager = root / "nx_main" / "MuMuManager.exe"
+            adb = root / "nx_main" / "adb.exe"
+            manager.parent.mkdir(parents=True)
+            manager.touch()
+            adb.touch()
+            for index, port in ((0, 16384), (1, 16416)):
+                config = root / "vms" / f"MuMuPlayerGlobal-15.0-{index}" / "configs" / "vm_config.json"
+                config.parent.mkdir(parents=True)
+                config.write_text(json.dumps({"vm": {"nat": {"port_forward": {"adb": {"host_port": str(port)}}}}}))
+            with patch.object(type(family), "install_folders", return_value=[root]), \
+                 patch.object(type(family), "_port_is_open", side_effect=lambda port: port == 16416):
+                self.assertEqual(family.manager_path(), manager.parent)
+                self.assertIn(adb, family.adb_executables())
+                instances = family.discover()
+            self.assertEqual([item.index for item in instances], [0, 1])
+            self.assertEqual([item.running for item in instances], [False, True])
+            self.assertEqual(instances[1].details["adb_port"], "16416")
 
-    def test_an_unusable_emulator_falls_back_to_the_next_one(self) -> None:
-        # MuMu is not installed here, so its native capture must not be
-        # attempted and the ADB backend must take over.
-        desktop_interface = MagicMock()
-        with patch(
-            "rok_automation.game.backends._adb_interface",
-            side_effect=RuntimeError("no adb"),
-        ), patch(
-            "rok_automation.game.backends._desktop_interface",
-            return_value=desktop_interface,
-        ):
-            result = create_game_interface(BACKEND_NATIVE, emulator="mumu")
-        self.assertIs(result, desktop_interface)
+    def test_decodes_adb_screenshot(self) -> None:
+        import cv2
+        from rok_automation.game.native import AdbFrameSource
+
+        original = np.full((10, 20, 3), 42, dtype=np.uint8)
+        ok, encoded = cv2.imencode(".png", original)
+        self.assertTrue(ok)
+        with patch("rok_automation.game.native._run", return_value=encoded.tobytes()) as run:
+            result = AdbFrameSource("adb", "127.0.0.1:16384").capture()
+        np.testing.assert_array_equal(result, original)
+        self.assertEqual(run.call_args.args[2], ["exec-out", "screencap", "-p"])
+
+    def test_landscape_screenshot_sets_touch_dimensions(self) -> None:
+        import tempfile
+        from rok_automation.game.native import AdbFrameSource, NativeInterface
+
+        interface = NativeInterface.__new__(NativeInterface)
+        interface.source = AdbFrameSource("adb", "127.0.0.1:16384")
+        interface._guest_size = (1080, 1920)  # wm size in natural orientation
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.object(interface.source, "capture", return_value=np.zeros((1080, 1920, 3), dtype=np.uint8)):
+            interface.screenshot_path = Path(folder) / "frame.png"
+            interface.screenshot()
+            self.assertEqual(interface._guest_size, (1920, 1080))
+            x, y = interface._to_guest(50, 50)
+            self.assertAlmostEqual(x, 75, delta=1)
+            self.assertAlmostEqual(y, 75, delta=1)
+
+    def test_connects_to_the_selected_mumu_instance(self) -> None:
+        from rok_automation.game.native import create_native_interface
+
+        instance = EmulatorInstance(2, "MuMu 2", running=True, details={"adb_port": "16416"})
+        family = get_family("mumu")
+        with patch("rok_automation.game.native.select_family", return_value=(family, None)), \
+             patch.object(type(family), "discover", return_value=[instance]), \
+             patch("rok_automation.game.native._run_global") as connect, \
+             patch("rok_automation.game.native.NativeInterface") as interface:
+            create_native_interface(emulator="mumu", index=2, adb_path="adb")
+        connect.assert_called_once_with("adb", ["connect", "127.0.0.1:16416"], timeout=25)
+        self.assertEqual(interface.call_args.kwargs["serial"], "127.0.0.1:16416")
+
+    def test_default_is_mumu_without_a_saved_selection(self) -> None:
+        with patch("rok_automation.game.emulators.load_selection", return_value=(None, None)), \
+             patch("rok_automation.game.emulators.selection_from_environment", return_value=(None, None)):
+            self.assertEqual(select_family()[0].key, "mumu")
 
 
 class TestCaptureLibraryGuards(unittest.TestCase):

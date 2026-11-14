@@ -1,114 +1,99 @@
-"""Unit tests for randomized mouse click coordinates."""
+"""Unit tests for deterministic click coordinates.
+
+The centre of the detected bounds is mapped from the canonical frame
+onto the guest display and used for every tap.
+"""
 
 from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 
-from rok_automation.game.interface import DesktopInterface, TimingConfig
-from rok_automation.game.desktop import EmulatorWindow, click_window_point
+from rok_automation.game.adb import AdbInput
+from rok_automation.game.interface import TimingConfig
 
-_TEST_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _TEST_DIR.parent
-_ARTIFACTS_DIR = _PROJECT_ROOT / "artifacts"
+_ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
 
 
-class TestClickRandomization(unittest.TestCase):
-    """Test suite ensuring mouse clicks apply small randomized offsets."""
+class TestClickCoordinates(unittest.TestCase):
+    """Ensure clicks always use the centre of the detected bounds."""
 
-    def test_click_applies_randomized_offsets_across_calls(self) -> None:
-        """Verify repeated calls do not click the exact same pixel every time."""
-        window = EmulatorWindow(handle=12345, title="LDPlayer")
-        interface = DesktopInterface(window, timing=TimingConfig(click_offset_max=3))
+    GUEST_SIZE = (1920, 1080)
 
+    def _interface(self) -> AdbInput:
+        interface = AdbInput.__new__(AdbInput)
+        interface.adb_path = "adb"
+        interface.serial = "emulator-5554"
+        interface.timing = TimingConfig()
+        interface.pause_flag_path = None
+        interface.log = None
+        interface._guest_size = self.GUEST_SIZE
+        return interface
+
+    def _write_frame(self, name: str) -> Path:
+        path = _ARTIFACTS_DIR / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import cv2
+
+        cv2.imwrite(str(path), np.zeros((720, 1280, 3), dtype=np.uint8))
+        return path
+
+    def _tap_points(self, interface: AdbInput, bounds, screenshot) -> list[tuple[int, int]]:
+        """Collect the guest pixels the interface taps."""
+
+        tapped: list[tuple[int, int]] = []
+
+        def fake_run(adb_path, serial, args, **kwargs):
+            if "tap" in args:
+                tapped.append((int(args[-2]), int(args[-1])))
+            return b""
+
+        with patch("rok_automation.game.adb._run", side_effect=fake_run), \
+             patch("rok_automation.game.adb.time.sleep"):
+            for _ in range(30):
+                interface.click(bounds, str(screenshot))
+        return tapped
+
+    def test_click_uses_the_same_centre_across_calls(self) -> None:
+        """Verify repeated calls tap exactly the same centre pixel."""
+
+        interface = self._interface()
         # 100x60 button at (200, 100) -> reference center is (250, 130)
         bounds = (200, 100, 100, 60)
         ref_x = 200 + 100 // 2  # 250
         ref_y = 100 + 60 // 2   # 130
-        screenshot = _ARTIFACTS_DIR / "test_960.png"
+        screenshot = self._write_frame("_test_random_click.png")
 
-        clicked_points: list[tuple[int, int]] = []
+        tapped_points = self._tap_points(interface, bounds, screenshot)
+        self.assertTrue(tapped_points)
 
-        def mock_click_point(win, point, frame_size, *, offset_range=0):
-            clicked_points.append(point)
+        guest_ref_x, guest_ref_y = interface._to_guest(ref_x, ref_y)
 
-        with patch("rok_automation.game.interface.click_window_point", side_effect=mock_click_point):
-            for _ in range(30):
-                interface.click(bounds, screenshot)
+        for cx, cy in tapped_points:
+            self.assertEqual((cx, cy), (guest_ref_x, guest_ref_y))
 
-        # All points must be within narrow offset range (+/- 3px) from reference
-        for cx, cy in clicked_points:
-            self.assertLessEqual(abs(cx - ref_x), 3)
-            self.assertLessEqual(abs(cy - ref_y), 3)
+        self.assertEqual(set(tapped_points), {(guest_ref_x, guest_ref_y)})
 
-        # Verify not all clicked points are identical (at least 2 unique points in 30 clicks)
-        unique_points = set(clicked_points)
-        self.assertGreater(len(unique_points), 1, "Click coordinates were identical across all calls!")
+    def test_click_uses_the_centre_of_a_narrow_element(self) -> None:
+        """Verify narrow controls also use their exact centre."""
 
-    def test_click_stays_strictly_inside_narrow_element(self) -> None:
-        """Verify small elements constrain the offset range so clicks remain inside."""
-        window = EmulatorWindow(handle=12345, title="LDPlayer")
-        interface = DesktopInterface(window, timing=TimingConfig(click_offset_max=5))
-
+        interface = self._interface()
         # Narrow element: width=6, height=6 at (50, 50) -> reference center (53, 53)
         bounds = (50, 50, 6, 6)
         ref_x = 53
         ref_y = 53
-        screenshot = _ARTIFACTS_DIR / "test_960.png"
+        screenshot = self._write_frame("_test_random_click_narrow.png")
 
-        clicked_points: list[tuple[int, int]] = []
+        tapped_points = self._tap_points(interface, bounds, screenshot)
+        self.assertTrue(tapped_points)
 
-        def mock_click_point(win, point, frame_size, *, offset_range=0):
-            clicked_points.append(point)
+        guest_ref_x, guest_ref_y = interface._to_guest(ref_x, ref_y)
 
-        with patch("rok_automation.game.interface.click_window_point", side_effect=mock_click_point):
-            for _ in range(20):
-                interface.click(bounds, screenshot)
-
-        # For width=6, offset should be constrained to min(5, 6//6=1) -> max +/- 1 pixel
-        for cx, cy in clicked_points:
-            self.assertLessEqual(abs(cx - ref_x), 1)
-            self.assertLessEqual(abs(cy - ref_y), 1)
-
-    def test_click_window_point_randomizes_coordinates(self) -> None:
-        """Verify click_window_point applies offset around target reference point."""
-        window = EmulatorWindow(handle=12345, title="LDPlayer")
-        ref_point = (400, 300)
-        frame_size = (720, 1280)
-
-        mock_user32 = MagicMock()
-        mock_user32.IsWindow.return_value = True
-        mock_user32.IsWindowVisible.return_value = True
-        mock_user32.IsIconic.return_value = False
-        mock_user32.GetWindowRect.return_value = True
-        mock_user32.SetCursorPos.return_value = True
-
-        recorded_cursor_positions: list[tuple[int, int]] = []
-
-        def mock_set_cursor(x, y):
-            recorded_cursor_positions.append((x, y))
-            return True
-
-        mock_user32.SetCursorPos.side_effect = mock_set_cursor
-
-        with patch("rok_automation.game.desktop.find_render_window_handle", return_value=67890), \
-             patch("ctypes.WinDLL", return_value=mock_user32), \
-             patch("time.sleep"):
-
-            coords: list[tuple[int, int]] = []
-            for _ in range(30):
-                pt = click_window_point(window, ref_point, frame_size, offset_range=3)
-                coords.append(pt)
-
-            for cx, cy in coords:
-                self.assertLessEqual(abs(cx - ref_point[0]), 3)
-                self.assertLessEqual(abs(cy - ref_point[1]), 3)
-
-            unique_coords = set(coords)
-            self.assertGreater(len(unique_coords), 1)
+        for cx, cy in tapped_points:
+            self.assertEqual((cx, cy), (guest_ref_x, guest_ref_y))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import cv2
 from rok_automation.automation.account_switcher import AccountSwitcher
 from rok_automation.automation.gmail_switcher import (
     GmailIdentity,
+    GmailAccountRegistry,
+    GMAIL_PROGRESS_UPDATED,
     GmailRotation,
     GmailSwitcher,
     _DropdownEntry,
@@ -57,6 +59,48 @@ class TestGmailIdentity(unittest.TestCase):
 
 
 class TestGmailRotation(unittest.TestCase):
+    def test_manual_marks_preserve_current_and_can_be_reversed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "rotation.json"
+            current = GmailIdentity(email="current@gmail.com")
+            marked = GmailIdentity(email="marked@gmail.com")
+            rotation = GmailRotation(first=current, current=current, path=path)
+            rotation.set_manual_farmed(marked, True)
+            saved = GmailRotation.load(path)
+            self.assertEqual(saved.current, current)
+            self.assertEqual(saved.first, current)
+            self.assertTrue(saved.is_farmed(marked))
+            saved.set_manual_farmed(marked, False)
+            self.assertFalse(GmailRotation.load(path).is_farmed(marked))
+
+    def test_editing_completed_run_preserves_other_marks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "rotation.json"
+            a, b = GmailIdentity(email="a@gmail.com"), GmailIdentity(email="b@gmail.com")
+            rotation = GmailRotation(first=a, current=a, farmed=[a, b], completed=True, path=path)
+            rotation.set_manual_farmed(a, False)
+            saved = GmailRotation.load(path)
+            self.assertIsNone(saved.first)
+            self.assertFalse(saved.is_farmed(a))
+            self.assertTrue(saved.is_farmed(b))
+
+    def test_finishing_account_saves_verified_entry_before_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = GmailAccountRegistry(Path(tmpdir) / "accounts.json")
+            rotation = GmailRotation(path=Path(tmpdir) / "rotation.json")
+            identity = GmailIdentity(email="new@gmail.com", uid="123")
+            notifications = []
+
+            def log(message):
+                if GMAIL_PROGRESS_UPDATED in message:
+                    notifications.append((registry.load(), GmailRotation.farmed_from_path(rotation.path)))
+
+            switcher = GmailSwitcher(DummyGame(), ScreenDetector(), log=log, signed_in_accounts=registry)
+            switcher._register_current(rotation, identity)
+            self.assertEqual(len(notifications), 1)
+            self.assertTrue(notifications[0][0][0].verified)
+            self.assertEqual(notifications[0][1], [identity])
+
     def test_rotation_lifecycle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_file = Path(tmpdir) / "state.json"

@@ -13,7 +13,10 @@ be checked against the installed DLL before it is trusted, so
 
 from __future__ import annotations
 
+import json
+import re
 import socket
+import sys
 import subprocess
 from pathlib import Path
 
@@ -28,6 +31,10 @@ from rok_automation.game.process import run_hidden
 
 # The folders MuMu 12 is commonly installed in.
 _INSTALL_LOCATIONS = (
+    r"C:\Program Files\Netease\MuMuPlayer",
+    r"C:\Program Files (x86)\Netease\MuMuPlayer",
+    r"D:\Program Files\Netease\MuMuPlayer",
+    r"E:\Program Files\Netease\MuMuPlayer",
     r"C:\Program Files\Netease\MuMuPlayer-12.0",
     r"C:\Program Files (x86)\Netease\MuMuPlayer-12.0",
     r"D:\Program Files\Netease\MuMuPlayer-12.0",
@@ -38,6 +45,8 @@ _INSTALL_LOCATIONS = (
 
 # The folders that hold the ADB client, relative to the install folder.
 _ADB_LOCATIONS = (
+    "nx_main/adb.exe",
+    "nx_device/15.0/shell/adb.exe",
     "shell/adb.exe",
     "shell/adb_server.exe",
     "nx_main/shell/adb.exe",
@@ -51,7 +60,6 @@ class MuMuFamily(EmulatorFamily):
 
     key = "mumu"
     label = "MuMu Player"
-    window_terms = ("mumu", "nemu", "mumuplayer")
     install_locations = _INSTALL_LOCATIONS
     adb_locations = _ADB_LOCATIONS
     registry_markers = ("mumuplayer.exe", "nemumain.exe", "nemulauncher.exe")
@@ -64,6 +72,29 @@ class MuMuFamily(EmulatorFamily):
         for directory in install_dirs_from_registry(self.registry_markers):
             if directory not in folders:
                 folders.append(directory)
+        if sys.platform == "win32":
+            import winreg
+
+            for hive, key_path in (
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            ):
+                try:
+                    with winreg.OpenKey(hive, key_path) as root:
+                        for index in range(winreg.QueryInfoKey(root)[0]):
+                            try:
+                                with winreg.OpenKey(root, winreg.EnumKey(root, index)[0]) as entry:
+                                    name = str(winreg.QueryValueEx(entry, "DisplayName")[0])
+                                    if "mumuplayer" not in name.lower():
+                                        continue
+                                    folder = Path(str(winreg.QueryValueEx(entry, "InstallLocation")[0]))
+                                    if folder.is_dir() and folder not in folders:
+                                        folders.append(folder)
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
         return folders
 
     # -- discovery ------------------------------------------------------ #
@@ -72,7 +103,7 @@ class MuMuFamily(EmulatorFamily):
         """Return the folder that holds ``MuMuManager.exe``."""
 
         for folder in self.install_folders():
-            for relative in ("shell/MuMuManager.exe", "MuMuManager.exe"):
+            for relative in ("nx_main/MuMuManager.exe", "shell/MuMuManager.exe", "MuMuManager.exe"):
                 candidate = folder / relative
                 if candidate.is_file():
                     return candidate.parent
@@ -106,13 +137,36 @@ class MuMuFamily(EmulatorFamily):
         """Return the MuMu instances and whether they are running."""
 
         instances: list[EmulatorInstance] = []
+        # Current MuMu releases record each instance's actual ADB port here.
+        for folder in self.install_folders():
+            for config in (folder / "vms").glob("*/configs/vm_config.json"):
+                match = re.search(r"-(\d+)$", config.parent.parent.name)
+                if not match:
+                    continue
+                try:
+                    data = json.loads(config.read_text(encoding="utf-8-sig"))
+                    port = int(data["vm"]["nat"]["port_forward"]["adb"]["host_port"])
+                    if not 1024 < port < 65536:
+                        continue
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+                index = int(match.group(1))
+                instances.append(EmulatorInstance(
+                    index=index, name=f"MuMu Player {index}",
+                    running=self._port_is_open(port), details={"adb_port": str(port)},
+                ))
+        if instances:
+            return sorted(instances, key=lambda item: item.index)
+
         for index in range(8):
             try:
                 port = self.adb_port(index)
             except EmulatorError:
+                if not instances:
+                    raise
                 break
             if port is None:
-                break
+                continue
             running = self._port_is_open(port)
             instances.append(
                 EmulatorInstance(
@@ -125,8 +179,6 @@ class MuMuFamily(EmulatorFamily):
                     details={"adb_port": str(port)},
                 )
             )
-            if not running:
-                break
         if not instances:
             raise EmulatorError("MuMuManager.exe reported no emulator instances")
         return instances
@@ -178,11 +230,10 @@ class MuMuFamily(EmulatorFamily):
         """Open a native capture of the MuMu framebuffer.
 
         The MuMu capture library has to be verified against the installed
-        version before it can be used, so this refuses for now and the
-        backend falls back to the ADB capture.
+        version before it can be used, so this refuses for now.
         """
 
         raise EmulatorError(
-            "Native capture for MuMu Player is not verified yet; the ADB "
-            "backend is used instead."
+            "Native capture for MuMu Player is not verified yet. Use "
+            "LDPlayer, or verify the MuMu capture library first."
         )

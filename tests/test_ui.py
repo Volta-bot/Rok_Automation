@@ -11,6 +11,22 @@ from unittest.mock import MagicMock, patch
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.game.display import display_scale
 from rok_automation.ui.app import ModernColors, ROKAutomationApp
+from rok_automation.automation.gmail_switcher import GMAIL_PROGRESS_UPDATED
+
+
+class TestLiveGmailProgress(unittest.TestCase):
+    def test_progress_notification_refreshes_before_process_exit(self):
+        app = ROKAutomationApp.__new__(ROKAutomationApp)
+        app.root = MagicMock()
+        app._output_queue = queue.Queue()
+        app.refresh_signed_in_accounts = MagicMock()
+        app.log = MagicMock()
+        app._output_queue.put(f"[12:00:00] {GMAIL_PROGRESS_UPDATED}")
+
+        app._poll_output_queue()
+
+        app.refresh_signed_in_accounts.assert_called_once_with()
+        app.log.assert_not_called()
 
 
 class TestROKAutomationApp(unittest.TestCase):
@@ -52,7 +68,6 @@ class TestROKAutomationApp(unittest.TestCase):
         """Verify default option toggles and idle status."""
         self.assertTrue(self.app.opt_farm.get())
         self.assertTrue(self.app.opt_switch_gmail.get())
-        self.assertFalse(self.app.opt_reset_gmail.get())
 
         # Planned options should default to False
         self.assertFalse(self.app.opt_daily_reward.get())
@@ -205,6 +220,26 @@ class TestROKAutomationApp(unittest.TestCase):
         """Verify hide_console_window runs safely without exception."""
         from rok_automation.ui.app import hide_console_window
         hide_console_window()  # Should not raise
+
+    def test_check_stockpiles_button_launches_the_cli(self) -> None:
+        """The stockpile button runs the --check-stockpiles CLI diagnostic."""
+        self.app.clear_console()
+        with patch.object(self.app, "_start_worker") as mock_start:
+            self.app.run_check_stockpiles()
+
+        mock_start.assert_called_once()
+        cmd = mock_start.call_args[0][0]
+        self.assertIn("--check-stockpiles", cmd)
+        self.assertIn("--emulator", cmd)
+        content = self.app.txt_console.get("1.0", tk.END)
+        self.assertIn("top-bar stockpiles", content)
+
+    def test_check_stockpiles_is_blocked_while_running(self) -> None:
+        """The stockpile diagnostic must not run during automation."""
+        self.app._set_running_state(True)
+        with patch.object(self.app, "_start_worker") as mock_start:
+            self.app.run_check_stockpiles()
+        mock_start.assert_not_called()
 
 
 class TestPauseButton(unittest.TestCase):

@@ -164,8 +164,6 @@ class LDPlayerFamily(EmulatorFamily):
 
     key = "ldplayer"
     label = "LDPlayer"
-    window_terms = ("ldplayer", "雷电", "dnplayer")
-    window_classes = ("LDPlayerMainFrame",)
     install_locations = _INSTALL_LOCATIONS
     adb_locations = ("adb.exe", "adb_server.exe")
     registry_markers = ("dnplayer.exe", "ldplayer.exe")
