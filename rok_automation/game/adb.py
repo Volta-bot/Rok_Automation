@@ -5,9 +5,7 @@ through the Windows desktop, the emulator window may be minimised,
 hidden, or covered by another window, and the host mouse cursor is never
 moved.
 
-Frames are not read here: the native capture backend reads the
-emulator's own framebuffer and only borrows the input half of this
-module.
+Screenshot capture uses the same ADB connection.
 """
 
 from __future__ import annotations
@@ -49,9 +47,7 @@ def find_adb_executable(emulator: "EmulatorFamily | None" = None) -> str:
         return on_path
 
     candidates: list[Path] = []
-    for base in (Path("C:/LDPlayer"), Path("C:/Program Files/LDPlayer"),
-                 Path("C:/Program Files (x86)/LDPlayer"),
-                 Path("C:/Program Files/Netease/MuMuPlayer-12.0/shell")):
+    for base in (Path("C:/Program Files/Netease/MuMuPlayer-12.0/shell"),):
         if not base.is_dir():
             continue
         candidates.append(base / "adb.exe")
@@ -236,9 +232,7 @@ class AdbInput:
     def adb_port(self) -> int | None:
         """Return the local TCP port the emulator's adb listens on.
 
-        LDPlayer numbers its instances ``emulator-5554``, ``emulator-5556``
-        and so on, and they listen on the next port up. Other emulators
-        already report a loopback serial.
+        ADB serials may be loopback addresses or emulator identifiers.
         """
 
         serial = self.serial

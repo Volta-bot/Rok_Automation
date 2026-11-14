@@ -1,17 +1,4 @@
-"""The interface that reads frames from the emulator's own renderer.
-
-Every emulator family that can read its own framebuffer hands back a
-:class:`~rok_automation.game.emulators.FrameSource`; this module turns
-that into the same :class:`~rok_automation.game.interface.GameInterface`
-the automation expects, so the farming loop does not care where the
-frames came from.
-
-Native capture is the only capture path: it reads the emulator's
-rendered framebuffer directly, which is roughly an order of magnitude
-faster than pulling frames over ADB, and it keeps working when the
-emulator window is minimised, hidden or covered. Input still travels
-through the Android input pipeline, so the host mouse is never moved.
-"""
+"""Capture MuMu frames and send input over ADB."""
 
 from __future__ import annotations
 
@@ -29,7 +16,6 @@ from rok_automation.game.emulators import (
     EmulatorFamily,
     EmulatorInstance,
     select_family,
-    select_instance,
 )
 from rok_automation.game.frame import normalize_capture
 from rok_automation.game.interface import TimingConfig
@@ -52,13 +38,7 @@ class AdbFrameSource:
 
 
 class NativeInterface(AdbInput):
-    """Capture frames natively; deliver input over ADB.
-
-    Frames come from the emulator's own renderer, so detection is never
-    confused by an overlapping window and no frame ever has to travel
-    over ADB. Input still travels through the Android input pipeline,
-    which keeps the host mouse untouched.
-    """
+    """Capture frames and send input over ADB."""
 
     def __init__(
         self,
@@ -130,7 +110,7 @@ def create_native_interface(
     pause_flag_path: Path | None = None,
     log: Callable[[str], None] | None = None,
 ) -> NativeInterface:
-    """Open the emulator's own framebuffer and return the interface.
+    """Open the emulator ADB connection and return the interface.
 
     The emulator family is decided by the family registry, which is
     looked up in :mod:`rok_automation.game.emulators`.
@@ -141,21 +121,16 @@ def create_native_interface(
     if index is None:
         index = saved_index
 
-    if family.key == "mumu":
-        instances = family.discover()
-        instance = next((item for item in instances if item.running and
-                         (index is None or item.index == index)), None)
-        if instance is None:
-            raise AdbError("No matching running MuMu instance was found. Start MuMu and enable ADB.")
-        adb_path = adb_path or find_adb_executable(family)
-        if serial is None:
-            serial = f"127.0.0.1:{instance.details['adb_port']}"
-            _run_global(adb_path, ["connect", serial], timeout=25)
-        source = AdbFrameSource(adb_path, serial)
-    else:
-        instances = family.discover()
-        instance = select_instance(instances, index, family=family.label or family.key)
-        source = family.open_capture(instance)
+    instances = family.discover()
+    instance = next((item for item in instances if item.running and
+                     (index is None or item.index == index)), None)
+    if instance is None:
+        raise AdbError("No matching running MuMu instance was found. Start MuMu and enable ADB.")
+    adb_path = adb_path or find_adb_executable(family)
+    if serial is None:
+        serial = f"127.0.0.1:{instance.details['adb_port']}"
+        _run_global(adb_path, ["connect", serial], timeout=25)
+    source = AdbFrameSource(adb_path, serial)
 
     if log is not None:
         log(

@@ -274,7 +274,7 @@ def _load_builtin_families() -> None:
         return
     _builtin_loaded = True
 
-    from rok_automation.game.emulators import ldplayer, mumu  # noqa: F401
+    from rok_automation.game.emulators import mumu  # noqa: F401
 
 
 def save_selection(key: str, index: int | None = None, path: Path | None = None) -> Path:
@@ -350,7 +350,7 @@ def select_family(
         return get_family(env_family), env_index
 
     saved_family, saved_index = load_selection(state_path)
-    if saved_family:
+    if saved_family and saved_family in {family.key for family in families()}:
         return get_family(saved_family), saved_index
 
     return get_family("mumu"), None

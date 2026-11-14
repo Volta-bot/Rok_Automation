@@ -320,7 +320,7 @@ class ROKAutomationApp:
 
         sub_lbl = tk.Label(
             title_box,
-            text="Autonomous multi-account farming & rotation for LDPlayer 9",
+            text="Autonomous multi-account farming & rotation for MuMu Player",
             font=("Segoe UI", 9),
             bg=ModernColors.BG_DARK,
             fg=ModernColors.TEXT_MUTED,
@@ -1206,7 +1206,7 @@ class ROKAutomationApp:
             "========================================================================\n"
         )
         self.log_raw(banner, tag="banner")
-        self.log_info("System ready. Ensure LDPlayer 9 is running with Rise of Kingdoms open.")
+        self.log_info("System ready. Ensure MuMu Player is running with Rise of Kingdoms open.")
         self.log_info("Select options above and press [START AUTOMATION] or press F5 to begin.")
 
     def log_raw(self, message: str, tag: str | None = None) -> None:
@@ -1297,7 +1297,7 @@ class ROKAutomationApp:
     def _check_adb_ready(self) -> None:
         """Report whether the emulator accepts input over ADB."""
 
-        self.log_info("MuMu uses ADB for screenshots and input." if self.selected_emulator() == "mumu" else "LDPlayer uses native capture and ADB input.")
+        self.log_info("MuMu uses ADB for screenshots and input.")
 
         try:
             from rok_automation.game.adb import find_adb_device, find_adb_executable
@@ -1325,10 +1325,7 @@ class ROKAutomationApp:
     def check_emulator_connection(self) -> bool:
         """Check if the emulator is reachable and update the status badge.
 
-        Frames come from the emulator's own renderer, so the emulator
-        counts as connected even when its window is minimised or covered.
-        The ADB connection is checked too, because the input still travels
-        through the Android input pipeline.
+        MuMu screenshots and input both use the ADB connection.
         """
 
         try:

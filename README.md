@@ -1,318 +1,70 @@
-# Rise of Kingdoms Farming Automation (`rok-automation`)
+# ROKauto
 
-A fast, state-driven Windows desktop automation tool for **Rise of Kingdoms** running inside **LDPlayer 9**. It automatically detects the active governor account, infers its preferred resource from its name, dispatches all available gathering armies while avoiding contested nodes, and cycles through every starred character linked to the signed-in account.
+ROKauto is a Windows desktop automation tool for **Rise of Kingdoms** on **MuMu Player**. It uses screen recognition and ADB to farm resources across characters and signed-in Gmail accounts, with optional daily and city tasks. The game UI templates are designed for the **Vietnamese** in-game language.
 
----
+## Features
 
-## Key Features
+- **State-driven farming:** Detects the current screen, navigates between the city, map, search, resource node and troop screens, and recovers from missed actions or unexpected dialogs. It reads the march counter and fills available slots, up to five armies.
+- **Resource selection:** Recognizes Vietnamese and English resource keywords in governor names. Without a keyword it selects the lowest readable top-bar stockpile; if none are readable, it uses a weighted random choice favoring gold.
+- **Node search:** Searches levels 8 down to 5, falls back to other resources, avoids green incoming routes and duplicate coordinates, and remembers recently farmed nodes across cycles for 30 minutes. Run summaries estimate yields from dispatched resource types and levels.
+- **Character and Gmail rotation:** Traverses starred characters and switches through signed-in Gmail accounts. Rotation progress is saved and can be resumed after interruption. The GUI can maintain a signed-in account list, mark accounts complete, remove entries and reset run progress.
+- **Daily rewards:** Optionally claims available VIP points, the free VIP chest and the campaign chest, handling already-claimed rewards and common dialogs.
+- **City tasks:** The GUI can collect visible ready Food, Wood, Stone and Gold icons after a small zoom out. It can also claim a ready forge output and start a new Leather, Iron, Wood or Bone material; it skips the forge if the ready output is unavailable.
+- **Background operation:** Screenshots and taps use MuMu's local ADB connection, so the host mouse is not moved and the emulator can be covered. Captures are normalized to 1280×720, with corresponding coordinate mapping for input. Capture latency is measured to scale timeouts, and ADB input retries after reconnection.
+- **Control center:** Start, pause and stop a run, choose the account scope and optional tasks, view logs and resource totals, and run screenshot, screen-detection and stockpile diagnostics. Alliance help/technology and troop training are marked as planned, not implemented.
 
-### 1. State-Driven Farming Loop with Automatic Self-Recovery
-Instead of relying on blind delays or fixed coordinate clicks, the automation continuously classifies the current game screen and executes the action for that exact state:
+## Requirements and setup
 
-`City View` → **(Map Button)** → `World Map` → **(Search Button)** → `Resource Search Menu` → **(Select Resource & Level → Tìm kiếm)** → `Resource Node Found` → **(Thu thập)** → `New Troops (Quân mới)` → **(Hành quân)** → `World Map`
+- Windows, Python 3.11 or later, and MuMu Player with Rise of Kingdoms installed and signed in.
+- Set the game's language to Vietnamese. Use a landscape 16:9 emulator display; the project normalizes screenshots to 1280×720.
+- Enable local ADB debugging in MuMu and restart the instance if necessary. MuMu's bundled ADB is discovered automatically; alternatively put `adb` on PATH or set `ROK_ADB_PATH` to its executable.
 
-- **Self-Healing Recovery:** If any click misses, lags, or accidentally closes a popup back to the World Map (or an earlier step), the controller detects the actual screen it landed on and resumes the flow from that state automatically.
-- **Smart Resource Selection:** Reads the governor name on the World Map (or from the character selection card), strips the `[Guild]` tag, and maps Vietnamese/English keywords (`Vàng`/`Gold`, `Đá`/`Stone`, `Ngô`/`Food`, `Gỗ`/`Wood`, including OCR variants like `G6`, `Ng0`) to the preferred resource. If an account name has no resource keyword, it selects a weighted-random resource (**40% Gold**, **20% Stone**, **20% Food**, **20% Wood**).
-- **Dynamic Level Fallback (Lv8 → Lv5):** Searches from Level 8 down to Level 5 for the preferred resource first, then shuffles the remaining resource types (Lv8 → Lv5). When a level has no available nodes or is contested, it remembers the highest viable level for that resource for the rest of the account's run.
-- **Contested Node & Duplicate Avoidance:**
-  - **Green Incoming Route Detection:** Analyzes HSV color masks and line geometry to detect incoming green dotted march lines from other players and skips contested nodes.
-  - **Coordinate Deduplication:** Reads the node's `X: ... Y: ...` coordinates from the resource popup and skips nodes already visited during the current account's session.
-  - **Node Memory Across Cycles:** The nodes an account farmed are remembered (per account, with a timestamp) in `state/farmed_nodes.json` for 30 minutes, so a fresh farming cycle does not march back to the same node the moment its previous march has arrived and its green route is no longer visible. Afterwards the node is usually depleted anyway, so the search will not return it.
-  - **Map-Change Detection:** Compares map margin strips before and after pressing `Tìm kiếm` to detect when no node was found (`Không tìm thấy...`) without waiting for toast animations to fade.
-- **Active March Slot Detection:** Reads the `x/5` march counter on the right side of the World Map (treating an absent counter as `0/5`) and only dispatches armies for the remaining free slots.
-- **Total Resources Farmed Calculation:** Tracks every dispatched army's resource type and node level (Lv8–Lv5), calculating yields according to official node capacities (Food/Wood: Lv8 1.575M, Lv7 1.418M, Lv6 1.26M, Lv5 945k; Stone: Lv8 1.181M, Lv7 1.063M, Lv6 945k, Lv5 709k; Gold: Lv8 525k, Lv7 472.5k, Lv6 420k, Lv5 315k) and logging a detailed per-resource and grand total summary upon completing the run.
-
-### 2. Multi-Account Character Switching (`Nhân vật`)
-Once all 5 army slots are marching (or all resource levels are exhausted), the automation switches to the next starred character:
-
-`Top-Left Governor Portrait` → `Cài đặt (Settings)` → `Nhân vật (Characters)` → `Starred Character List` → `Confirm Login (Có)` → `Game Load`
-
-- **State-Driven Menu Navigation:** Recovers automatically if any menu click misses or falls back to an earlier screen.
-- **Positional Starred-Account Traversal:**
-  - Detects the active account via its bright green checkmark badge (`selected_account_check.png` + HSV green verification).
-  - Supports 12-account starred lists split across a top 6 page (`1/12..6/12`) and bottom 6 page (`7/12..12/12`).
-  - If the green checkmark is not in the first 6 accounts upon opening `Nhân vật`, it scrolls down immediately to scan the last 6 accounts.
-  - If started mid-list, it jumps to the nearest list end (`1/12` or `12/12`) and traverses sequentially in one clean pass (`top-to-bottom` or `bottom-to-top`), skipping the already-farmed starting account.
-
-### 3. Multi-Gmail Account Switching (`Tài khoản / Trung Tâm Người Dùng`)
-After farming all RoK characters in the current Gmail account, the automation automatically cycles to the next Gmail account until every logged-in Gmail account has been farmed:
-
-`Governor Portrait` → `Cài đặt` → `Tài khoản` → `Trung Tâm Người Dùng` → `Chuyển tài khoản` → `Expand Dropdown` → `Scroll to Bottom` → `Select Bottom Account` → `Đăng nhập` → `Game Load`
-
-- **Bottom-Most LRU Rotation:** Lilith's account switcher lists logged-in Gmail accounts by recency. By scrolling all the way to the bottom and selecting the least-recently used account, the automation cycles through every Gmail account in sequence.
-- **Run Completion Tracking:** Remembers the starting Gmail account and every account farmed (`state/gmail_rotation.json`). When all other accounts have been farmed and the rotation returns to the starting account, the run is complete.
-- **Fault-Tolerant & Resumable:** Progress is written atomically after every switch; if interrupted, restarting `--farm` resumes from the last active Gmail account without refarming previously cleared accounts.
-- **In-Game Modal Recovery:** Automatically detects and confirms in-game dialogs ("Xác nhận", "Đồng ý", "Có") during game reload.
-
-### 4. Daily Reward Collection (VIP & Campaign)
-When enabled, daily rewards are claimed first before any resource farming begins:
-1. **VIP Rewards:**
-   - Detects the VIP badge/text under the governor portrait across any VIP level.
-   - Opens the VIP menu and claims the wooden chest above (daily VIP points) and dismisses the "Thưởng điểm hàng ngày" popup.
-   - Claims the metal chest below via the green "Nhận" button (free daily VIP chest) and dismisses the "Xin chúc mừng" popup.
-   - Closes the VIP menu via the top-right 'X' button.
-2. **Campaign (Chiến dịch / Chinh phạt) Golden Chest:**
-   - Expands the bottom-right menu (3-dots button) if needed and clicks "Chiến dịch".
-   - Selects "Chinh phạt" and clicks the yellow golden chest on the campaign map to claim it.
-   - Confirms and dismisses the reward popup via "Xác nhận".
-   - Presses the `<` back button on the top-left twice at the same position to close Chinh phạt and Chiến dịch menus, cleanly returning to City view to begin farming.
-3. **Session Position Pinning:** Remembers static button locations across accounts to avoid redundant rescanning.
-4. **Resilient Error Recovery:** Detects already-claimed chests, dismisses stuck popups, and recovers safely back to the City view without hanging.
-
-### 5. Resolution-Independent Detection
-- **Canonical Capture Size:** Every screenshot is rescaled to a fixed **1280x720** frame before any detection runs. The UI templates are authored against one resolution, so normalising the capture keeps template matching, OCR regions and the pinned-position cache **identical no matter how large or small the LDPlayer window is**.
-  - Without this, the matcher's scale ceiling (`maximum_scale = 1.35`) meant any capture wider than ~1728px could not match the templates at all — the score collapsed from `0.99` to `0.65` on a maximised window.
-  - Measured across window widths from 800px to 1920px on real game frames, the mean template score spread fell from **0.117 to 0.014** (30 of 31 template/frame pairs improved; the remaining one was unchanged at 0.013 → 0.016).
-- **Aspect-Correct Crops:** A window whose aspect is not 16:9 is centre-cropped rather than stretched, so the game content is never distorted.
-- **Bidirectional Interpolation:** Shrinking uses area averaging (best detail retention); growing uses **bilinear** rather than cubic/lanczos, because those ring around sharp edges and the ringing made the OCR read of the small `Cấp: N` label fail at some window sizes.
-- **Correct Click Mapping:** Clicks and drags are mapped back through the same crop and scale the capture used, so a click always lands on the same game pixel regardless of the window size.
-
-### 6. Native Capture
-LDPlayer captures through its renderer. MuMu uses ADB screenshots, which can be slower.
-
-| Frames come from | Cost per frame | Window may be hidden? |
-| :--- | :--- | :--- |
-| The emulator's own renderer | **≈ 6–100 ms** | **Yes** |
-
-- **Native Capture (fastest):** Many emulators can hand out their own rendered framebuffer. LDPlayer ships `ldopengl64.dll` next to `ldconsole.exe`; its `CreateScreenShotInstance` entry point returns a COM-style object whose second vtable slot copies the emulator's *rendered framebuffer* into memory. Reading that buffer avoids a full frame transfer entirely and works while the emulator window is minimised, hidden or covered.
-  - The emulator instance, its PID and its resolution are read from `ldconsole.exe list2`, so the captured frame and the input coordinates always describe the same emulator.
-  - The library is located automatically through the uninstall registry (`DisplayIcon`) and the usual install folders; set `ROK_LDPLAYER_DIR` to override it. It needs LDPlayer 9.0.78 or newer.
-  - Frames arrive bottom-up and are flipped into image order before any detection runs.
-  - Captured frames are normalised to the canonical `1280x720` size, so every template and OCR region behaves identically.
-- **Input:** Taps and drags travel through the Android input pipeline (`input tap` / `input swipe`), which never steals the host mouse. Drags are stretched with the distance they cover so the game reads them as a drag rather than a flick or a stray tap.
-- **Adaptive Screen-Wait Budgets:** The controller measures the real capture latency at startup and scales every screen-wait budget to match, keeping the number of poll attempts per transition constant. Without this a slow capture would give the controller only one or two samples of a transition and it would time out before the screen had finished changing.
-- **Setup:** In the emulator's settings, enable **ADB debugging** with a **local connection** and restart it. Leave *remote connection* off — it exposes the ADB port to the whole network, and ADB grants full control of the device.
-
----
-
-### 7. Emulator Support
-The capture and input layer is emulator-agnostic: the farming loop only ever talks to the `GameInterface` protocol (`screenshot`, `click`, `drag`, `wait`), so switching emulators changes nothing in the automation logic, the templates or the OCR regions.
-
-Each emulator family is one small module in `rok_automation/game/emulators/` that answers three questions:
-
-```python
-@register
-class LDPlayerFamily(EmulatorFamily):
-    key = "ldplayer"                       # used on the command line
-    label = "LDPlayer"                     # shown in the GUI
-    adb_locations = ("adb.exe",)           # its bundled adb
-    registry_markers = ("dnplayer.exe",)   # how to find its install folder
-    supports_native_capture = True         # can it read its own framebuffer?
-
-    def discover(self) -> list[EmulatorInstance]: ...
-    def open_capture(self, instance) -> FrameSource: ...
-```
-
-**Adding an emulator is therefore a single new file** — no change to the automation, the vision layer or the CLI.
-
-| Family | Status | Native capture | Instance discovery |
-| :--- | :--- | :--- | :--- |
-| `ldplayer` | Supported | `ldopengl64.dll` | `ldconsole.exe list2` |
-| `mumu` | Supported via ADB | ADB screenshot | instance configuration and local ADB port |
-
-- **Choosing an emulator:** `--emulator ldplayer` on the command line, the *Emulator* dropdown in the GUI, or the `ROK_EMULATOR` environment variable. The choice is remembered in `state/emulator.json`.
-- **MuMu Player:** MuMu is the default. Screenshots and input use local ADB, and may be slower than LDPlayer native capture. Enable local ADB in MuMu's developer options and restart the instance if needed.
-
-### 8. Surviving a Flaky Emulator
-Emulators sometimes stop answering ADB until the connection is re-established. The symptoms are a capture that suddenly takes tens of seconds, or a device that shows up as `offline`.
-
-- **Bounded commands:** An ADB command that has not returned within `25 s` is treated as stale instead of blocking the run for minutes.
-- **Automatic reconnection:** A stale tap re-establishes the connection (`adb connect 127.0.0.1:<port>`, derived from the emulator's serial) and is retried once, so a hiccup does not end the run.
-- **Native capture avoids the problem:** Frames are read straight from the renderer, so a stalled ADB connection cannot slow the detection down. Only the input commands still travel over ADB.
-- **Restarting the emulator:** When the emulator itself has stopped responding, `ldconsole.exe launch --index 0` starts it again; `MuMuManager.exe api -v 0 launch_player` does the same for MuMu.
-
----
-
-### 9. A Sharp Interface on a Scaled Display
-The interface is declared per-monitor DPI aware before the toolkit creates the first window, and the window is sized in physical pixels for the display's real scale.
-
-- Without this, Windows renders the window at 96 DPI and stretches the result, which makes the whole interface look soft and slow to redraw on a scaled display (measured on a 125% screen: the text sharpness roughly doubles once the window is drawn at the display's own resolution).
-- The window keeps the same *logical* size at every scale, so the layout is identical on a 100% and a 150% screen.
-
----
-
-### 7. High-Speed Vision Optimizations
-- **Static Region-of-Interest (ROI) Cropping:** Restricts template matching for static HUD buttons (`city_map_button`, `world_search_button`, `gather_button`, `new_troops_button`, `march_button`, `resource_*`, `settings_button`, `character_menu_button`) to their exact normalized screen regions.
-- **Pinned Position & Scale Caching:** Remembers the exact pixel bounds and template scale (`_POSITION_CACHE` and `_SCALE_CACHE`) after the first match, turning subsequent button lookups into a `< 2ms` single-scale verification pass.
-- **Per-Resource Search Popup Caching:** Because the `Tìm kiếm`, `+`, and `-` popup box shifts horizontally depending on which resource icon (`Food`, `Wood`, `Stone`, `Gold`) is selected, the detector caches button positions and `Cấp: N` levels **per resource**. Subsequent armies searching the same resource and level skip OCR entirely (`0ms`) and click `Tìm kiếm` immediately.
-- **Sub-Millisecond Blue-Button Text Verification:** Distinguishes similar cyan buttons (`Tìm kiếm`, `Thu thập`, `Quân mới`, `Hành quân`) in `~0.05ms` by correlating their inner text strip (`[22%:78%, 14%:86%]`), reserving OCR only for genuinely ambiguous frames.
-- **In-Memory Frame Caching:** Captured screenshots are cached in memory (`BGR` and `Grayscale`) when they are taken, so downstream detectors and OCR readers never re-decode PNG files from disk.
-
----
-
-## Technology Stack
-
-| Component | Technology | Purpose |
-| :--- | :--- | :--- |
-| **Language** | Python 3.11+ | Core application logic, state machines, and CLI |
-| **Window & Input API** | Win32 API (`ctypes` / `user32.dll`) | Per-monitor DPI awareness (`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`) |
-| **Native Capture** | `ctypes` + LDPlayer's `ldopengl64.dll` | Reads the emulator's rendered framebuffer directly, for the fastest background capture |
-| **Emulator Discovery** | `ldconsole.exe list2` | Reports the emulator instances, their PIDs and their resolution |
-| **Computer Vision** | OpenCV (`opencv-python`) & `numpy` | Multi-scale normalized cross-correlation (`TM_CCOEFF_NORMED`), HSV color segmentation (green march routes & active account checkmarks), and map-motion diffing |
-| **OCR Engine** | `rapidocr` + `onnxruntime` | Offline Vietnamese & English text recognition for governor names, `x/5` army counters, `Cấp: N` search levels, and `X/Y` node coordinates |
-
----
-
-## Project Structure
-
-```text
-ROKauto/
-├── rok_automation/
-│   ├── __main__.py                 # CLI entry point (--gui, --farm, --emulator, --detect-screen, --screenshot)
-│   ├── ui/                         # Graphical User Interface (Control Center & Live Console)
-│   │   ├── app.py                  # Tkinter UI application, process worker, and live console stream
-│   │   └── __init__.py
-│   ├── automation/                 # Emulator-agnostic farming logic
-│   │   ├── controller.py           # State-driven farming loop, search level caching, & army dispatch
-│   │   ├── account_switcher.py     # State-driven profile/settings/character switcher & list scroller
-│   │   ├── gmail_switcher.py       # Multi-Gmail account switcher & LRU rotation tracker
-│   │   ├── daily_reward.py         # Daily VIP & Campaign reward claimer
-│   │   ├── context.py              # Per-account runtime context (armies out, target, errors)
-│   │   └── states.py               # Farming state enum definitions
-│   ├── game/                       # Capture & input layer (the emulator-aware part)
-│   │   ├── emulators/              # One module per supported emulator family
-│   │   │   ├── __init__.py         # The registry, instance model & selection
-│   │   │   ├── ldplayer.py         # LDPlayer: ldconsole discovery + ldopengl64 capture
-│   │   │   └── mumu.py             # MuMu Player: MuMuManager discovery + bundled adb
-│   │   ├── native.py               # Native frame source + ADB input, combined
-│   │   ├── adb.py                  # Android input pipeline delivery
-│   │   ├── frame.py                # Canonical 1280x720 frame geometry
-│   │   ├── display.py              # DPI awareness & display scaling for the interface
-│   │   ├── process.py              # Helper programs that never open a console window
-│   │   ├── interface.py            # GameInterface abstraction & timing configuration
-│   │   ├── console.py              # Console output that survives a limited code page
-│   │   ├── farmed_nodes.py         # Per-account memory of recently farmed nodes
-│   │   └── pause.py                # Cooperative pause support
-│   ├── logic/
-│   │   └── resource_selector.py    # Vietnamese/English resource keyword parser & Lv8-Lv5 search planner
-│   └── vision/
-│       ├── screen.py               # ROI/pinned template matcher, screen classifier, & level reader
-│       ├── account_label.py        # RapidOCR wrapper for governor labels & x/5 march counter
-│       └── green_route.py          # HSV + morphological detector for incoming green march routes
-├── templates/                      # UI reference templates (navigation, search, gathering, profile)
-├── run.bat                         # Interactive Windows CLI launcher
-├── run_gui.bat                     # One-click Graphical User Interface launcher (auto-closes console)
-├── run_gui.vbs                     # Completely silent GUI launcher (no console window)
-└── pyproject.toml                  # Package metadata and dependencies
-```
-
----
-
-## Installation & Usage
-
-### Prerequisites
-- **OS:** Windows 10 / 11
-- **Emulator:** LDPlayer 9 or newer, or MuMu Player 12 (with Rise of Kingdoms set to **Tiếng Việt** in-game language)
-- **Python:** Python 3.11 or newer
-- **Optional:** ADB, for background operation (*Settings* ➔ *ADB debugging* ➔ *Enable local connection*)
-- **Optional:** native capture needs the emulator's own capture library (LDPlayer 9.0.78 or newer)
-
----
-
-### Recommended Emulator & Display Settings
-
-> [!IMPORTANT]
-> **Keep the LDPlayer window reasonably large.**
-> The detector normalises every capture to a fixed 1280x720 frame, so **detection no longer breaks when the window is resized** — a maximised window works as well as a small one. However, a *very small* window still loses real detail: the emulator downsamples the game's 1920x1080 render to fit, and the tiny text (`Cấp: 8`, the `x/5` counter) becomes unreadable no matter how it is scaled afterwards.
->
-> **Sweet spot:** anything from roughly **1100px wide upward**. Below that, expect occasional OCR misses on the smallest labels.
-
-> [!NOTE]
-> The native capture reads the emulator's own 1920x1080 render, so it always sees the full-resolution frame and the window may be minimised or covered.
-
-1. **Window Size (flexible):**
-   - Any window size works for *detection*, because captures are normalised to 1280x720 before matching.
-   - The window may be minimised, hidden or covered while farming — the frames come from the emulator, not from the screen.
-
-2. **LDPlayer Emulator Resolution Settings:**
-   - In LDPlayer, click the **Settings** (gear icon) on the right toolbar ➔ **Advanced**:
-     - Mode: **Tablet (Landscape)**
-     - Resolution: **`1600x900 (dpi 240)`** or **`1920x1080 (dpi 280)`** *(minimum: `1280x720 (dpi 240)`)*
-     - **Avoid** Phone/Mobile portrait resolutions (e.g. `720x1280`) or low resolutions (`960x540`).
-   - Save and restart LDPlayer.
-
-3. **Windows Display Scaling:**
-   - Windows Settings ➔ **System** ➔ **Display** ➔ Set **Scale** to **100%** to prevent Windows from blurring the game render window.
-
-4. **Rise of Kingdoms In-Game Settings:**
-   - **Language:** Must be set to **Tiếng Việt** (*Avatar ➔ Cài đặt ➔ Ngôn ngữ*).
-   - **Graphics Quality:** Set to **Trung bình (Medium)** or **Cao (High)** for crisp button edges and fonts.
-
----
-
-### Setup
-Clone the repository and install the package in editable mode:
+From the project directory:
 
 ```powershell
-git clone https://github.com/Volta-bot/Rok_Automation.git
-cd Rok_Automation
 python -m pip install -e .
 ```
 
-### Graphical User Interface (`run_gui.vbs` / `run_gui.bat`)
-Launch the ROKauto Control Center GUI cleanly without any background command prompt window:
-- **`run_gui.vbs` (Recommended):** Completely silent launch with zero console window.
-- **`run_gui.bat`:** Standard launcher that launches detached `pythonw` and closes its command prompt automatically.
-- **CLI / Terminal:** `python -m rok_automation --gui` (automatically hides attached console; pass `--show-console` to keep it).
+Start MuMu and open the game, then launch `run_gui.vbs` or `run_gui.bat`. `run.bat` offers a menu for the GUI or CLI farming. The GUI also provides connection status and a refresh button.
 
-The graphical user interface features:
-- **One-Click Start & Stop:** Launch automation with `[START AUTOMATION]` (or press `F5`) and stop it safely anytime with `[STOP]` (or press `Esc`). Stopping reliably terminates the worker on the first press.
-- **Pause & Resume:** `[PAUSE]` freezes the run between two actions — the game is left untouched and the button turns into `[PLAY]` to continue exactly where it stopped.
-- **Focused Farming Buttons:** Run every starred RoK character in the current Gmail only, or farm the current RoK character only, without switching Gmail accounts.
-- **Core Automation Options:** Easily toggle automatic resource farming and multi-Gmail switching.
-- **Emulator Dropdown:** Choose which emulator family to drive (LDPlayer, MuMu Player). The choice is remembered between runs.
-- **Modular & Planned Feature Options:** Toggle or test upcoming modules such as *Collect Daily Rewards* (claims daily gifts, quest chests, and VIP points & free chest), *Alliance Help & Tech*, and *Auto Train Troops*.
-- **Integrated Live Output Console:** Monospace console stream underneath with real-time log coloring, auto-scroll, log copying, and clearing.
-- **Diagnostic Quick Tools:** Instant one-click buttons for LDPlayer screen capture, screen classification, and top-bar stockpile reading.
-
-### Interactive CLI Launcher (`run.bat`)
-Double-click `run.bat` or run it from a terminal:
+## Command line
 
 ```powershell
-.\run.bat
+# Farm all available characters and signed-in Gmail accounts
+python -m rok_automation --farm
+
+# Limit the run to the current Gmail or current RoK character
+python -m rok_automation --farm --no-switch-gmail
+python -m rok_automation --farm --current-rok-only
+
+# Claim daily rewards before farming, or claim them on the current account only
+python -m rok_automation --farm --daily-reward
+python -m rok_automation --daily-reward-only
+
+# Diagnostics
+python -m rok_automation --screenshot artifacts/mumu.png
+python -m rok_automation --detect-screen
+python -m rok_automation --check-stockpiles
+
+# Select a MuMu instance or specify an ADB client/device
+python -m rok_automation --farm --emulator-index 0
+python -m rok_automation --farm --adb-path C:\path\to\adb.exe --adb-serial 127.0.0.1:16384
+python -m rok_automation --help
 ```
-Press `y` when prompted to start farming across all starred accounts.
 
-### CLI Commands
+`--emulator mumu` can be supplied explicitly. `ROK_EMULATOR` selects the registered emulator family; when set, `ROK_EMULATOR_INDEX` can also select an instance. An explicit CLI selection takes precedence over environment and saved settings. `--gmail-state PATH` changes the rotation progress file, and `--search-level` supplies a known resource level to screen detection. `--gui --show-console` launches the GUI with its console visible.
 
-- **Run full multi-account farming automation across all Gmail logins:**
-  ```powershell
-  python -m rok_automation --farm
-  ```
-- **Claim daily rewards (VIP & Campaign) before farming each account:**
-  ```powershell
-  python -m rok_automation --farm --daily-reward
-  ```
-- **Claim daily rewards on the current account only and exit:**
-  ```powershell
-  python -m rok_automation --daily-reward-only
-  ```
-- **Farm characters in the current Gmail account only (disable Gmail switching):**
-  ```powershell
-  python -m rok_automation --farm --no-switch-gmail
-  ```
-- **Farm the current RoK character only (disable character and Gmail switching):**
-  ```powershell
-  python -m rok_automation --farm --no-switch-gmail --current-rok-only
-  ```
-- **Farm in the background (the emulator may be minimised or covered):**
-  ```powershell
-  python -m rok_automation --farm
-  ```
-  LDPlayer captures through its renderer; MuMu captures through ADB. Both can operate while the emulator window is covered. Add `--adb-serial emulator-5554` to pick a specific device, or `--emulator-index 0` to pick a specific emulator instance.
-- **Choose the emulator (LDPlayer or MuMu Player):**
-  ```powershell
-  python -m rok_automation --farm --emulator ldplayer
-  python -m rok_automation --farm --emulator mumu
-  ```
-  With no `--emulator` or saved selection, MuMu is used. The choice is remembered in `state/emulator.json`, and `ROK_EMULATOR` overrides it.
-- **Detect and classify the current LDPlayer screen (read-only):**
-  ```powershell
-  python -m rok_automation --detect-screen
-  ```
-- **Capture a screenshot of LDPlayer's render area:**
-  ```powershell
-  python -m rok_automation --screenshot artifacts/ldplayer.png
-  ```
+## Runtime files
 
-> **Note:** The native capture reads the emulator itself, so LDPlayer may be minimised, hidden or covered while the run continues.
+The `state/` directory stores emulator selection, Gmail rotation and account records, feature flags, and recently farmed nodes. `artifacts/` holds screenshots and run output. Both directories are ignored by Git. The GUI's **Reset Gmail Run Progress** control resets rotation progress; use it when starting a fresh rotation. Treat account records and screenshots as private.
+
+## Development
+
+The `rok_automation/automation` package contains the farming controller, account switching, daily rewards and city tasks; `game` contains ADB, capture and emulator discovery; `vision` handles screen and text recognition; `logic` contains resource selection and yield calculations; and `ui` contains the desktop control center. Templates are in `templates/`.
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Most tests use mocks or synthetic images and do not require a running emulator. Actual game operation still depends on MuMu, ADB, the game UI and matching templates.
+

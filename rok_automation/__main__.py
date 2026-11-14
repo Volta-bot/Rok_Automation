@@ -1,6 +1,7 @@
 """Command-line entry point for emulator detection and screenshot capture."""
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -102,7 +103,7 @@ def _run_stockpile_check(game: Any) -> int:
 
 
 def _build_game(args):
-    """Open the emulator's native capture, or report why it failed."""
+    """Open the emulator connection, or report why it failed."""
 
     try:
         interface = create_native_interface(
@@ -138,15 +139,15 @@ def main() -> int:
     parser.add_argument(
         "--screenshot",
         nargs="?",
-        const=Path("artifacts/ldplayer.png"),
+        const=Path("artifacts/mumu.png"),
         type=Path,
         metavar="PATH",
-        help="capture the LDPlayer game area through the native capture library",
+        help="capture the MuMu game screen over ADB",
     )
     parser.add_argument(
         "--detect-screen",
         action="store_true",
-        help="capture LDPlayer and classify the visible game screen",
+        help="capture MuMu and classify the visible game screen",
     )
     parser.add_argument(
         "--check-stockpiles",
@@ -203,7 +204,7 @@ def main() -> int:
         help=(
             "emulator family to drive: "
             + ", ".join(family.key for family in families())
-            + " (default: the installed one)"
+            + " (default: mumu)"
         ),
     )
     parser.add_argument(
@@ -220,7 +221,7 @@ def main() -> int:
     parser.add_argument(
         "--adb-path",
         metavar="PATH",
-        help="path to the adb executable (default: LDPlayer's bundled adb)",
+        help="path to the adb executable (default: MuMu's bundled adb)",
     )
     parser.add_argument(
         "--gui",
@@ -246,12 +247,17 @@ def main() -> int:
         return _run_stockpile_check(game)
 
     if args.screenshot is not None or args.detect_screen:
-        screenshot_path = args.screenshot or Path("artifacts/ldplayer.png")
+        screenshot_path = args.screenshot or Path("artifacts/mumu.png")
         try:
             output_path = game.screenshot()
         except (OSError, RuntimeError) as exc:
             print(f"Screenshot failed: {exc}")
             return 1
+        if args.screenshot is not None:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            if output_path.resolve() != screenshot_path.resolve():
+                shutil.copyfile(output_path, screenshot_path)
+            output_path = screenshot_path
         print(f"Screenshot saved: {output_path}")
         print(
             "  (normalised to "

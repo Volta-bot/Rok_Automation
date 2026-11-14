@@ -1,15 +1,4 @@
-"""The MuMu Player emulator family.
-
-MuMu 12 ships ``MuMuManager.exe``, which reports the ADB port of every
-instance, and ``external_renderer_ipc.dll``, which can hand out the
-emulator's rendered framebuffer the same way LDPlayer's capture library
-does.
-
-Only the parts that could be verified on a real installation are
-implemented here. The native capture needs MuMu 12 (>= 3.8.13) and has to
-be checked against the installed DLL before it is trusted, so
-:meth:`MuMuFamily.open_capture` refuses rather than guessing.
-"""
+"""Discover MuMu Player instances and their local ADB ports."""
 
 from __future__ import annotations
 
@@ -235,5 +224,5 @@ class MuMuFamily(EmulatorFamily):
 
         raise EmulatorError(
             "Native capture for MuMu Player is not verified yet. Use "
-            "LDPlayer, or verify the MuMu capture library first."
+            "ADB screenshot capture is available instead."
         )
