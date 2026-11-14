@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from rok_automation.automation.gmail_switcher import (
     GMAIL_PROGRESS_UPDATED,
     GmailRotation,
     GmailSwitcher,
+    _LilithScreen,
     _DropdownEntry,
     email_key,
 )
@@ -81,6 +82,42 @@ class TestRedesignedUserCenter(unittest.TestCase):
     def test_does_not_treat_account_number_as_switch_button(self):
         frame = np.full((720, 1280, 3), 245, dtype=np.uint8)
         self.assertIsNone(GmailSwitcher._find_user_center_switch_button(frame))
+
+    def test_close_sequence_returns_to_map(self):
+        game = DummyGame()
+        game.timing = MagicMock()
+        game.timing.scaled = lambda seconds: seconds
+        detector = MagicMock()
+        detector.locate_template.return_value.bounds = (1200, 10, 35, 35)
+        switcher = GmailSwitcher(game, detector, log=lambda _: None)
+        back = (24, 10, 38, 40)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        captures = [(Path("settings.png"), frame), (Path("profile.png"), frame),
+                    (Path("map.png"), frame)]
+        switcher.rok_menus._detect_menu_state = MagicMock(side_effect=[
+            ("settings_menu", None, 1.0), ("governor_profile", None, 1.0),
+            ("map_or_city", None, 1.0),
+        ])
+        with patch.object(switcher, "_capture", side_effect=captures), \
+                patch.object(switcher, "_read_lilith_screen", return_value=None):
+            switcher._close_lilith_ui(Path("center.png"),
+                                      _LilithScreen(state="user_center", user_center_close=back))
+        self.assertEqual(game.clicks, [back, (1200, 10, 35, 35), (1200, 10, 35, 35)])
+
+    def test_close_retries_and_stops_if_menu_does_not_close(self):
+        game = DummyGame()
+        game.timing = MagicMock()
+        game.timing.scaled = lambda seconds: seconds
+        detector = MagicMock()
+        detector.locate_template.return_value.bounds = (1200, 10, 35, 35)
+        switcher = GmailSwitcher(game, detector, log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        switcher.rok_menus._detect_menu_state = MagicMock(return_value=("settings_menu", None, 1.0))
+        with patch.object(switcher, "_capture", return_value=(Path("settings.png"), frame)), \
+                patch.object(switcher, "_read_lilith_screen", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "settings_menu close button did not respond"):
+                switcher._close_lilith_ui(Path("settings.png"), None)
+        self.assertEqual(len(game.clicks), 5)
 
 
 class TestGmailRotation(unittest.TestCase):

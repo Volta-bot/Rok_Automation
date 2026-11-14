@@ -36,6 +36,7 @@ from rok_automation.vision.screen import ScreenDetector, load_color_frame
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_MENU_CLOSE_TEMPLATE = _PROJECT_ROOT / "templates/daily_reward/vip_close_x.png"
 DEFAULT_GMAIL_STATE_PATH = _PROJECT_ROOT / "state/gmail_rotation.json"
 DEFAULT_SIGNED_IN_ACCOUNTS_PATH = _PROJECT_ROOT / "state/signed_in_gmail_accounts.json"
 GMAIL_PROGRESS_UPDATED = "[GMAIL_PROGRESS_UPDATED]"
@@ -919,6 +920,9 @@ class GmailSwitcher:
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)
             if lilith is None:
+                state, _, _ = self.rok_menus._detect_menu_state(screenshot, frame)
+                if state in {"settings_menu", "governor_profile"}:
+                    self._close_lilith_ui(screenshot, None)
                 break
             now = time.monotonic()
             if lilith.state == "switch_popup" and lilith.login_button is not None:
@@ -951,8 +955,8 @@ class GmailSwitcher:
                         )
                     if lilith.user_center_close is not None:
                         self._log("Closing Trung Tâm Người Dùng after Gmail switch")
-                        self.game.click(lilith.user_center_close, screenshot)
-                        user_center_since = None
+                        self._close_lilith_ui(screenshot, lilith)
+                        break
             self.game.wait(max(0.25, self.game.timing.poll_interval))
         else:
             raise RuntimeError(
@@ -963,17 +967,52 @@ class GmailSwitcher:
         self._log(f"Gmail {target.label()} accepted; waiting for RoK to load")
         self.rok_menus._wait_for_game(target.email or target.label())
 
-    def _close_lilith_ui(self, screenshot: Path, lilith: _LilithScreen) -> None:
-        """Best-effort close of the popup and user center (no failure)."""
+    def _close_lilith_ui(self, screenshot: Path, lilith: _LilithScreen | None) -> None:
+        """Close account center, settings and profile before returning to play."""
 
-        if lilith.popup_close is not None:
-            self.game.click(lilith.popup_close, screenshot)
+        deadline = time.monotonic() + self.game.timing.scaled(30.0)
+        clicks = {"popup": 0, "user_center": 0, "settings_menu": 0, "governor_profile": 0}
+        frame = None
+        last_state = "unknown"
+        while time.monotonic() < deadline:
+            if frame is None and lilith is None:
+                screenshot, frame = self._capture()
+                lilith = self._read_lilith_screen(frame)
+            if lilith is not None:
+                last_state = lilith.state
+                if lilith.state in {"switch_popup", "dropdown_open"}:
+                    key, bounds = "popup", lilith.popup_close
+                elif lilith.state == "user_center":
+                    key, bounds = "user_center", lilith.user_center_close
+                else:
+                    key, bounds = None, None
+            else:
+                last_state, _, _ = self.rok_menus._detect_menu_state(screenshot, frame)
+                if last_state == "map_or_city":
+                    return
+                if last_state in {"settings_menu", "governor_profile"}:
+                    key = last_state
+                    hit = self.detector.locate_template(
+                        screenshot, _MENU_CLOSE_TEMPLATE, confidence_threshold=0.75
+                    )
+                    if hit is not None:
+                        bounds = hit.bounds
+                    else:
+                        height, width = frame.shape[:2]
+                        bounds = (round(width * 0.94), round(height * 0.015),
+                                  round(width * 0.045), round(height * 0.055))
+                else:
+                    key, bounds = None, None
+
+            if key is not None and bounds is not None:
+                self._bump(clicks, key, f"{key} close button")
+                self._log(f"Closing {key.replace('_', ' ')}")
+                self.game.click(bounds, screenshot)
             self.game.wait(0.6)
-        screenshot, frame = self._capture()
-        current = self._read_lilith_screen(frame)
-        if current is not None and current.user_center_close is not None:
-            self.game.click(current.user_center_close, screenshot)
-            self.game.wait(0.6)
+            screenshot, frame = self._capture()
+            lilith = self._read_lilith_screen(frame)
+
+        raise RuntimeError(f"Could not return to the city or map; last screen: {last_state}")
 
     def _wait_for_state_change(self, previous_state: str) -> None:
         """Wait briefly until the screen advances past ``previous_state``."""
