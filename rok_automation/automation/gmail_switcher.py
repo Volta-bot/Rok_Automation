@@ -68,6 +68,7 @@ _POPUP_FIELD_CACHE: dict[tuple[int, int], Box] = {}
 
 _EMAIL_PATTERN = re.compile(r"([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})")
 _UID_PATTERN = re.compile(r"u[il1|]d\W*(\d{4,})")
+_ACCOUNT_ID_PATTERN = re.compile(r"idtaikho[a-z]*\W*(\d{4,})")
 
 Box = tuple[int, int, int, int]
 Detection = tuple[str, Box, float]
@@ -1092,6 +1093,7 @@ class GmailSwitcher:
             return None
 
         screen = _LilithScreen(state="user_center")
+        new_switch = self._find_user_center_switch_button(frame)
         emails: list[tuple[int, str]] = []
         uids: list[tuple[int, str]] = []
         for text, bounds, score in detections:
@@ -1109,8 +1111,12 @@ class GmailSwitcher:
                 emails.append((bounds[1], match.group(1)))
                 continue
             match = _UID_PATTERN.search(_fold(text).replace(" ", ""))
+            if not match:
+                match = _ACCOUNT_ID_PATTERN.search(_fold(text).replace(" ", ""))
             if match:
                 uids.append((bounds[1], match.group(1)))
+        if new_switch is not None:
+            screen.switch_link = new_switch
         # Fallback to cached switch link if OCR missed the button this frame.
         if screen.switch_link is None:
             screen.switch_link = _USER_CENTER_SWITCH_CACHE.get((height, width))
@@ -1124,7 +1130,34 @@ class GmailSwitcher:
             frame,
             (round(width * 0.90), 0, width - round(width * 0.90), round(height * 0.10)),
         )
+        if new_switch is not None:
+            # The redesigned center uses a back arrow before the title,
+            # rather than the old close button in the top-right corner.
+            screen.user_center_close = (
+                round(width * 0.018), round(height * 0.015),
+                round(width * 0.03), round(height * 0.055),
+            )
         return screen
+
+    @staticmethod
+    def _find_user_center_switch_button(frame: Any) -> Box | None:
+        """Find the red switch button in the redesigned left account panel."""
+        height, width = frame.shape[:2]
+        left, top = round(width * 0.20), round(height * 0.50)
+        right, bottom = round(width * 0.45), round(height * 0.75)
+        crop = frame[top:bottom, left:right]
+        if crop.size == 0:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (0, 120, 140), (12, 255, 255)) | cv2.inRange(
+            hsv, (170, 120, 140), (180, 255, 255)
+        )
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+            x, y, w, h = cv2.boundingRect(contour)
+            if w >= width * 0.12 and h >= height * 0.04:
+                return (left + x, top + y, w, h)
+        return None
 
     def _read_popup(self, frame: Any) -> _LilithScreen | None:
         """Read the centered 'Chuyển tài khoản' popup and its dropdown."""

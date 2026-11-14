@@ -3,8 +3,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
+import numpy as np
 
 from rok_automation.automation.account_switcher import AccountSwitcher
 from rok_automation.automation.gmail_switcher import (
@@ -56,6 +58,29 @@ class TestGmailIdentity(unittest.TestCase):
         self.assertTrue(a1.matches(a3))
         self.assertFalse(a1.matches(b))
         self.assertFalse(a2.matches(b))
+
+
+class TestRedesignedUserCenter(unittest.TestCase):
+    def test_reads_current_identity_and_red_switch_button(self):
+        frame = np.full((720, 1280, 3), 245, dtype=np.uint8)
+        cv2.rectangle(frame, (309, 428), (550, 492), (70, 65, 250), -1)
+        detections = (
+            ("Trung Tâm Người Dùng", (55, 20, 200, 25), 0.99),
+            ("example@gmail.com", (110, 75, 220, 25), 0.99),
+            ("ID tài khoản:32990", (110, 120, 150, 20), 0.99),
+        )
+        switcher = GmailSwitcher(DummyGame(), ScreenDetector(), log=lambda _: None)
+        with patch("rok_automation.automation.gmail_switcher.read_text_detections", return_value=detections):
+            screen = switcher._read_user_center(frame)
+        self.assertEqual(screen.current, GmailIdentity(email="example@gmail.com", uid="32990"))
+        x, y, width, height = screen.switch_link
+        self.assertTrue(x <= 430 <= x + width and y <= 460 <= y + height)
+        x, y, width, height = screen.user_center_close
+        self.assertTrue(x <= 42 <= x + width and y <= 30 <= y + height)
+
+    def test_does_not_treat_account_number_as_switch_button(self):
+        frame = np.full((720, 1280, 3), 245, dtype=np.uint8)
+        self.assertIsNone(GmailSwitcher._find_user_center_switch_button(frame))
 
 
 class TestGmailRotation(unittest.TestCase):
