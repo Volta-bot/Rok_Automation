@@ -62,6 +62,11 @@ from rok_automation.vision.screen import (
 )
 
 
+class _SkipAccount(Exception):
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
 class FarmingError(RuntimeError):
     """Raised when the current screen cannot be handled safely."""
 
@@ -203,17 +208,32 @@ class FarmingController:
         total_characters = 0
         gmail_accounts = 0
         known_current = None
+        visited_gmails = list(rotation.farmed) if rotation and rotation.is_resumed else []
         self._save_session_summary(status="running")
         try:
             progress = rotation
             if progress is None and self.switch_rok_accounts:
                 progress = GmailRotation.load(self.gmail_state_path)
-            if progress is not None and (progress.farmed or self.switch_rok_accounts):
+            if progress is not None:
                 known_current = GmailSwitcher(
                     self.game, self.detector, log=self._log,
                     signed_in_accounts=self.signed_in_accounts,
                 ).switch_to_next(progress, observe_only=True).identity
             while True:
+                if known_current is not None:
+                    position = next(
+                        (i for i, identity in enumerate(visited_gmails)
+                         if identity.matches(known_current)),
+                        None,
+                    )
+                    if position is None:
+                        position = len(visited_gmails)
+                        visited_gmails.append(known_current)
+                    try:
+                        self.signed_in_accounts.place(known_current, position)
+                        self._log(GMAIL_PROGRESS_UPDATED)
+                    except OSError as exc:
+                        self._log(f"Could not save the signed-in Gmail list: {exc}")
                 skip_current = (
                     progress is not None and known_current is not None
                     and progress.is_farmed(known_current)
@@ -320,6 +340,28 @@ class FarmingController:
                 self._log("No resource armies were dispatched before force stop.")
             return self.context
 
+    def _check_skip_request(self) -> None:
+        """Accept requests only between actions, when the game is navigable."""
+        from rok_automation.game.skip import consume_skip
+        kind = consume_skip()
+        if kind == "rok" and not self.switch_rok_accounts:
+            self._log("Cannot skip a RoK account in current-account-only mode")
+        elif kind == "gmail" and not self.switch_gmail:
+            self._log("Cannot skip Gmail when Gmail switching is disabled")
+        elif kind:
+            raise _SkipAccount(kind)
+
+    def _run_account_with_skip(self, **kwargs):
+        try:
+            self._check_skip_request()
+            context = self._run_one_account(**kwargs)
+            self._check_skip_request()
+            return context, None
+        except _SkipAccount as request:
+            self.context.last_error = None
+            self._log(f"Skipping current {request.kind.upper()} account at user request")
+            return self.context, request.kind
+
     def _farm_linked_characters(self) -> tuple[FarmContext, int, int]:
         """Farm each RoK character in the current Gmail, then stop at the end.
 
@@ -329,7 +371,9 @@ class FarmingController:
 
         if not self.switch_rok_accounts:
             self.context = FarmContext()
-            context = self._run_one_account()
+            context, skipped = self._run_account_with_skip()
+            if skipped == "gmail":
+                return context, 0, context.armies_dispatched
             total_dispatched = context.armies_dispatched
             exhausted_resources = (
                 context.last_error
@@ -347,22 +391,57 @@ class FarmingController:
             return context, 1, total_dispatched
 
         traversal = AccountTraversal()
+        identity = getattr(self, "_current_gmail_for_progress", None)
+        rotation = getattr(self, "_progress_rotation", None)
+        saved = rotation.get_character_progress(identity) if identity is not None and rotation is not None else None
+
         def record_position(index, total, direction):
-            identity = getattr(self, "_current_gmail_for_progress", None)
-            rotation = getattr(self, "_progress_rotation", None)
             if identity is not None and rotation is not None and index is not None and direction in (-1, 1):
                 rotation.set_character_progress(identity, index, total, direction)
+                entry = rotation.get_character_progress(identity)
+                entry["skipped_index"] = traversal.skipped_index
+                if traversal.skipped_index == index and traversal.current_index == index:
+                    entry["next_index"] = total - 1 if total is not None else None
+                else:
+                    entry["next_index"] = traversal.next_target_index()
+                entry["resume_ready"] = True
+                rotation.save()
                 self._log(GMAIL_PROGRESS_UPDATED)
+
+        resumed_name = None
+        if saved and isinstance(saved.get("index"), int) and saved.get("direction") in (-1, 1):
+            traversal.direction = saved.get("direction")
+            traversal.current_index = saved.get("index")
+            traversal.total_accounts = saved.get("total")
+            traversal.skipped_index = saved.get("skipped_index")
+            traversal.anchored_to_top = True
+            if saved.get("resume_ready"):
+                target = saved.get("next_index")
+            elif saved.get("skip_test") and isinstance(saved.get("selected_index"), int):
+                target = saved["selected_index"]
+            else:
+                # Older progress stored only the last completed position.
+                target = traversal.next_target_index()
+            if target is None:
+                self._log("Saved RoK traversal is complete")
+                return self.context, 0, 0
+            if not isinstance(target, int) or traversal.direction not in (-1, 1):
+                raise RuntimeError("Saved RoK progress is invalid; reset progress to start over")
+            self._log(f"Resuming saved RoK account position {target + 1}")
+            resumed_name = AccountSwitcher(self.game, self.detector, log=self._log).switch_to_next(
+                traversal, resume_target=target, completed_index=saved.get("index"))
 
         farmed_accounts = 0
         total_dispatched = 0
-        expected_account_name: str | None = None
+        expected_account_name: str | None = resumed_name
         while True:
             self.context = FarmContext()
-            context = self._run_one_account(
+            context, skipped = self._run_account_with_skip(
                 expected_account_name=expected_account_name,
             )
             total_dispatched += context.armies_dispatched
+            if skipped == "gmail":
+                return context, farmed_accounts, total_dispatched
             exhausted_resources = (
                 context.last_error
                 == "No available resource location found in the search plan"
@@ -604,6 +683,8 @@ class FarmingController:
                 "Could not read the world-map troop counter (x/5); "
                 "not dispatching without knowing the available army slots"
             )
+        if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+            self._check_skip_request()
         self.context.starting_armies_out = armies_out
         dispatch_limit = min(
             self.max_armies,
@@ -654,6 +735,8 @@ class FarmingController:
                 highest_candidate_level,
                 seen_resource_coordinates,
             )
+            if dispatched:
+                self._check_skip_request()
             if not dispatched:
                 self.context.last_error = (
                     "No available resource location found in the search plan"

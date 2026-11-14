@@ -9,18 +9,41 @@ from rok_automation.vision.screen import TemplateHit
 
 
 class TestCityTasks(unittest.TestCase):
-    def test_resource_search_excludes_edges_and_translates_coordinates(self):
-        game, detector = MagicMock(), MagicMock()
-        game.screenshot.return_value = "city.png"
+    def test_resource_scan_finds_multiple_markers_and_translates_coordinates(self):
+        detector = MagicMock()
         detector._locate_in_frame.side_effect = [
-            TemplateHit(0.9, (200, 400, 20, 20)), None
+            TemplateHit(0.95, (200, 200, 20, 20)), None,
+            TemplateHit(0.94, (260, 200, 20, 20)), None,
+            None, None,
         ]
-        runner = CityTaskRunner(game, detector, log=lambda _: None)
-        remaining = {"Food"}
-        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280), dtype=np.uint8)):
+        runner = CityTaskRunner(MagicMock(), detector, log=lambda _: None)
+        frame = np.full((720, 1280), 255, dtype=np.uint8)
+        markers = runner._scan_resource_markers(frame, {"Gold"})
+        self.assertEqual(markers, [
+            ("Gold", (292, 303, 20, 20)), ("Gold", (352, 303, 20, 20)),
+        ])
+        first_scan = detector._locate_in_frame.call_args_list[0].args[0]
+        second_scan = detector._locate_in_frame.call_args_list[2].args[0]
+        self.assertEqual(first_scan.shape, (539, 1160))
+        self.assertEqual(second_scan[210, 210], 0)
+
+    def test_batches_all_clicks_then_rescans_and_retries_missed_markers(self):
+        game = MagicMock()
+        game.screenshot.side_effect = ["first.png", "check.png"]
+        runner = CityTaskRunner(game, MagicMock(), log=lambda _: None)
+        events = []
+        def scan(frame, resources):
+            events.append("scan")
+            if len(events) == 1:
+                return [("Gold", (10, 20, 10, 10)), ("Stone", (30, 40, 10, 10))]
+            return [("Gold", (10, 20, 10, 10)), ("Wood", (50, 60, 10, 10))]
+        game.click.side_effect = lambda *args: events.append("click")
+        remaining = {"Gold", "Stone", "Wood"}
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))), \
+             patch.object(runner, "_scan_resource_markers", side_effect=scan):
             runner._collect_visible_resources(remaining)
-        self.assertEqual(detector._locate_in_frame.call_args_list[0].args[0].shape, (539, 1160))
-        game.click.assert_called_once_with((292, 503, 20, 20), "city.png")
+        self.assertEqual(events, ["scan", "click", "click", "scan", "click", "click"])
+        self.assertEqual(game.click.call_args_list[2].args, ((10, 20, 10, 10), "check.png"))
         self.assertEqual(remaining, set())
 
     def test_forge_continues_when_zoom_is_unavailable(self):

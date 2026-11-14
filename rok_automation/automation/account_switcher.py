@@ -115,7 +115,9 @@ class AccountSwitcher:
         self.detector = detector
         self.log = log
 
-    def switch_to_next(self, traversal: AccountTraversal, *, on_initialized=None) -> str | None:
+    def switch_to_next(self, traversal: AccountTraversal, *, on_initialized=None,
+                       resume_target: int | None = None,
+                       completed_index: int | None = None) -> str | None:
         """Select the next starred card using 6-account top/bottom pages."""
 
         self._open_character_list()
@@ -127,105 +129,83 @@ class AccountSwitcher:
         at_top = self._starred_accounts_header_bounds(frame) is not None
         at_bottom = self._regular_accounts_header_bounds(frame) is not None
 
-        initializing = traversal.direction is None
-        if traversal.direction is None:
-            if active_position is not None and (at_top or not at_bottom):
-                # Green tick is visible in the first 6 accounts (1/12 .. 6/12).
-                start_index = active_position
-                if start_index == 0:
-                    traversal.direction = 1
-                    traversal.current_index = 0
-                    target_index = traversal.next_target_index()
-                    self._log(
-                        f"Starting positional account traversal at 1"
-                        f"/{total if total is not None else '?'}; "
-                        "direction: top-to-bottom, left-to-right"
-                    )
-                elif (
-                    total is not None
-                    and total <= page_size
-                    and start_index == total - 1
-                ):
-                    traversal.direction = -1
-                    traversal.current_index = start_index
-                    target_index = traversal.next_target_index()
-                    self._log(
-                        f"Starting positional account traversal at "
-                        f"{start_index + 1}/{total}; "
-                        "direction: bottom-to-top, right-to-left"
-                    )
-                else:
-                    # Started at 2/12 .. 6/12: nearest end is 1/12 (index 0),
-                    # which is already on this top screen—no scroll needed!
-                    traversal.skipped_index = start_index
-                    traversal.direction = 1
-                    target_index = 0
-                    self._log(
-                        f"Started mid-list at {start_index + 1}"
-                        f"/{total if total is not None else '?'}; "
-                        f"moving to nearest end (1/{total if total is not None else '?'}) "
-                        "and farming top-to-bottom, left-to-right"
-                    )
-            else:
-                # Green tick is not in the first 6 accounts (or list opened at
-                # the bottom): scroll ALL the way to the bottom to see 7/12..12/12.
-                if active_position is None:
-                    screenshot, frame, top_down_cards = (
-                        self._scroll_all_the_way(
-                            traversal,
-                            toward_list_end=True,
-                            until_check_gone=False,
-                            initial=(screenshot, frame, top_down_cards),
-                        )
-                    )
-                    (
-                        screenshot,
-                        frame,
-                        top_down_cards,
-                        active_position,
-                    ) = self._read_page_and_active_position(
-                        traversal,
-                        initial=(screenshot, frame, top_down_cards),
-                    )
-                    total = traversal.total_accounts
-                    page_size = len(top_down_cards)
-                    if active_position is None:
-                        raise RuntimeError(
-                            "Could not locate the green check on any starred account"
-                        )
-                    at_top = False
-                    at_bottom = True
-
-                bottom_start = (
-                    max(0, total - page_size)
-                    if total is not None
-                    else page_size
+        initializing = traversal.direction is None and resume_target is None
+        if resume_target is not None:
+            # A previous run may have stopped before or after the login click.
+            # Inspect the checkmark before deciding whether another click is needed.
+            if active_position is None and not at_bottom:
+                screenshot, frame, top_down_cards = self._scroll_all_the_way(
+                    traversal, toward_list_end=True, until_check_gone=False,
+                    initial=(screenshot, frame, top_down_cards),
                 )
-                start_index = bottom_start + active_position
-                if active_position == page_size - 1:
-                    traversal.direction = -1
-                    traversal.current_index = start_index
-                    target_index = traversal.next_target_index()
-                    self._log(
-                        f"Starting positional account traversal at "
-                        f"{start_index + 1}"
-                        f"/{total if total is not None else '?'}; "
-                        "direction: bottom-to-top, right-to-left"
-                    )
+                screenshot, frame, top_down_cards, active_position = self._read_page_and_active_position(
+                    traversal, initial=(screenshot, frame, top_down_cards),
+                )
+                total = traversal.total_accounts
+                page_size = len(top_down_cards)
+                at_top = self._starred_accounts_header_bounds(frame) is not None
+                at_bottom = self._regular_accounts_header_bounds(frame) is not None
+            if active_position is None or (not at_top and not at_bottom):
+                raise RuntimeError("Could not identify the active account while resuming")
+            active_index = (active_position if at_top else
+                            max(0, total - page_size) + active_position if total is not None else None)
+            if active_index == resume_target:
+                name = top_down_cards[active_position][0]
+                # Close the character list and the parent menus before farming.
+                from rok_automation.automation.gmail_switcher import GmailSwitcher
+                closer = GmailSwitcher(self.game, self.detector, log=self.log)
+                close_bounds = closer._find_game_menu_close(frame)
+                if close_bounds is None:
+                    raise RuntimeError("Could not close the character list while resuming")
+                self.game.click(close_bounds, screenshot)
+                self.game.wait(_ACTION_RETRY_DELAY)
+                closer._close_lilith_ui(screenshot, None)
+                traversal.current_index = resume_target
+                return name
+            if active_index != completed_index:
+                raise RuntimeError("Active account does not match saved progress; reset progress to start over")
+            target_index = resume_target
+        elif traversal.direction is None:
+            # The current character was farmed before opening this list. Record
+            # its position, then start the remaining pass at the last character.
+            initial_index = active_position if at_top and active_position is not None else None
+            if not at_bottom:
+                screenshot, frame, top_down_cards = self._scroll_all_the_way(
+                    traversal, toward_list_end=True, until_check_gone=False,
+                    initial=(screenshot, frame, top_down_cards),
+                )
+                screenshot, frame, top_down_cards, bottom_active = self._read_page_and_active_position(
+                    traversal, initial=(screenshot, frame, top_down_cards), max_attempts=1,
+                )
+            else:
+                bottom_active = active_position
+            total = traversal.total_accounts
+            page_size = len(top_down_cards)
+            if self._regular_accounts_header_bounds(frame) is None:
+                raise RuntimeError("Could not reach the bottom of the starred accounts list")
+            if total is None:
+                if at_top and page_size == len(top_down_cards) and self._starred_accounts_header_bounds(frame) is not None:
+                    total = traversal.total_accounts = page_size
                 else:
-                    # Started at 7/12 .. 11/12: nearest end is 12/12, which is
-                    # already at the end of this bottom screen—no scroll needed!
-                    traversal.skipped_index = start_index
-                    traversal.direction = -1
-                    target_index = bottom_start + page_size - 1
-                    self._log(
-                        f"Started mid-list at {start_index + 1}"
-                        f"/{total if total is not None else '?'}; "
-                        f"moving to nearest end ({target_index + 1}"
-                        f"/{total if total is not None else '?'}) "
-                        "and farming bottom-to-top, right-to-left"
-                    )
+                    raise RuntimeError("Could not determine the starred account count")
+            if initial_index is None and bottom_active is not None:
+                initial_index = max(0, total - page_size) + bottom_active
+            if initial_index is None:
+                raise RuntimeError("Could not locate the current starred account")
+            traversal.direction = -1
+            traversal.current_index = initial_index
+            traversal.anchored_to_top = True
+            if initial_index == total - 1:
+                target_index = traversal.next_target_index()
+            else:
+                traversal.skipped_index = initial_index
+                target_index = total - 1
+            at_top = self._starred_accounts_header_bounds(frame) is not None
+            at_bottom = True
+            active_position = bottom_active
+            self._log(f"Starting at the bottom of the starred list; {total} account(s)")
         else:
+            saved_target = traversal.next_target_index()
             # Subsequent switches: if the green tick is visible on the top 6
             # page (1/12 .. 6/12), sync current_index directly to active_position.
             if active_position is not None and (at_top or not at_bottom):
@@ -235,9 +215,11 @@ class AccountSwitcher:
                 bottom_idx = max(0, total - page_size) + active_position
                 if bottom_idx != traversal.skipped_index:
                     traversal.current_index = bottom_idx
-            elif active_position is None and (at_top or not at_bottom):
-                # Green tick is not in the first 6 accounts: scroll down
-                # immediately and scan for the green tick in the last 6 accounts.
+            elif (active_position is None and (at_top or not at_bottom)
+                  and not (at_top and saved_target is not None
+                           and 0 <= saved_target < page_size)):
+                # Locate the current account when the saved target is not
+                # already visible on the top page.
                 screenshot, frame, top_down_cards = self._scroll_all_the_way(
                     traversal,
                     toward_list_end=True,
@@ -448,7 +430,7 @@ class AccountSwitcher:
 
             height, width = frame.shape[:2]
             start_y, end_y = (
-                (0.76, 0.24) if toward_list_end else (0.24, 0.76)
+                (0.82, 0.18) if toward_list_end else (0.18, 0.82)
             )
             before_keys = [
                 _casefolded_account_key(name) for name, _ in top_down_cards
@@ -458,7 +440,7 @@ class AccountSwitcher:
                 (round(width * 0.51), round(height * end_y)),
                 screenshot,
             )
-            self.game.wait(0.35)
+            self.game.wait(0.25)
             screenshot, frame, top_down_cards = self._read_visible_page(
                 traversal
             )

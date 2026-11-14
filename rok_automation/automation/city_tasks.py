@@ -103,42 +103,71 @@ class CityTaskRunner:
         if forge_pending:
             self._log("Forge task could not be started; skipped")
 
-    def _collect_visible_resources(self, remaining_resources: set[str]) -> None:
+    def _scan_resource_markers(
+        self, frame, resources: set[str],
+    ) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Find all visible ready markers in one screenshot."""
+        frame_height, frame_width = frame.shape[:2]
+        left, top, right, bottom = (
+            round(value * dimension)
+            for value, dimension in zip(
+                _RESOURCE_SCAN_AREA,
+                (frame_width, frame_height, frame_width, frame_height),
+            )
+        )
+        area = frame[top:bottom, left:right]
+        markers: list[tuple[str, tuple[int, int, int, int]]] = []
         for resource, templates in _RESOURCE_TEMPLATES.items():
-            if resource not in remaining_resources:
+            if resource not in resources:
                 continue
+            search_area = area.copy()
+            for _ in range(24):
+                hits = [
+                    hit for template in templates
+                    if (hit := self.detector._locate_in_frame(
+                        search_area, template, confidence_threshold=0.82,
+                        context_key=f"city-resource-{resource}", maximum_scale=1.35,
+                    )) is not None
+                ]
+                hit = max(hits, key=lambda candidate: candidate.confidence, default=None)
+                if hit is None:
+                    break
+                x, y, width, height = hit.bounds
+                bounds = (left + x, top + y, width, height)
+                cx, cy = bounds[0] + width / 2, bounds[1] + height / 2
+                # Both templates, or different resource templates, can match
+                # the same bubble. Keep only one click for each position.
+                if not any(
+                    abs(cx - (bx + bw / 2)) < max(width, bw) * 0.7
+                    and abs(cy - (by + bh / 2)) < max(height, bh) * 0.7
+                    for _, (bx, by, bw, bh) in markers
+                ):
+                    markers.append((resource, bounds))
+                pad = max(8, round(max(width, height) * 0.5))
+                search_area[max(0, y - pad):y + height + pad,
+                            max(0, x - pad):x + width + pad] = 0
+        return markers
+
+    def _collect_visible_resources(self, remaining_resources: set[str]) -> None:
+        resources = set(remaining_resources)
+        for pass_number in (1, 2):
             screenshot = self.game.screenshot()
             frame = load_gray_frame(screenshot)
             if frame is None:
                 self._log("Could not read the city view; skipping resource collection")
                 return
-            frame_height, frame_width = frame.shape[:2]
-            left, top, right, bottom = (
-                round(value * dimension)
-                for value, dimension in zip(
-                    _RESOURCE_SCAN_AREA,
-                    (frame_width, frame_height, frame_width, frame_height),
-                )
-            )
-            city_area = frame[top:bottom, left:right]
-            hits = [
-                hit for template in templates
-                if (hit := self.detector._locate_in_frame(
-                    city_area,
-                    template,
-                    confidence_threshold=0.82,
-                    context_key=f"city-resource-{resource}",
-                    maximum_scale=1.35,
-                )) is not None
-            ]
-            hit = max(hits, key=lambda candidate: candidate.confidence, default=None)
-            if hit is None:
-                continue
-            x, y, width, height = hit.bounds
-            self.game.click((left + x, top + y, width, height), screenshot)
-            self.game.wait(0.25)
-            remaining_resources.remove(resource)
-            self._log(f"Collected ready {resource.lower()} buildings")
+            markers = self._scan_resource_markers(frame, resources)
+            if pass_number == 2:
+                self._log(f"Double-check found {len(markers)} remaining resource marker(s)")
+            for resource, bounds in markers:
+                self.game.click(bounds, screenshot)
+                remaining_resources.discard(resource)
+            if markers:
+                self._log(f"Clicked {len(markers)} resource marker(s) on pass {pass_number}")
+                self.game.wait(0.50)
+            elif pass_number == 1:
+                # A second image can reveal icons obscured by animation.
+                self.game.wait(0.50)
 
     def _claim_and_start_forge(self, material: str) -> bool:
         """Claim any completed output and select the requested material."""

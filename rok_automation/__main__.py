@@ -189,6 +189,10 @@ def main() -> int:
         help="test forge production of the selected material on the current account",
     )
     parser.add_argument(
+        "--test-skip-account", choices=("rok", "gmail"),
+        help="skip the current RoK or Gmail account without farming",
+    )
+    parser.add_argument(
         "--no-switch-gmail",
         action="store_true",
         help="farm characters in the current Gmail only (do not switch Gmail accounts)",
@@ -330,6 +334,16 @@ def main() -> int:
                     print(f"Armies already marching: {detection.armies_out}/5")
                 else:
                     print("Armies already marching: not recognized")
+
+    if args.test_skip_account:
+        from rok_automation.automation.skip_test import run_skip_test
+        clear_paused()
+        try:
+            run_skip_test(game, args.test_skip_account, args.gmail_state)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"Account skip test stopped safely: {exc}")
+            return 1
+        return 0
 
     if args.test_city_resources or args.test_forge_material:
         clear_paused()

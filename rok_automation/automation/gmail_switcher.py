@@ -48,7 +48,7 @@ _MAX_ACTION_ATTEMPTS = 5
 _MAX_DROPDOWN_SCROLLS = 10
 _MAX_IDENTITY_READS = 8
 _ACTION_RETRY_DELAY = 0.20
-_SCROLL_SETTLE_DELAY = 0.45
+_SCROLL_SETTLE_DELAY = 0.35
 # A reading must repeat this many times (once) before the entry click
 # is trusted, but the switch proceeds after a few attempts if the list
 # keeps jittering, so it can never hang.
@@ -195,6 +195,18 @@ class GmailAccountRegistry:
         if not identity.email and not identity.uid:
             return None
         return self._upsert(identity, verified=True)
+
+    def place(self, identity: GmailIdentity, position: int) -> None:
+        """Place an observed account at a zero-based position, shifting other entries."""
+        if not identity.email and not identity.uid:
+            return
+        self.verify(identity)
+        accounts = self.load()
+        for index, account in enumerate(accounts):
+            if self._matches(account.identity, identity):
+                accounts.insert(max(0, min(position, len(accounts) - 1)), accounts.pop(index))
+                self._save(accounts)
+                return
 
     def verify_many(self, identities: list[GmailIdentity]) -> None:
         for identity in identities:
@@ -532,6 +544,7 @@ class GmailSwitcher:
             "portrait": 0,
             "settings": 0,
             "account": 0,
+            "character_list": 0,
             "switch_link": 0,
             "dropdown": 0,
             "entry": 0,
@@ -562,6 +575,20 @@ class GmailSwitcher:
                     frame,
                 )
                 last_state = state
+                if state == "character_list":
+                    # The character traversal leaves this modal open when the
+                    # final starred character has been checked. Close it before
+                    # trying to open Tài khoản in the settings panel behind it.
+                    self._bump(clicks, "character_list", "Character list close button")
+                    close_bounds = self._find_game_menu_close(frame)
+                    if close_bounds is None:
+                        self._log("Could not find the character list close button; retrying")
+                        self.game.wait(_ACTION_RETRY_DELAY)
+                        continue
+                    self._log("Closing character list to switch Gmail accounts")
+                    self.game.click(close_bounds, screenshot)
+                    self._wait_for_state_change("character_list")
+                    continue
                 if state == "settings_menu":
                     self._bump(clicks, "account", "Tài khoản button")
                     account_bounds = self._find_account_button(
@@ -911,19 +938,16 @@ class GmailSwitcher:
         """Drag the dropdown list upward to reveal accounts further down."""
 
         height, width = frame.shape[:2]
-        if entries:
-            center_x = round(
-                sum(entry.bounds[0] + entry.bounds[2] / 2 for entry in entries)
-                / len(entries)
-            )
-            start_y = round(entries[-1].center_y)
-            end_y = round(entries[0].center_y)
-            if start_y <= end_y:
-                start_y = round(entries[0].center_y + height * 0.04)
-                end_y = round(entries[0].center_y)
-        else:
-            center_x = round(width * 0.50)
-            start_y, end_y = round(height * 0.68), round(height * 0.40)
+        center_x = (round(sum(entry.bounds[0] + entry.bounds[2] / 2 for entry in entries)
+                          / len(entries)) if entries else round(width * 0.50))
+        # Use the dropdown's viewport rather than the number of OCR rows:
+        # partially clipped or unreadable rows should not shorten later swipes.
+        field = _POPUP_FIELD_CACHE.get((height, width))
+        top = (field[1] + field[3] + round(height * 0.05)
+               if field is not None else round(height * 0.52))
+        end_y = min(top, round(height * 0.68))
+        start_y = min(round(height * 0.86),
+                      max(round(height * 0.79), end_y + round(height * 0.20)))
 
         self.game.drag((center_x, start_y), (center_x, end_y), screenshot)
         self.game.wait(_SCROLL_SETTLE_DELAY)

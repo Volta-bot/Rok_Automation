@@ -40,6 +40,7 @@ from rok_automation.game.flags import (
     set_forge_material,
 )
 from rok_automation.game.pause import clear_paused, set_paused
+from rok_automation.game.skip import clear_skip, request_skip
 from rok_automation.game.process import run_hidden
 from rok_automation.logic.resource_selector import (
     Resource,
@@ -164,6 +165,8 @@ class ROKAutomationApp:
         self._output_queue: queue.Queue[str | None] = queue.Queue()
         self._is_running = False
         self._is_paused = False
+        self._active_farm_scope = None
+        self._active_gmail_switch = False
         self._session_targets: list[SearchTarget] = []
         self._run_start_index = 0
         self._run_summary_enabled = False
@@ -628,6 +631,45 @@ class ROKAutomationApp:
         )
         btn_stock.pack(side=tk.LEFT, padx=(4, 0))
 
+        skip_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
+        skip_box.pack(fill=tk.X, pady=(4, 0))
+        for label, kind in (("Skip RoK account", "rok"), ("Skip Gmail account", "gmail")):
+            tk.Button(
+                skip_box, text=label, font=("Segoe UI", 8),
+                bg=ModernColors.BG_CARD_LIGHT, fg=ModernColors.TEXT_PRIMARY,
+                activebackground=ModernColors.BG_BORDER,
+                activeforeground=ModernColors.TEXT_PRIMARY, bd=1,
+                relief=tk.SOLID, cursor="hand2", padx=8, pady=3,
+                command=lambda selected=kind: self.request_account_skip(selected),
+            ).pack(side=tk.LEFT, padx=(0, 4))
+
+    def request_account_skip(self, kind: str) -> None:
+        if not self._is_running:
+            cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation",
+                   "--test-skip-account", kind, "--emulator", self.selected_emulator()]
+            if self.gmail_state_path is not None:
+                cmd.extend(["--gmail-state", str(self.gmail_state_path)])
+            self.log_info(f"Testing {kind.upper()} account skip.")
+            self._launch_utility_command(cmd)
+            return
+        if not self._active_farm_scope:
+            self.log_warning("Wait for the current diagnostic to finish before skipping an account.")
+            return
+        if kind == "rok" and self._active_farm_scope == "rok":
+            self.log_warning("RoK account switching is disabled for this run.")
+            return
+        if kind == "gmail" and not self._active_gmail_switch:
+            self.log_warning("Gmail switching is disabled for this run.")
+            return
+        try:
+            request_skip(kind)
+        except OSError as exc:
+            self.log_error(f"Could not request account skip: {exc}")
+            return
+        if self._is_paused:
+            self.toggle_pause()
+        self.log_info(f"Skip {kind.upper()} requested; switching at the next safe farming checkpoint.")
+
     def _build_signed_in_accounts_panel(self, parent: tk.Widget) -> None:
         """Build the persistent Gmail account list and progress controls."""
 
@@ -827,7 +869,7 @@ class ROKAutomationApp:
             self._resize_signed_in_accounts_scroll_region()
             return
 
-        for account in accounts:
+        for position, account in enumerate(accounts, start=1):
             row = tk.Frame(
                 self.signed_in_accounts_rows,
                 bg=ModernColors.BG_CARD_LIGHT,
@@ -853,14 +895,7 @@ class ROKAutomationApp:
                 disabledforeground=(ModernColors.ACCENT_GREEN if completed else ModernColors.ACCENT_RED),
                 command=lambda identity=account.identity: self._toggle_gmail_progress(identity),
             ).pack(side=tk.LEFT)
-            character_progress = rotation.get_character_progress(account.identity)
-            account_text = account.identity.email or (f"UID {account.identity.uid}" if account.identity.uid else "unknown Gmail")
-            if character_progress:
-                index = character_progress.get("index")
-                direction = character_progress.get("direction")
-                if isinstance(index, int) and direction in (-1, 1):
-                    total = character_progress.get("total")
-                    account_text += f"  {index + 1}/{total if total is not None else '?'} {'⬇' if direction == 1 else '⬆'}"
+            account_text = f"{position}. " + (account.identity.email or (f"UID {account.identity.uid}" if account.identity.uid else "unknown Gmail"))
             tk.Label(
                 row,
                 text=account_text,
@@ -1582,6 +1617,13 @@ class ROKAutomationApp:
         if scope == "rok":
             cmd.append("--current-rok-only")
 
+        try:
+            clear_skip()
+        except OSError as exc:
+            self.log_error(f"Could not clear a previous skip request: {exc}")
+            return
+        self._active_farm_scope = scope if farm_enabled else None
+        self._active_gmail_switch = bool(farm_enabled and scope == "all" and self.opt_switch_gmail.get())
         self._run_start_index = len(self._session_targets)
         if self.session_summary_path and self.session_summary_path.is_file():
             try:
@@ -1694,6 +1736,7 @@ class ROKAutomationApp:
 
     def _launch_utility_command(self, cmd: list[str]) -> None:
         """Run a short utility command in background."""
+        self._active_farm_scope = None
         self._start_worker(cmd)
 
     def _run_subprocess_worker(self, process: subprocess.Popen[str]) -> None:

@@ -83,6 +83,37 @@ class TestRedesignedUserCenter(unittest.TestCase):
         frame = np.full((720, 1280, 3), 245, dtype=np.uint8)
         self.assertIsNone(GmailSwitcher._find_user_center_switch_button(frame))
 
+    def test_switch_closes_character_list_before_clicking_account(self):
+        game = DummyGame()
+        switcher = GmailSwitcher(game, ScreenDetector(), log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        switcher.rok_menus._detect_menu_state = MagicMock(side_effect=[
+            ("character_list", None, 1.0), ("settings_menu", (20, 20, 30, 30), 1.0),
+        ])
+        close = (1062, 68, 48, 40)
+        account = (300, 200, 40, 30)
+        with patch.object(switcher, "_capture", return_value=(Path("screen.png"), frame)), \
+             patch.object(switcher, "_read_lilith_screen", return_value=None), \
+             patch.object(switcher, "_find_game_menu_close", return_value=close), \
+             patch.object(switcher, "_find_account_button", return_value=account), \
+             patch.object(switcher, "_wait_for_state_change", side_effect=[None, RuntimeError("done")]) as wait:
+            with self.assertRaisesRegex(RuntimeError, "done"):
+                switcher.switch_to_next(GmailRotation())
+        self.assertEqual(game.clicks, [close, account])
+        self.assertEqual(wait.call_args_list[0].args, ("character_list",))
+
+    def test_character_list_close_is_bounded_when_x_is_missing(self):
+        game = DummyGame()
+        switcher = GmailSwitcher(game, ScreenDetector(), log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        switcher.rok_menus._detect_menu_state = MagicMock(return_value=("character_list", None, 1.0))
+        with patch.object(switcher, "_capture", return_value=(Path("screen.png"), frame)), \
+             patch.object(switcher, "_read_lilith_screen", return_value=None), \
+             patch.object(switcher, "_find_game_menu_close", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "Character list close button"):
+                switcher.switch_to_next(GmailRotation())
+        self.assertEqual(game.clicks, [])
+
     def test_close_sequence_returns_to_map(self):
         game = DummyGame()
         game.timing = MagicMock()
@@ -162,7 +193,19 @@ class TestRedesignedGmailDropdown(unittest.TestCase):
         ]
         switcher._scroll_dropdown(Path("frame.png"), np.zeros((712, 1275, 3)), entries)
         start, end = game.drags[0]
-        self.assertTrue(350 < end[1] < start[1] < 570)
+        self.assertTrue(340 < end[1] < start[1] < 590)
+        self.assertGreater(start[1] - end[1], 180)
+
+    def test_swipe_distance_does_not_shrink_with_fewer_visible_rows(self):
+        game = DummyGame()
+        switcher = GmailSwitcher(game, ScreenDetector(), log=lambda _: None)
+        frame = np.zeros((712, 1275, 3))
+        rows = [_DropdownEntry("one@gmail.com", None, (475, 374, 200, 21)),
+                _DropdownEntry("two@gmail.com", None, (475, 455, 200, 21)),
+                _DropdownEntry("three@gmail.com", None, (475, 538, 200, 21))]
+        switcher._scroll_dropdown(Path("frame.png"), frame, rows)
+        switcher._scroll_dropdown(Path("frame.png"), frame, rows[:1])
+        self.assertEqual(game.drags[0], game.drags[1])
 
 
 class TestGmailRotation(unittest.TestCase):
