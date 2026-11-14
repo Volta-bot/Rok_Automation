@@ -133,6 +133,38 @@ class TestRedesignedUserCenter(unittest.TestCase):
         self.assertTrue(y <= 35 + height // 2 <= y + h)
 
 
+class TestRedesignedGmailDropdown(unittest.TestCase):
+    def test_dropdown_accepts_account_id_rows(self):
+        frame = np.full((712, 1275, 3), 245, dtype=np.uint8)
+        detections = (
+            ("Chuyển tài khoản", (558, 218, 159, 23), 0.99),
+            ("first@gmail.com", (475, 302, 200, 25), 0.99),
+            ("first@gmail.com", (475, 374, 200, 21), 0.99),
+            ("ID tài khon: 1744392", (476, 406, 155, 18), 0.99),
+            ("second@gmail.com", (475, 455, 189, 23), 0.99),
+            ("ID tài khoản: 51486", (476, 489, 138, 18), 0.99),
+            ("third@gmail.com", (474, 538, 192, 23), 0.99),
+        )
+        switcher = GmailSwitcher(DummyGame(), ScreenDetector(), log=lambda _: None)
+        with patch("rok_automation.automation.gmail_switcher.read_text_detections", return_value=detections):
+            screen = switcher._read_popup(frame)
+        self.assertEqual(screen.state, "dropdown_open")
+        self.assertEqual([entry.uid for entry in screen.entries], ["1744392", "51486", None])
+        self.assertEqual(screen.field_email, "first@gmail.com")
+
+    def test_swipe_starts_and_ends_inside_dropdown_rows(self):
+        game = DummyGame()
+        switcher = GmailSwitcher(game, ScreenDetector(), log=lambda _: None)
+        entries = [
+            _DropdownEntry("first@gmail.com", "1744392", (475, 374, 200, 21)),
+            _DropdownEntry("second@gmail.com", "51486", (475, 455, 189, 23)),
+            _DropdownEntry("third@gmail.com", None, (474, 538, 192, 23)),
+        ]
+        switcher._scroll_dropdown(Path("frame.png"), np.zeros((712, 1275, 3)), entries)
+        start, end = game.drags[0]
+        self.assertTrue(350 < end[1] < start[1] < 570)
+
+
 class TestGmailRotation(unittest.TestCase):
     def test_manual_marks_preserve_current_and_can_be_reversed(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -641,18 +641,11 @@ class GmailSwitcher:
                         (email_key(entry.email) or entry.email, round(entry.center_y / 15))
                         for entry in lilith.entries
                     )
-                    span = (
-                        lilith.entries[-1].center_y - lilith.entries[0].center_y
-                        if len(lilith.entries) >= 2
-                        else 0.0
-                    )
                     unchanged = (
                         last_signature is not None and signature == last_signature
                     )
                     at_bottom = (
-                        unchanged
-                        or span < frame.shape[0] * 0.05
-                        or scrolls >= _MAX_DROPDOWN_SCROLLS
+                        unchanged or scrolls >= _MAX_DROPDOWN_SCROLLS
                     )
                     if not at_bottom:
                         last_signature = signature
@@ -898,10 +891,11 @@ class GmailSwitcher:
                 sum(entry.bounds[0] + entry.bounds[2] / 2 for entry in entries)
                 / len(entries)
             )
-            start_y = max(round(height * 0.68), round(entries[-1].center_y))
-            end_y = min(round(height * 0.40), round(entries[0].center_y - height * 0.05))
+            start_y = round(entries[-1].center_y)
+            end_y = round(entries[0].center_y)
             if start_y <= end_y:
-                start_y, end_y = round(height * 0.68), round(height * 0.40)
+                start_y = round(entries[0].center_y + height * 0.04)
+                end_y = round(entries[0].center_y)
         else:
             center_x = round(width * 0.50)
             start_y, end_y = round(height * 0.68), round(height * 0.40)
@@ -1259,6 +1253,8 @@ class GmailSwitcher:
                 emails.append((match.group(1), bounds))
                 continue
             uid_match = _UID_PATTERN.search(_fold(text).replace(" ", ""))
+            if not uid_match:
+                uid_match = _ACCOUNT_ID_PATTERN.search(_fold(text).replace(" ", ""))
             if uid_match:
                 uids.append((uid_match.group(1), bounds))
                 continue
