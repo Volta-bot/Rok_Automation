@@ -167,6 +167,10 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--cycle-gmail-only", action="store_true",
+        help="visit each signed-in Gmail and return to the starting Gmail without farming",
+    )
+    parser.add_argument(
         "--daily-reward",
         action="store_true",
         help="claim daily VIP and campaign rewards before farming each account",
@@ -252,6 +256,8 @@ def main() -> int:
         help="keep the terminal console visible when launching GUI",
     )
     args = parser.parse_args()
+    if args.cycle_gmail_only and (args.farm or args.no_switch_gmail or args.current_rok_only):
+        parser.error("--cycle-gmail-only cannot be combined with farming or restricted account scope")
 
     if args.gui:
         from rok_automation.ui.app import launch_gui
@@ -331,6 +337,19 @@ def main() -> int:
                     print(f"Armies already marching: {detection.armies_out}/5")
                 else:
                     print("Armies already marching: not recognized")
+
+    if args.cycle_gmail_only:
+        from rok_automation.automation.gmail_cycle import cycle_gmail_accounts
+        clear_paused()
+        try:
+            cycle_gmail_accounts(game)
+        except KeyboardInterrupt:
+            print("[Warning] Gmail cycle stopped by user")
+            return 1
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[Error] Gmail cycle stopped safely: {exc}")
+            return 1
+        return 0
 
     if args.test_skip_account:
         from rok_automation.automation.skip_test import run_skip_test

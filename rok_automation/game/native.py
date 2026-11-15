@@ -113,13 +113,8 @@ class NativeInterface(AdbInput):
                 f"screen timeouts scaled {self.timeout_scale:.1f}x"
             )
 
-    @timed("capture")
     def screenshot(self) -> Path:
-        """Capture into memory; the returned path is a handle for frame loaders.
-
-        Use vision.screen.save_frame to materialize a diagnostic PNG.
-        Like the old screenshot file, this handle refers to the latest capture.
-        """
+        """Capture the emulator and store a canonical 1280x720 frame."""
 
         was_native = isinstance(self.source, FallbackFrameSource) and self.source.primary is not None
         started = time.perf_counter()
@@ -133,8 +128,10 @@ class NativeInterface(AdbInput):
         self._guest_size = (width, height)
         normalized = normalize_capture(frame)
         destination = self.screenshot_path.expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
         resolved = destination.resolve()
-        cache_captured_frame(resolved, normalized, memory_only=True)
+        cv2.imwrite(str(resolved), normalized)
+        cache_captured_frame(resolved, normalized)
         return resolved
 
 

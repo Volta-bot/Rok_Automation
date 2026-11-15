@@ -25,23 +25,21 @@ class MemoryCaptureTests(unittest.TestCase):
         self.game.source = MagicMock()
         self.game.screenshot_path = self.path
 
-    def test_capture_uses_latest_pixels_without_writing_a_png(self):
+    def test_capture_writes_latest_pixels_to_png_and_cache(self):
         cv2.imwrite(str(self.path), np.zeros((720, 1280, 3), np.uint8))
         frame = np.full((1080, 1920, 3), 72, np.uint8)
         self.game.source.capture.return_value = frame
-        with patch("rok_automation.game.native.cv2.imwrite") as write:
-            handle = self.game.screenshot()
-        write.assert_not_called()
+        handle = self.game.screenshot()
         self.assertEqual(self.game._guest_size, (1920, 1080))
         self.assertEqual(load_color_frame(handle).shape, (720, 1280, 3))
         self.assertTrue(np.all(load_color_frame(handle) == 72))
         self.assertTrue(np.all(load_gray_frame(handle) == 72))
-        self.assertTrue(np.all(cv2.imread(str(self.path)) == 0))
+        self.assertTrue(np.all(cv2.imread(str(self.path)) == 72))
 
     def test_export_then_capture_does_not_reuse_saved_pixels(self):
         self.game.source.capture.return_value = np.full((720, 1280, 3), 40, np.uint8)
         handle = self.game.screenshot()
-        self.assertFalse(self.path.exists())
+        self.assertTrue(self.path.exists())
         save_frame(handle)
         self.assertTrue(np.all(cv2.imread(str(self.path)) == 40))
         self.game.source.capture.return_value = np.full((720, 1280, 3), 80, np.uint8)

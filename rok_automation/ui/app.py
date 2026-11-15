@@ -1670,23 +1670,41 @@ class ROKAutomationApp:
 
         # Check options
         farm_enabled = bool(self.opt_farm.get())
+        cycle_only = bool(not farm_enabled and scope == "all" and self.opt_switch_gmail.get())
         city_tasks_enabled = bool(self.opt_collect_city_resources.get() or self.opt_auto_forge.get())
-        if not farm_enabled:
+        options = {
+            "Auto Farm Resources": farm_enabled,
+            "Switch Gmail Accounts": bool(self.opt_switch_gmail.get()),
+            "Daily Rewards": bool(self.opt_daily_reward.get()),
+            "City Resources": bool(self.opt_collect_city_resources.get()),
+            "Forge Material": bool(self.opt_auto_forge.get()),
+            "Alliance Help & Tech (planned)": bool(self.opt_alliance.get()),
+            "Auto Train Troops (planned)": bool(self.opt_train_troops.get()),
+        }
+        for name, enabled in options.items():
+            detail = f" ({self.opt_forge_material.get()})" if name == "Forge Material" and enabled else ""
+            self.log(f"[Option] {name}: {'Enabled' if enabled else 'Disabled'}{detail}")
+        if cycle_only:
+            self.log_info("Plan: cycle through signed-in Gmail accounts and return to the starting Gmail. No farming, character switching, rewards or city tasks will run.")
+        elif farm_enabled:
+            target = ("the current RoK character" if scope == "rok" else
+                      "all RoK characters in the current Gmail" if scope == "gmail" or not self.opt_switch_gmail.get()
+                      else "all RoK characters across signed-in Gmail accounts")
+            self.log_info(f"Plan: farm {target}, with enabled rewards and city tasks.")
+        elif city_tasks_enabled or self.opt_daily_reward.get():
+            self.log_info("Plan: run enabled rewards and city tasks on the current character. Farming is disabled.")
+        else:
+            self.log_info("Plan: no executable actions enabled for this scope; nothing to run.")
+            return
+        if not farm_enabled and not cycle_only:
             if city_tasks_enabled:
                 self.log_info(
                     "Farming is unchecked; running city tasks immediately on the current account."
                 )
             elif self.opt_daily_reward.get():
                 self.log_info("Farming is unchecked; running Daily Rewards collection only.")
-            else:
-                confirm = messagebox.askyesno(
-                    "ROKauto",
-                    "Farming option is unchecked. Do you want to run screen diagnostic only?",
-                )
-                if not confirm:
-                    return
 
-        if self.opt_daily_reward.get():
+        if self.opt_daily_reward.get() and not cycle_only:
             self.log_info(
                 "Daily Rewards active: VIP points, free VIP chest, and Campaign golden chest will be claimed."
             )
@@ -1716,7 +1734,9 @@ class ROKAutomationApp:
         cmd.extend(["--emulator", self.selected_emulator()])
         if self.gmail_state_path is not None:
             cmd.extend(["--gmail-state", str(self.gmail_state_path)])
-        if farm_enabled or city_tasks_enabled:
+        if cycle_only:
+            cmd.append("--cycle-gmail-only")
+        elif farm_enabled or city_tasks_enabled:
             if farm_enabled:
                 cmd.append("--farm")
             else:
@@ -1735,7 +1755,7 @@ class ROKAutomationApp:
                 )
             except OSError as exc:
                 self.log_error(f"Could not apply automation options: {exc}")
-        if not farm_enabled and self.opt_daily_reward.get():
+        if not farm_enabled and not cycle_only and self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
         if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
             cmd.append("--no-switch-gmail")
@@ -1749,15 +1769,15 @@ class ROKAutomationApp:
             self._release_instance_lock()
             return
         self._active_farm_scope = scope if farm_enabled else None
-        self._active_gmail_switch = bool(farm_enabled and scope == "all" and self.opt_switch_gmail.get())
+        self._active_gmail_switch = bool((farm_enabled or cycle_only) and scope == "all" and self.opt_switch_gmail.get())
         self._run_start_index = len(self._session_targets)
-        if self.session_summary_path and self.session_summary_path.is_file():
+        if farm_enabled and self.session_summary_path and self.session_summary_path.is_file():
             try:
                 self.session_summary_path.unlink()
             except OSError:
                 pass
         self._run_summary_enabled = bool(
-            self.session_summary_path and not self.session_summary_path.is_file()
+            farm_enabled and self.session_summary_path and not self.session_summary_path.is_file()
         )
         self.log_info(f"Starting automation with command: {' '.join(cmd)}")
         self._start_worker(cmd)

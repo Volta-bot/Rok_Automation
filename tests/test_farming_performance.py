@@ -97,7 +97,7 @@ class FastDetectionTests(unittest.TestCase):
         self.assertIsNotNone(locate(moved))
         self.assertIsNotNone(locate(moved, fast=True))
 
-    def test_transition_grace_still_recovers_an_unexpected_screen(self):
+    def test_transition_immediately_recovers_an_unexpected_screen(self):
         game = MagicMock()
         game.timing = TimingConfig()
         controller = FarmingController(game, detector=MagicMock(), log=lambda _: None)
@@ -113,10 +113,10 @@ class FastDetectionTests(unittest.TestCase):
                 expected_states=(ScreenState.NEW_TROOPS_PROMPT,),
             )
         self.assertEqual(result[1].state, ScreenState.CITY)
-        self.assertTrue(any(call.kwargs["fast_only"] for call in check.call_args_list))
-        self.assertFalse(check.call_args_list[-1].kwargs["fast_only"])
+        self.assertEqual(check.call_count, 1)
+        self.assertNotIn("fast_only", check.call_args_list[-1].kwargs)
 
-    def test_reuses_recent_world_frame_but_recaptures_after_delay(self):
+    def test_each_army_reads_a_fresh_screen_even_with_a_recent_world_frame(self):
         for age in (0.0, 2.0):
             with self.subTest(age=age):
                 detector = MagicMock()
@@ -131,10 +131,7 @@ class FastDetectionTests(unittest.TestCase):
                      patch.object(controller, "_dispatch_army", return_value=True), \
                      patch.object(controller, "_remember_farmed_node"):
                     self.assertTrue(controller._farm_one_army(2, {r: 8 for r in Resource}, set()))
-                if age == 0:
-                    read.assert_not_called()
-                else:
-                    read.assert_called_once_with(expected_states=(ScreenState.WORLD_MAP,))
+                read.assert_called_once_with()
 
 
 class PerformanceStatsTests(unittest.TestCase):

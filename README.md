@@ -7,11 +7,11 @@ ROKauto is a Windows desktop automation tool for **Rise of Kingdoms** on **MuMu 
 - **State-driven farming:** Detects the current screen, navigates between the city, map, search, resource node and troop screens, and recovers from missed actions or unexpected dialogs. It reads the march counter and fills available slots, up to five armies.
 - **Resource selection:** Recognizes Vietnamese and English resource keywords in governor names. Without a keyword it selects the lowest readable top-bar stockpile; if none are readable, it uses a weighted random choice favoring gold.
 - **Node search:** Searches levels 8 down to 5, falls back to other resources, avoids green incoming routes and duplicate coordinates, and remembers recently farmed nodes across cycles for 30 minutes. Run summaries estimate yields from dispatched resource types and levels.
-- **Character and Gmail rotation:** Traverses starred characters and switches through signed-in Gmail accounts. Rotation progress is saved and can be resumed after interruption. The GUI can maintain a signed-in account list, mark accounts complete, remove entries and reset run progress.
+- **Character and Gmail rotation:** Traverses starred characters and switches through signed-in Gmail accounts. Rotation progress is saved and can be resumed after interruption. A successfully completed full Gmail run automatically resets its run and character progress for the next run; stopped or failed runs retain their progress. The GUI can maintain a signed-in account list, mark accounts complete, remove entries and reset run progress.
 - **Daily rewards:** Optionally claims available VIP points, the free VIP chest and the campaign chest, handling already-claimed rewards and common dialogs.
 - **City tasks:** The GUI can collect visible ready Food, Wood, Stone and Gold icons after a small zoom out. It can also claim a ready forge output and select Leather, Iron, Wood or Bone for production, whether or not an output was ready. Enabled city tasks run after farming each account, or immediately on the current account when farming is disabled.
 - **Background operation:** Screenshots use MuMu's native renderer when available, checked against an ADB screenshot at startup; capture falls back to ADB if necessary. Taps use MuMu's local ADB connection, so the host mouse is not moved and the emulator can be covered. Captures are normalized to 1280×720, with corresponding coordinate mapping for input. Capture latency is measured to scale timeouts, and ADB input retries after reconnection.
-- **Farming performance:** Routine captures stay in memory. Recent confirmed map screens carry over to the next army, and transitions briefly probe cached button positions before a full recovery scan. Search-level OCR is reused only when the label pixels are identical; stockpiles are cached for up to 30 seconds per character. Account changes and recovery clear these readings.
+- **Farming capture and recognition:** Uses the capture, search-result waiting and troop-dispatch flow from checkpoint `39fbf4e`. Every capture writes a canonical PNG and every new army reads a fresh screen. Search levels are read directly with OCR.
 - **Control center:** Start, pause and stop a run, choose the account scope and optional tasks, view logs and resource totals, and run screenshot, screen-detection and stockpile diagnostics. Alliance help/technology and troop training are marked as planned, not implemented.
 
 ## Requirements and setup
@@ -38,6 +38,9 @@ python -m rok_automation --farm
 python -m rok_automation --farm --no-switch-gmail
 python -m rok_automation --farm --current-rok-only
 
+# Cycle signed-in Gmail accounts once without farming, then return to the start
+python -m rok_automation --cycle-gmail-only
+
 # Claim daily rewards before farming, or claim them on the current account only
 python -m rok_automation --farm --daily-reward
 python -m rok_automation --daily-reward-only
@@ -62,7 +65,7 @@ python -m rok_automation --help
 
 The `state/` directory stores emulator selection, Gmail rotation and account records, feature flags, and recently farmed nodes. `artifacts/` holds screenshots and run output. Both directories are ignored by Git. The GUI's **Reset Gmail Run Progress** control resets rotation progress; use it when starting a fresh rotation. Treat account records and screenshots as private.
 
-Screenshot, screen-detection and stockpile diagnostics still export PNG files. Routine farming no longer updates `artifacts/emulator_native.png` on every poll; a farming failure exports the last available frame to `artifacts/farming_error.png`. In code, read the handle returned by `game.screenshot()` with `load_color_frame` or `load_gray_frame`, and use `save_frame` when a file is needed.
+Screenshot, screen-detection and stockpile diagnostics export PNG files. Routine farming updates `artifacts/emulator_native.png` on every capture; a farming failure also exports the last available frame to `artifacts/farming_error.png`.
 
 Logs report elapsed seconds per successful army dispatch and per account, along with capture, detection, OCR, ADB input, wait and retry statistics. Completed account measurements are also stored under `performance` in `state/session_summary.json`. Component timings exclude nested measured work (for example, OCR is not counted twice inside detection); dispatch and account durations are overall wall-clock measurements, including pauses. Compare dispatch times and retry counts across similar runs when tuning performance.
 

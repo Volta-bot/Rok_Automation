@@ -342,7 +342,7 @@ class ScreenDetector:
                 best.bounds,
             )
         if best.state is ScreenState.RESOURCE_SEARCH and best.bounds is not None:
-            level = self._cached_search_level(frame, best.bounds, context_key)
+            level = self._read_search_level(frame, best.bounds)
             active_res = self.identify_active_search_resource(best.bounds, frame.shape[1])
             evidence = best.evidence
             if isinstance(active_res, Resource):

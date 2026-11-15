@@ -6,6 +6,59 @@ from rok_automation.automation.account_switcher import AccountSwitcher, AccountT
 
 
 class AccountBottomTraversalTests(unittest.TestCase):
+    def test_single_active_card_with_unreadable_count_finishes_without_switching(self):
+        switcher = AccountSwitcher(MagicMock(), MagicMock(), log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        card = ('only account', (300, 225, 230, 32))
+        traversal = AccountTraversal(direction=1, current_index=0, total_accounts=12)
+        initialized = MagicMock()
+        with patch.object(switcher, '_open_character_list'), \
+             patch.object(switcher, '_capture', return_value=('frame', frame)), \
+             patch.object(switcher, '_read_account_cards', return_value=[card]), \
+             patch.object(switcher, '_read_starred_account_total', return_value=None), \
+             patch.object(switcher, '_starred_accounts_header_bounds', return_value=(155, 136, 388, 79)), \
+             patch.object(switcher, '_regular_accounts_header_bounds', return_value=(148, 343, 315, 68)), \
+             patch.object(switcher, '_selected_account_bounds', return_value=card[1]), \
+             patch.object(switcher, '_select_card_and_confirm_login') as select, \
+             patch.object(switcher, '_scroll_all_the_way') as scroll:
+            self.assertIsNone(switcher.switch_to_next(traversal, on_initialized=initialized,
+                                                    resume_target=1, completed_index=0))
+        self.assertEqual(traversal.total_accounts, 1)
+        self.assertFalse(traversal.has_more_accounts())
+        initialized.assert_called_once_with(0, 1, 1)
+        select.assert_not_called()
+        scroll.assert_not_called()
+
+    def test_complete_section_never_scrolls_to_hide_the_selected_tick(self):
+        switcher = AccountSwitcher(MagicMock(), MagicMock(), log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cards = [('only', (300, 225, 230, 32))]
+        with patch.object(switcher, '_starred_accounts_header_bounds', return_value=(155, 136, 388, 79)), \
+             patch.object(switcher, '_regular_accounts_header_bounds', return_value=(148, 343, 315, 68)), \
+             patch.object(switcher, '_read_visible_page') as read:
+            result = switcher._scroll_all_the_way(AccountTraversal(total_accounts=1),
+                toward_list_end=True, until_check_gone=True, initial=('frame', frame, cards))
+        self.assertEqual(result[0], 'frame')
+        read.assert_not_called()
+        switcher.game.drag.assert_not_called()
+
+    def test_lone_card_on_partial_page_does_not_imply_single_account(self):
+        for top, bottom, selected, count in ((None, (1, 343, 315, 68), (300, 225, 230, 32), None),
+                                            ((155, 136, 388, 79), None, (300, 225, 230, 32), None),
+                                            ((155, 136, 388, 79), (1, 343, 315, 68), None, None),
+                                            ((155, 136, 388, 79), (1, 343, 315, 68), (300, 225, 230, 32), 2)):
+            with self.subTest(top=top, bottom=bottom, selected=selected, count=count):
+                switcher = AccountSwitcher(MagicMock(), MagicMock(), log=lambda _: None)
+                traversal = AccountTraversal()
+                with patch.object(switcher, '_capture', return_value=('frame', np.zeros((720, 1280, 3)))), \
+                     patch.object(switcher, '_read_account_cards', return_value=[('one', (300, 225, 230, 32))]), \
+                     patch.object(switcher, '_read_starred_account_total', return_value=count), \
+                     patch.object(switcher, '_starred_accounts_header_bounds', return_value=top), \
+                     patch.object(switcher, '_regular_accounts_header_bounds', return_value=bottom), \
+                     patch.object(switcher, '_selected_account_bounds', return_value=selected):
+                    switcher._read_visible_page(traversal)
+                self.assertEqual(traversal.total_accounts, count)
+
     def test_complete_pass_from_every_start_uses_closest_end_once(self):
         for start in range(12):
             with self.subTest(start=start):

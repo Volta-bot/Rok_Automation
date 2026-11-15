@@ -135,6 +135,17 @@ class AccountSwitcher:
         at_bottom = self._regular_accounts_header_bounds(frame) is not None
 
         initializing = traversal.direction is None and resume_target is None
+        if at_top and at_bottom and page_size == 1 and active_position == 0 and total == 1:
+            # A completed sole character has nowhere else to go, including
+            # when old saved progress requests a nonexistent second character.
+            traversal.direction = 1
+            traversal.current_index = 0
+            traversal.skipped_index = None
+            traversal.anchored_to_top = True
+            if on_initialized is not None:
+                on_initialized(0, 1, 1)
+            self._log("Only one starred RoK account; character traversal complete")
+            return None
         if resume_target is not None:
             # A previous run may have stopped before or after the login click.
             # Inspect the checkmark before deciding whether another click is needed.
@@ -404,6 +415,21 @@ class AccountSwitcher:
             raise RuntimeError(
                 "Could not read any visible starred accounts after retries"
             )
+        if starred_account_total in (None, 1) and len(cards) == 1:
+            # A lone header digit (especially 1) is often missed by OCR.
+            # Infer a single account only when both section boundaries are
+            # visible and the sole starred card is the selected character.
+            # One card on a clipped/scrolled page is insufficient evidence.
+            starred = self._starred_accounts_header_bounds(frame)
+            regular = self._regular_accounts_header_bounds(frame)
+            if (
+                starred is not None and regular is not None
+                and starred[1] + starred[3] <= cards[0][1][1]
+                and cards[0][1][1] + cards[0][1][3] < regular[1]
+                and self._selected_account_bounds(screenshot, frame, cards) is not None
+            ):
+                traversal.total_accounts = 1
+                self._log("One active starred RoK account visible; no additional characters to farm")
         traversal.anchored_to_top = True
         top_down_cards = self._order_account_cards(
             cards,
@@ -433,6 +459,10 @@ class AccountSwitcher:
         for _ in range(8):
             at_top = self._starred_accounts_header_bounds(frame) is not None
             at_bottom = self._regular_accounts_header_bounds(frame) is not None
+            if at_top and at_bottom:
+                # The whole starred section fits on this page. Scrolling cannot
+                # reveal more starred cards or move the selected tick away.
+                break
             active_bounds = self._selected_account_bounds(
                 screenshot,
                 frame,

@@ -9,6 +9,27 @@ from rok_automation.automation.gmail_switcher import GmailIdentity, GmailRotatio
 
 
 class CharacterProgressTests(unittest.TestCase):
+    def test_completed_resume_goes_back_to_gmail_rotation_without_farming_menu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            identity = GmailIdentity(email='a@gmail.com')
+            rotation = GmailRotation.load(Path(tmp) / 'progress.json')
+            rotation.set_character_progress(identity, 0, 12, 1)
+            rotation.get_character_progress(identity).update(resume_ready=True, next_index=1)
+            rotation.save()
+            controller = FarmingController(MagicMock(), detector=MagicMock(), log=lambda _: None)
+            controller._current_gmail_for_progress = identity
+            controller._progress_rotation = rotation
+            switcher = MagicMock()
+            switcher.switch_to_next.return_value = None
+            with patch('rok_automation.automation.controller.AccountSwitcher', return_value=switcher), \
+                 patch.object(controller, '_run_one_account') as farm, \
+                 patch.object(controller, '_open_world_map_directly') as open_map:
+                context, accounts, dispatched = controller._farm_linked_characters()
+            farm.assert_not_called()
+            open_map.assert_not_called()
+            self.assertIsNone(context.last_error)
+            self.assertEqual((accounts, dispatched), (0, 0))
+
     def test_progress_round_trip_and_reset(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'progress.json'

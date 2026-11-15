@@ -533,7 +533,7 @@ class GmailSwitcher:
     # ------------------------------------------------------------------ #
 
     def switch_to_next(self, rotation: GmailRotation, *, record_only: bool = False,
-                       observe_only: bool = False) -> GmailSwitchResult:
+                       observe_only: bool = False, visit_only: bool = False) -> GmailSwitchResult:
         """Record the current Gmail as farmed and log into the next one.
 
         Returns ``run_complete=True`` when every Gmail has been farmed: either
@@ -640,7 +640,7 @@ class GmailSwitcher:
                     current = background.current
                     self._log(f"Signed in as {current.label()}")
                     if not observe_only:
-                        self._register_current(rotation, current)
+                        self._record_rotation_current(rotation, current, visit_only=visit_only)
                     if record_only or observe_only:
                         self._close_lilith_ui(screenshot, lilith)
                         return GmailSwitchResult(identity=current, run_complete=False)
@@ -672,7 +672,7 @@ class GmailSwitcher:
                         current = lilith.current
                     self._log(f"Signed in as {current.label()}")
                     if not observe_only:
-                        self._register_current(rotation, current)
+                        self._record_rotation_current(rotation, current, visit_only=visit_only)
                     if record_only or observe_only:
                         self._close_lilith_ui(screenshot, lilith)
                         return GmailSwitchResult(identity=current, run_complete=False)
@@ -740,7 +740,8 @@ class GmailSwitcher:
                     if choice is None:
                         self._log(
                             "No other Gmail account to switch to; "
-                            "every Gmail account in this run has been farmed"
+                            + ("every Gmail account in this cycle has been visited" if visit_only
+                               else "every Gmail account in this run has been farmed")
                         )
                         self._close_lilith_ui(screenshot, lilith)
                         rotation.completed = True
@@ -832,6 +833,17 @@ class GmailSwitcher:
     # ------------------------------------------------------------------ #
     # Decisions
     # ------------------------------------------------------------------ #
+
+    def _record_rotation_current(self, rotation: GmailRotation, current: GmailIdentity,
+                                 *, visit_only: bool) -> None:
+        if visit_only:
+            # A switching-only cycle is transient and must never mark a saved
+            # farming run complete. The caller supplies an in-memory rotation.
+            self._record_verified(current)
+            rotation.mark_farmed(current)
+            self._log(f"Visited Gmail {current.label()}; {len(rotation.farmed)} account(s) this cycle")
+        else:
+            self._register_current(rotation, current)
 
     def _register_current(
         self,
