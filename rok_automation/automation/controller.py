@@ -8,6 +8,7 @@ import time
 import unicodedata
 from dataclasses import replace
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from rok_automation.automation.gmail_switcher import (
     GMAIL_PROGRESS_UPDATED,
 )
 from rok_automation.automation.states import FarmState
-from rok_automation.game.console import safe_print
+from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.farmed_nodes import (
     load_recent_farmed_nodes,
     remember_farmed_node,
@@ -73,7 +74,7 @@ class FarmingError(RuntimeError):
     """Raised when the current screen cannot be handled safely."""
 
 
-DEFAULT_SESSION_SUMMARY_PATH = Path("state/session_summary.json")
+DEFAULT_SESSION_SUMMARY_PATH = Path(os.environ.get("ROK_STATE_DIR", "state")) / "session_summary.json"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
@@ -413,7 +414,7 @@ class FarmingController:
                 entry = rotation.get_character_progress(identity)
                 entry["skipped_index"] = traversal.skipped_index
                 if traversal.skipped_index == index and traversal.current_index == index:
-                    entry["next_index"] = total - 1 if total is not None else None
+                    entry["next_index"] = (0 if direction == 1 else total - 1) if total is not None else None
                 else:
                     entry["next_index"] = traversal.next_target_index()
                 entry["resume_ready"] = True
@@ -2146,5 +2147,18 @@ class FarmingController:
         self._log("=" * 62)
 
     def _log(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log(f"[{timestamp}] {message}")
+        lower = message.lower()
+        tag = "Farm"
+        if "timing:" in lower:
+            tag = "Timing"
+        elif any(word in lower for word in ("failed", "could not", "timed out")):
+            tag = "Warning"
+        elif any(word in lower for word in ("search", "resource location", "node", "selecting")):
+            tag = "Search"
+        elif any(word in lower for word in ("army", "troop", "march", "gather")):
+            tag = "Troops"
+        elif "gmail" in lower:
+            tag = "Gmail"
+        elif "account" in lower:
+            tag = "Account"
+        self.log(format_log(message, tag))

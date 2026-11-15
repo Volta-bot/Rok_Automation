@@ -114,12 +114,14 @@ class TestMuMuAdbCapture(unittest.TestCase):
                 config = root / "vms" / f"MuMuPlayerGlobal-15.0-{index}" / "configs" / "vm_config.json"
                 config.parent.mkdir(parents=True)
                 config.write_text(json.dumps({"vm": {"nat": {"port_forward": {"adb": {"host_port": str(port)}}}}}))
+                (config.parent / "extra_config.json").write_text(json.dumps({"playerName": f"farm{index + 1}"}))
             with patch.object(type(family), "install_folders", return_value=[root]), \
                  patch.object(type(family), "_port_is_open", side_effect=lambda port: port == 16416):
                 self.assertEqual(family.manager_path(), manager.parent)
                 self.assertIn(adb, family.adb_executables())
                 instances = family.discover()
             self.assertEqual([item.index for item in instances], [0, 1])
+            self.assertEqual([item.name for item in instances], ["farm1", "farm2"])
             self.assertEqual([item.running for item in instances], [False, True])
             self.assertEqual(instances[1].details["adb_port"], "16416")
 

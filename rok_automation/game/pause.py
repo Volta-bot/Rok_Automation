@@ -13,11 +13,13 @@ process, and a flag file works the same way on every platform.
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
 from typing import Callable
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PAUSE_FLAG_PATH = _PROJECT_ROOT / "state" / "pause.flag"
+_STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
+DEFAULT_PAUSE_FLAG_PATH = _STATE_DIR / "pause.flag"
 # How often the worker re-checks the flag while it is paused.
 _POLL_INTERVAL = 0.1
 

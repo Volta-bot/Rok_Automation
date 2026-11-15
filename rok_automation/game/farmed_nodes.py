@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import time
+import os
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
 
-DEFAULT_FARMED_NODES_PATH = _PROJECT_ROOT / "state" / "farmed_nodes.json"
+DEFAULT_FARMED_NODES_PATH = _STATE_DIR / "farmed_nodes.json"
 
 # How long a farmed node stays remembered. A march needs roughly this
 # long to strip its load from a node, so re-farming earlier than this

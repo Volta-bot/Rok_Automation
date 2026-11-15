@@ -10,14 +10,16 @@ a run is going: switching it on takes effect from the next account.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
 
 # The file the interface writes and the automation reads.
-DEFAULT_DAILY_REWARD_FLAG_PATH = _PROJECT_ROOT / "state" / "daily_reward.flag"
-DEFAULT_CITY_RESOURCES_FLAG_PATH = _PROJECT_ROOT / "state" / "city_resources.flag"
-DEFAULT_FORGE_MATERIAL_PATH = _PROJECT_ROOT / "state" / "forge_material.txt"
+DEFAULT_DAILY_REWARD_FLAG_PATH = _STATE_DIR / "daily_reward.flag"
+DEFAULT_CITY_RESOURCES_FLAG_PATH = _STATE_DIR / "city_resources.flag"
+DEFAULT_FORGE_MATERIAL_PATH = _STATE_DIR / "forge_material.txt"
 
 
 def _resolve(path: Path | None) -> Path:

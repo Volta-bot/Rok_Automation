@@ -27,6 +27,7 @@ _FORGE_READY_TEMPLATE = _CITY_TEMPLATES / "forge_ready_icon.png"
 _FORGE_BUILDING_TEMPLATES = (
     _CITY_TEMPLATES / "forge_building.png",
     _CITY_TEMPLATES / "forge_building_alternate.png",
+    _CITY_TEMPLATES / "forge_building_stone.png",
 )
 _FORGE_MATERIALS_BUTTON_TEMPLATE = _CITY_TEMPLATES / "forge_materials_button.png"
 _FORGE_MATERIALS_CLOSE_TEMPLATE = _CITY_TEMPLATES / "forge_materials_close.png"

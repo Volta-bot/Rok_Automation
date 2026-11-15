@@ -30,6 +30,63 @@ class TestLiveGmailProgress(unittest.TestCase):
         app.log.assert_not_called()
 
 
+class TestForgePreference(unittest.TestCase):
+    def test_selection_persists_even_when_forging_is_disabled(self):
+        from rok_automation.ui.app import _load_forge_preference
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "forge_preference.txt"
+            app = ROKAutomationApp.__new__(ROKAutomationApp)
+            app.opt_forge_material = MagicMock()
+            app.opt_forge_material.get.return_value = "Iron"
+            app.opt_auto_forge = MagicMock()
+            app.opt_auto_forge.get.return_value = False
+            app._instance_index = 0
+            with patch("rok_automation.ui.app.FORGE_PREFERENCE_PATH", path):
+                app._on_forge_material_changed()
+                self.assertEqual(_load_forge_preference(), "Iron")
+                path.write_text("invalid", encoding="utf-8")
+                self.assertEqual(_load_forge_preference(), "Leather")
+
+
+class TestConnectionRetry(unittest.TestCase):
+    def setUp(self):
+        self.app = ROKAutomationApp.__new__(ROKAutomationApp)
+        self.app.root = MagicMock()
+        self.app.root.after.return_value = "retry-1"
+        self.app.emulator_status_badge = MagicMock()
+        self.app._instance_index = 1
+        self.app._connection_retry_id = None
+        self.app.selected_emulator = MagicMock(return_value="mumu")
+
+    def test_retries_once_every_five_seconds_until_connected(self):
+        from rok_automation.game.emulators import EmulatorInstance
+
+        family = MagicMock()
+        family.key = "mumu"
+        family.discover.return_value = []
+        with patch("rok_automation.ui.app.get_family", return_value=family), \
+             patch("rok_automation.game.adb.find_adb_executable", return_value="adb"), \
+             patch("rok_automation.game.adb._run_global"), \
+             patch("rok_automation.game.adb.find_adb_device", return_value="127.0.0.1:16416"):
+            self.assertFalse(self.app.check_emulator_connection())
+            self.app.root.after.assert_called_once_with(5000, self.app._retry_emulator_connection)
+            self.assertFalse(self.app.check_emulator_connection())
+            self.app.root.after.assert_called_once()
+            family.discover.return_value = [EmulatorInstance(1, "farm2", running=True, details={"adb_port": "16416"})]
+            self.app._retry_emulator_connection()
+            self.assertIsNone(self.app._connection_retry_id)
+            self.assertIn("Connected", self.app.emulator_status_badge.config.call_args.kwargs["text"])
+            self.app.root.after.assert_called_once()
+
+    def test_no_selection_cancels_pending_retry(self):
+        self.app._connection_retry_id = "retry-1"
+        self.app._instance_index = None
+        self.assertFalse(self.app.check_emulator_connection())
+        self.app.root.after_cancel.assert_called_once_with("retry-1")
+        self.assertIsNone(self.app._connection_retry_id)
+
+
 class TestROKAutomationApp(unittest.TestCase):
     """Test suite for the ROKAutomationApp UI."""
 
@@ -62,6 +119,7 @@ class TestROKAutomationApp(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.app._release_instance_lock()
         if self.app._is_running:
             self.app._set_running_state(False)
 
@@ -78,6 +136,44 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertFalse(self.app._is_running)
         self.assertEqual(self.app.btn_start.cget("state"), tk.NORMAL)
         self.assertEqual(self.app.btn_stop.cget("state"), tk.DISABLED)
+
+    def test_instance_selection_scopes_accounts_and_blocks_duplicate_workers(self) -> None:
+        from rok_automation.game.emulators import EmulatorInstance
+        from rok_automation.automation.gmail_switcher import GmailAccountRegistry
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            self.app._base_accounts_path = base / "signed_in_gmail_accounts.json"
+            self.app._base_gmail_state_path = base / "gmail_rotation.json"
+            self.app._base_summary_path = base / "session_summary.json"
+            self.app._base_daily_path = base / "daily_reward.flag"
+            GmailAccountRegistry(self.app._base_accounts_path).add_manual("first@example.com")
+            self.assertIsNone(self.app._instance_index)
+            self.app._instances = {
+                "farm1 (#0)": EmulatorInstance(0, "farm1"),
+                "farm2 (#1)": EmulatorInstance(1, "farm2"),
+            }
+            with patch.object(self.app, "check_emulator_connection"):
+                self.app.instance_choice.set("farm1 (#0)")
+                self.app._select_instance()
+                self.assertEqual(self.app.signed_in_accounts.load()[0].identity.email, "first@example.com")
+                self.app.instance_choice.set("farm2 (#1)")
+                self.app._select_instance()
+                self.assertEqual(self.app.signed_in_accounts.load(), [])
+                self.app.signed_in_accounts.add_manual("second@example.com")
+                self.assertTrue(self.app._acquire_instance_lock())
+                other = ROKAutomationApp.__new__(ROKAutomationApp)
+                other._base_accounts_path = self.app._base_accounts_path
+                other._instance_index = 1
+                other._instance_lock = None
+                other.log_warning = MagicMock()
+                self.assertFalse(other._acquire_instance_lock())
+                self.app._release_instance_lock()
+                self.assertTrue(other._acquire_instance_lock())
+                other._release_instance_lock()
+                self.app.instance_choice.set("farm1 (#0)")
+                self.app._select_instance()
+                self.assertEqual(self.app.signed_in_accounts.load()[0].identity.email, "first@example.com")
 
     def test_default_window_fits_the_content(self) -> None:
         """The default window must be wide enough to show every control.
@@ -123,6 +219,7 @@ class TestROKAutomationApp(unittest.TestCase):
 
     def test_planned_options_toggle_and_triggers(self) -> None:
         """Verify toggling planned options produces informative console notices."""
+        self.app._instance_index = 0
         self.app.clear_console()
         self.app.opt_daily_reward.set(True)
         self.app._on_planned_option_toggled("Collect Daily Rewards", self.app.opt_daily_reward)
@@ -138,6 +235,7 @@ class TestROKAutomationApp(unittest.TestCase):
 
     def test_the_daily_reward_toggle_never_touches_the_real_flag(self) -> None:
         """A test toggling the option must not enable it for real runs."""
+        self.app._instance_index = 0
 
         from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
 
@@ -212,6 +310,7 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertIn("2 armies", badge_text)
 
     def test_farmed_total_survives_stop_and_next_start(self) -> None:
+        self.app._instance_index = 0
         with patch.object(self.app, "_start_worker"), \
              patch("rok_automation.ui.app.set_daily_rewards"), \
              patch("rok_automation.ui.app.set_city_resources"), \
@@ -229,6 +328,7 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertIn("2 armies", self.app.lbl_session_farmed.cget("text"))
 
     def test_city_tasks_run_without_farming(self) -> None:
+        self.app._instance_index = 0
         self.app.opt_farm.set(False)
         self.app.opt_collect_city_resources.set(True)
         self.app.opt_daily_reward.set(True)
@@ -241,7 +341,7 @@ class TestROKAutomationApp(unittest.TestCase):
         self.assertIn("--city-tasks-only", command)
         self.assertIn("--daily-reward-only", command)
         self.assertNotIn("--farm", command)
-        resources.assert_called_once_with(True)
+        resources.assert_called_once_with(True, self.app._state_path("city_resources.flag"))
 
     def test_city_task_test_buttons_run_independently(self) -> None:
         self.app.opt_forge_material.set("Iron")
@@ -472,6 +572,7 @@ class TestStopReliability(unittest.TestCase):
         Creating the process inside the reader thread left STOP with no
         handle to kill when the user clicked straight after START.
         """
+        self.app._instance_index = 0
         spawned = MagicMock()
         spawned.stdout = None
         spawned.poll.return_value = None
@@ -482,6 +583,7 @@ class TestStopReliability(unittest.TestCase):
 
             mock_spawn.assert_called_once()
             self.assertIs(self.app._current_process, spawned)
+            self.app._release_instance_lock()
 
     def test_terminate_confirms_the_process_exited(self) -> None:
         """STOP must wait for the exit instead of assuming it happened."""

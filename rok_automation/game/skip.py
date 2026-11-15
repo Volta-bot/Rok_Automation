@@ -1,7 +1,8 @@
 """Cooperative skip requests shared between the GUI and farming worker."""
+import os
 from pathlib import Path
 
-DEFAULT_SKIP_PATH = Path(__file__).resolve().parents[2] / "state" / "skip_account.flag"
+DEFAULT_SKIP_PATH = Path(os.environ.get("ROK_STATE_DIR", Path(__file__).resolve().parents[2] / "state")) / "skip_account.flag"
 
 
 def request_skip(kind: str, path: Path = DEFAULT_SKIP_PATH) -> None:

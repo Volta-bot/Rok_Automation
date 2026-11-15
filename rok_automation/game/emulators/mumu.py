@@ -138,8 +138,15 @@ class MuMuFamily(EmulatorFamily):
                 except (OSError, ValueError, TypeError, KeyError):
                     continue
                 index = int(match.group(1))
+                name = f"MuMu Player {index}"
+                try:
+                    extra = json.loads((config.parent / "extra_config.json").read_text(encoding="utf-8-sig"))
+                    if isinstance(extra.get("playerName"), str) and extra["playerName"].strip():
+                        name = extra["playerName"].strip()
+                except (OSError, ValueError, TypeError, AttributeError):
+                    pass
                 instances.append(EmulatorInstance(
-                    index=index, name=f"MuMu Player {index}",
+                    index=index, name=name,
                     running=self._port_is_open(port), details={"adb_port": str(port)},
                 ))
         if instances:

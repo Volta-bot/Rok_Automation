@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from rok_automation.game.console import safe_print as print, format_log
 from pathlib import Path
 from typing import Any
 
@@ -111,7 +112,7 @@ def _build_game(args):
             index=args.emulator_index,
             adb_path=args.adb_path,
             serial=args.adb_serial,
-            log=lambda message: print(f"[{message}]"),
+            log=lambda message: print(format_log(message, "Capture")),
         )
     except Exception as exc:  # noqa: BLE001 - reported to the user
         print(f"Emulator: Disconnected ({exc})")

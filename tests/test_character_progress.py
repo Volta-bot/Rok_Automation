@@ -51,7 +51,7 @@ class CharacterProgressTests(unittest.TestCase):
                 controller._farm_linked_characters()
             farm.assert_called_once_with(expected_account_name='resumed')
 
-    def test_initial_completion_saves_bottom_target(self):
+    def test_initial_completion_saves_closest_endpoint_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'progress.json'
             identity = GmailIdentity(email='a@gmail.com')
@@ -61,9 +61,9 @@ class CharacterProgressTests(unittest.TestCase):
             switcher = MagicMock()
             def interrupted(traversal, *, on_initialized):
                 traversal.current_index = traversal.skipped_index = 2
-                traversal.direction = -1
+                traversal.direction = 1
                 traversal.total_accounts = 12
-                on_initialized(2, 12, -1)
+                on_initialized(2, 12, 1)
                 raise RuntimeError('stopped during switch')
             switcher.switch_to_next.side_effect = interrupted
             with patch.object(controller, '_run_one_account', return_value=FarmContext(account_name='first')), \
@@ -71,7 +71,8 @@ class CharacterProgressTests(unittest.TestCase):
                  self.assertRaisesRegex(RuntimeError, 'stopped during switch'):
                 controller._farm_linked_characters()
             saved = GmailRotation.load(path).get_character_progress(identity)
-            self.assertEqual((saved['index'], saved['next_index'], saved['skipped_index']), (2, 11, 2))
+            self.assertEqual((saved['index'], saved['next_index'], saved['skipped_index']), (2, 0, 2))
+            self.assertEqual(saved['direction'], 1)
 
     def test_completed_characters_are_saved_before_next_switch(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,16 +30,17 @@ import cv2
 import numpy as np
 
 from rok_automation.automation.account_switcher import AccountSwitcher
-from rok_automation.game.console import safe_print
+from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.screen import ScreenDetector, load_color_frame, load_gray_frame
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
 _MENU_CLOSE_TEMPLATE = _PROJECT_ROOT / "templates/daily_reward/vip_close_x.png"
-DEFAULT_GMAIL_STATE_PATH = _PROJECT_ROOT / "state/gmail_rotation.json"
-DEFAULT_SIGNED_IN_ACCOUNTS_PATH = _PROJECT_ROOT / "state/signed_in_gmail_accounts.json"
+DEFAULT_GMAIL_STATE_PATH = _STATE_DIR / "gmail_rotation.json"
+DEFAULT_SIGNED_IN_ACCOUNTS_PATH = _STATE_DIR / "signed_in_gmail_accounts.json"
 GMAIL_PROGRESS_UPDATED = "[GMAIL_PROGRESS_UPDATED]"
 
 _SWITCH_TIMEOUT = 120.0
@@ -636,6 +638,7 @@ class GmailSwitcher:
                 background = self._read_user_center(frame)
                 if background is not None and background.current is not None:
                     current = background.current
+                    self._log(f"Signed in as {current.label()}")
                     if not observe_only:
                         self._register_current(rotation, current)
                     if record_only or observe_only:
@@ -667,6 +670,7 @@ class GmailSwitcher:
                                 "in Trung Tâm Người Dùng"
                             )
                         current = lilith.current
+                    self._log(f"Signed in as {current.label()}")
                     if not observe_only:
                         self._register_current(rotation, current)
                     if record_only or observe_only:
@@ -1491,7 +1495,7 @@ class GmailSwitcher:
         return screenshot, frame
 
     def _log(self, message: str) -> None:
-        self.log(message)
+        self.log(format_log(message, "Gmail"))
 
 
 def _fold(text: str) -> str:

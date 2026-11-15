@@ -6,6 +6,29 @@ from rok_automation.automation.account_switcher import AccountSwitcher, AccountT
 
 
 class AccountBottomTraversalTests(unittest.TestCase):
+    def test_complete_pass_from_every_start_uses_closest_end_once(self):
+        for start in range(12):
+            with self.subTest(start=start):
+                traversal = AccountTraversal()
+                visited = [start]
+                current = start
+                initialized = MagicMock()
+                for _ in range(12):
+                    if not traversal.has_more_accounts():
+                        break
+                    switcher = self.make_switcher(current)
+                    name = switcher.switch_to_next(traversal, on_initialized=initialized)
+                    if name is None:
+                        break
+                    current = int(name.split()[-1])
+                    visited.append(current)
+                direction = 1 if start <= 5 else -1
+                ordered = range(12) if direction == 1 else range(11, -1, -1)
+                expected = [start] + [index for index in ordered if index != start]
+                self.assertEqual(visited, expected)
+                self.assertFalse(traversal.has_more_accounts())
+                initialized.assert_called_once_with(start, 12, direction)
+
     def make_switcher(self, current_index):
         switcher = AccountSwitcher(MagicMock(), MagicMock(), log=lambda _: None)
         top = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -19,22 +42,37 @@ class AccountBottomTraversalTests(unittest.TestCase):
                 return 'top', top, top_cards, current_index if current_index < 6 else None
             return 'bottom', bottom, bottom_cards, current_index - 6 if current_index >= 6 else None
         switcher._read_page_and_active_position = MagicMock(side_effect=read)
-        switcher._scroll_all_the_way = MagicMock(return_value=('bottom', bottom, bottom_cards))
+        switcher._scroll_all_the_way = MagicMock(side_effect=lambda traversal, *, toward_list_end, **kw: ('bottom', bottom, bottom_cards) if toward_list_end else ('top', top, top_cards))
         switcher._starred_accounts_header_bounds = lambda frame: (1,) if frame is top else None
         switcher._regular_accounts_header_bounds = lambda frame: (1,) if frame is bottom else None
         switcher._select_card_and_confirm_login = MagicMock()
         switcher._wait_for_game = MagicMock()
         return switcher
 
-    def test_initial_switch_selects_last_and_records_already_farmed_account(self):
+    def test_first_account_continues_to_second_without_scrolling(self):
+        switcher = self.make_switcher(0)
+        traversal = AccountTraversal()
+        initialized = MagicMock()
+        self.assertEqual(switcher.switch_to_next(traversal, on_initialized=initialized), 'account 1')
+        initialized.assert_called_once_with(0, 12, 1)
+        self.assertEqual(traversal.current_index, 1)
+        switcher._scroll_all_the_way.assert_not_called()
+
+    def test_middle_near_top_selects_first_and_records_already_farmed_account(self):
         switcher = self.make_switcher(1)
         traversal = AccountTraversal()
         initialized = MagicMock()
-        self.assertEqual(switcher.switch_to_next(traversal, on_initialized=initialized), 'account 11')
-        initialized.assert_called_once_with(1, 12, -1)
+        self.assertEqual(switcher.switch_to_next(traversal, on_initialized=initialized), 'account 0')
+        initialized.assert_called_once_with(1, 12, 1)
         self.assertEqual(traversal.skipped_index, 1)
-        self.assertEqual(traversal.current_index, 11)
-        self.assertTrue(switcher._scroll_all_the_way.call_args.kwargs['toward_list_end'])
+        self.assertEqual(traversal.current_index, 0)
+        self.assertFalse(switcher._scroll_all_the_way.call_args.kwargs['toward_list_end'])
+
+    def test_middle_near_bottom_selects_last(self):
+        switcher = self.make_switcher(8)
+        traversal = AccountTraversal()
+        self.assertEqual(switcher.switch_to_next(traversal), 'account 11')
+        self.assertEqual((traversal.direction, traversal.skipped_index), (-1, 8))
 
     def test_if_last_account_is_current_selects_previous(self):
         switcher = self.make_switcher(11)

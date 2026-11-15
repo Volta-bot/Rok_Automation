@@ -1,5 +1,6 @@
 """Standalone account-skip diagnostics using the regular rotation state."""
 from pathlib import Path
+from rok_automation.game.console import safe_print as print
 
 from rok_automation.automation.account_switcher import AccountSwitcher, AccountTraversal
 from rok_automation.automation.gmail_switcher import (

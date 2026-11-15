@@ -12,7 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from rok_automation.game.console import safe_print
+from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.screen import (
@@ -118,7 +118,12 @@ class AccountSwitcher:
     def switch_to_next(self, traversal: AccountTraversal, *, on_initialized=None,
                        resume_target: int | None = None,
                        completed_index: int | None = None) -> str | None:
-        """Select the next starred card using 6-account top/bottom pages."""
+        """Continue from an endpoint, or start a middle run at its closest end.
+
+        The first account proceeds downward and the last proceeds upward.
+        A middle account is already farmed before initialization, so jump to
+        the nearest end (top on a tie) and skip it during the remaining pass.
+        """
 
         self._open_character_list()
         screenshot, frame, top_down_cards, active_position = (
@@ -165,9 +170,15 @@ class AccountSwitcher:
             if active_index != completed_index:
                 raise RuntimeError("Active account does not match saved progress; reset progress to start over")
             target_index = resume_target
+        elif traversal.direction is None and at_top and active_position == 0:
+            # The first character is already complete; continue down the list.
+            traversal.direction = 1
+            traversal.current_index = 0
+            traversal.anchored_to_top = True
+            target_index = traversal.next_target_index()
         elif traversal.direction is None:
-            # The current character was farmed before opening this list. Record
-            # its position, then start the remaining pass at the last character.
+            # Locate the current character in the complete list before choosing
+            # the nearest endpoint. It has already been farmed by the caller.
             initial_index = active_position if at_top and active_position is not None else None
             if not at_bottom:
                 screenshot, frame, top_down_cards = self._scroll_all_the_way(
@@ -192,18 +203,26 @@ class AccountSwitcher:
                 initial_index = max(0, total - page_size) + bottom_active
             if initial_index is None:
                 raise RuntimeError("Could not locate the current starred account")
-            traversal.direction = -1
             traversal.current_index = initial_index
             traversal.anchored_to_top = True
+            traversal.skipped_index = None
             if initial_index == total - 1:
+                traversal.direction = -1
                 target_index = traversal.next_target_index()
             else:
+                # Start at the closest end, then traverse the entire list,
+                # skipping the initial character that was already farmed.
                 traversal.skipped_index = initial_index
-                target_index = total - 1
+                if initial_index <= total - 1 - initial_index:
+                    traversal.direction = 1
+                    target_index = 0
+                else:
+                    traversal.direction = -1
+                    target_index = total - 1
             at_top = self._starred_accounts_header_bounds(frame) is not None
             at_bottom = True
             active_position = bottom_active
-            self._log(f"Starting at the bottom of the starred list; {total} account(s)")
+            self._log(f"Starting at the closest end of the starred list; {total} account(s)")
         else:
             saved_target = traversal.next_target_index()
             # Subsequent switches: if the green tick is visible on the top 6
@@ -1400,7 +1419,7 @@ class AccountSwitcher:
         return screenshot, frame
 
     def _log(self, message: str) -> None:
-        self.log(message)
+        self.log(format_log(message, "Account"))
 
 
 def _fold(text: str) -> str:

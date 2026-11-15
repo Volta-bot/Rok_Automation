@@ -32,6 +32,7 @@ from rok_automation.automation.gmail_switcher import (
     GmailRotation,
 )
 from rok_automation.game.display import enable_dpi_awareness
+from rok_automation.game.console import TAG_COLORS, split_log
 from rok_automation.game.emulators import families, get_family, select_family
 from rok_automation.game.flags import (
     DEFAULT_DAILY_REWARD_FLAG_PATH,
@@ -49,6 +50,18 @@ from rok_automation.logic.resource_selector import (
     format_resource_amount,
     resource_node_yield,
 )
+
+
+FORGE_PREFERENCE_PATH = Path(__file__).resolve().parents[2] / "state" / "forge_preference.txt"
+FORGE_MATERIALS = ("Leather", "Iron", "Wood", "Bone")
+
+
+def _load_forge_preference() -> str:
+    try:
+        material = FORGE_PREFERENCE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "Leather"
+    return material if material in FORGE_MATERIALS else "Leather"
 
 
 def hide_console_window() -> None:
@@ -148,6 +161,14 @@ class ROKAutomationApp:
         self.daily_reward_flag_path = daily_reward_flag_path
         self.gmail_state_path = gmail_state_path
         self.signed_in_accounts = GmailAccountRegistry(signed_in_accounts_path)
+        self._base_gmail_state_path = gmail_state_path
+        self._base_accounts_path = signed_in_accounts_path
+        self._base_summary_path = session_summary_path
+        self._base_daily_path = daily_reward_flag_path
+        self._instance_index = None
+        self._instances = {}
+        self._instance_lock = None
+        self._connection_retry_id = None
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         # Wide enough for the whole layout: the two option cards side by
         # side need about 1160px, and the button row needs the rest.
@@ -177,12 +198,13 @@ class ROKAutomationApp:
         self.gmail_account_entry = tk.StringVar()
         # Which emulator family to drive.
         self.opt_emulator = tk.StringVar(value=_default_emulator_key())
+        self.instance_choice = tk.StringVar(value="Select instance")
 
         # Additional automation options.
         self.opt_daily_reward = tk.BooleanVar(value=False)
         self.opt_collect_city_resources = tk.BooleanVar(value=False)
         self.opt_auto_forge = tk.BooleanVar(value=False)
-        self.opt_forge_material = tk.StringVar(value="Leather")
+        self.opt_forge_material = tk.StringVar(value=_load_forge_preference())
         self.opt_alliance = tk.BooleanVar(value=False)
         self.opt_train_troops = tk.BooleanVar(value=False)
 
@@ -198,7 +220,7 @@ class ROKAutomationApp:
         self.root.bind("<Escape>", lambda event: self.stop_automation())
 
         # Check emulator status initially
-        self.root.after(200, self.check_emulator_connection)
+        self.root.after(200, self._refresh_instances)
 
     def _setup_styles(self) -> None:
         """Configure ttk styles with a clean dark theme."""
@@ -336,6 +358,23 @@ class ROKAutomationApp:
         status_box = tk.Frame(parent, bg=ModernColors.BG_DARK)
         status_box.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self.emulator_display = tk.StringVar(value=_emulator_label(self.opt_emulator.get()))
+        self.combo_emulator = ttk.Combobox(
+            status_box,
+            textvariable=self.emulator_display,
+            state="readonly",
+            values=[_emulator_label(family.key) for family in families()],
+            width=15,
+            style="Dark.TCombobox",
+            font=("Segoe UI", 9),
+        )
+        self.combo_emulator.pack(side=tk.LEFT, padx=(0, 6))
+        self.combo_emulator.bind("<<ComboboxSelected>>", self._on_emulator_changed)
+
+        self.instance_selector = ttk.Combobox(status_box, textvariable=self.instance_choice, state="readonly", width=22, style="Dark.TCombobox")
+        self.instance_selector.pack(side=tk.LEFT, padx=(0, 6))
+        self.instance_selector.bind("<<ComboboxSelected>>", self._select_instance)
+
         self.emulator_status_badge = tk.Label(
             status_box,
             text="Emulator: Checking...",
@@ -351,15 +390,15 @@ class ROKAutomationApp:
         check_btn = tk.Button(
             status_box,
             text="↻ Refresh",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_SECONDARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
-            command=self.check_emulator_connection,
+            command=self._refresh_instances,
             padx=8,
             pady=2,
         )
@@ -416,6 +455,7 @@ class ROKAutomationApp:
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_GREEN_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#aeb6c4",
             bd=0,
             relief=tk.FLAT,
             cursor="hand2",
@@ -433,6 +473,7 @@ class ROKAutomationApp:
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_BLUE_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#aeb6c4",
             bd=0,
             relief=tk.FLAT,
             cursor="hand2",
@@ -451,6 +492,7 @@ class ROKAutomationApp:
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_RED_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#aeb6c4",
             bd=0,
             relief=tk.FLAT,
             cursor="hand2",
@@ -467,7 +509,7 @@ class ROKAutomationApp:
         tk.Label(
             scope_box,
             text="Quick Farm Scope:",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_MUTED,
         ).pack(side=tk.LEFT, padx=(0, 6))
@@ -475,13 +517,13 @@ class ROKAutomationApp:
         self.btn_farm_current_gmail = tk.Button(
             scope_box,
             text="Farm This Gmail Only",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=lambda: self.start_automation(scope="gmail"),
             padx=7,
@@ -492,13 +534,13 @@ class ROKAutomationApp:
         self.btn_farm_current_rok = tk.Button(
             scope_box,
             text="Farm This RoK Account Only",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=lambda: self.start_automation(scope="rok"),
             padx=7,
@@ -512,7 +554,7 @@ class ROKAutomationApp:
             text="Core Farming Options",
             font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD,
-            fg=ModernColors.ACCENT_BLUE,
+            fg=ModernColors.TEXT_SECONDARY,
         )
         opts_lbl.pack(anchor="w", pady=(2, 4))
 
@@ -546,27 +588,6 @@ class ROKAutomationApp:
 
         self._build_signed_in_accounts_panel(parent)
 
-        lbl_emulator = tk.Label(
-            parent,
-            text="Emulator",
-            font=("Segoe UI", 9),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_MUTED,
-        )
-        lbl_emulator.pack(anchor="w", pady=(6, 1))
-
-        self.emulator_display = tk.StringVar(value=_emulator_label(self.opt_emulator.get()))
-        combo_emulator = ttk.Combobox(
-            parent,
-            textvariable=self.emulator_display,
-            state="readonly",
-            values=[_emulator_label(family.key) for family in families()],
-            style="Dark.TCombobox",
-            font=("Segoe UI", 9),
-        )
-        combo_emulator.pack(fill=tk.X, pady=1)
-        combo_emulator.bind("<<ComboboxSelected>>", self._on_emulator_changed)
-
         # Quick Utility Diagnostics Tools
         tools_lbl = tk.Label(
             parent,
@@ -583,13 +604,13 @@ class ROKAutomationApp:
         btn_screen = tk.Button(
             tools_box,
             text="📸 Screenshot",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=self.run_screenshot_test,
             padx=8,
@@ -600,13 +621,13 @@ class ROKAutomationApp:
         btn_detect = tk.Button(
             tools_box,
             text="🔍 Detect Screen",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=self.run_detect_screen_test,
             padx=8,
@@ -617,29 +638,29 @@ class ROKAutomationApp:
         btn_stock = tk.Button(
             tools_box,
             text="💰 Check Stockpiles",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=self.run_check_stockpiles,
             padx=8,
             pady=3,
         )
-        btn_stock.pack(side=tk.LEFT, padx=(4, 0))
+        btn_stock.pack(side=tk.LEFT, padx=(0, 4))
 
         skip_box = tk.Frame(parent, bg=ModernColors.BG_CARD)
         skip_box.pack(fill=tk.X, pady=(4, 0))
-        for label, kind in (("Skip RoK account", "rok"), ("Skip Gmail account", "gmail")):
+        for label, kind in (("⏭ Skip RoK account", "rok"), ("⏭ Skip Gmail account", "gmail")):
             tk.Button(
-                skip_box, text=label, font=("Segoe UI", 8),
+                skip_box, text=label, font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD_LIGHT, fg=ModernColors.TEXT_PRIMARY,
                 activebackground=ModernColors.BG_BORDER,
-                activeforeground=ModernColors.TEXT_PRIMARY, bd=1,
-                relief=tk.SOLID, cursor="hand2", padx=8, pady=3,
+                activeforeground=ModernColors.TEXT_PRIMARY, bd=0,
+                relief=tk.FLAT, cursor="hand2", padx=8, pady=3,
                 command=lambda selected=kind: self.request_account_skip(selected),
             ).pack(side=tk.LEFT, padx=(0, 4))
 
@@ -662,7 +683,7 @@ class ROKAutomationApp:
             self.log_warning("Gmail switching is disabled for this run.")
             return
         try:
-            request_skip(kind)
+            request_skip(kind, self._state_path("skip_account.flag"))
         except OSError as exc:
             self.log_error(f"Could not request account skip: {exc}")
             return
@@ -683,37 +704,29 @@ class ROKAutomationApp:
         )
         panel.pack(fill=tk.X, pady=(8, 6))
 
-        header = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
-        header.pack(fill=tk.X, pady=(0, 5))
-        tk.Label(
-            header,
-            text="Signed-in accounts",
+        self.btn_toggle_accounts = tk.Button(
+            panel,
+            text="▸ Signed-in accounts",
             font=("Segoe UI", 9, "bold"),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.TEXT_PRIMARY,
-        ).pack(side=tk.LEFT)
-        self.btn_reset_gmail_progress = tk.Button(
-            header,
-            text="Reset Gmail Run Progress",
-            font=("Segoe UI", 8, "bold"),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.ACCENT_AMBER,
             activebackground=ModernColors.BG_BORDER,
-            activeforeground=ModernColors.ACCENT_AMBER,
-            bd=1,
-            relief=tk.SOLID,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
-            command=self.reset_gmail_run_progress,
-            padx=6,
-            pady=2,
+            anchor="w",
+            command=self._toggle_signed_in_accounts,
         )
-        self.btn_reset_gmail_progress.pack(side=tk.RIGHT)
+        self.btn_toggle_accounts.pack(fill=tk.X)
+        self.signed_in_accounts_details = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
 
-        add_row = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
-        add_row.pack(fill=tk.X, pady=(0, 6))
+        add_row = tk.Frame(self.signed_in_accounts_details, bg=ModernColors.BG_CARD_LIGHT)
+        add_row.pack(fill=tk.X, pady=(5, 6))
         self.entry_gmail_account = tk.Entry(
             add_row,
             textvariable=self.gmail_account_entry,
+            width=32,
             font=("Segoe UI", 9),
             bg=ModernColors.BG_DARK,
             fg=ModernColors.TEXT_PRIMARY,
@@ -723,16 +736,17 @@ class ROKAutomationApp:
             highlightbackground=ModernColors.BG_BORDER,
             highlightcolor=ModernColors.ACCENT_BLUE,
         )
-        self.entry_gmail_account.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.entry_gmail_account.pack(side=tk.LEFT, fill=tk.Y)
         self.entry_gmail_account.bind("<Return>", self._add_signed_in_account)
         self.btn_add_gmail_account = tk.Button(
             add_row,
             text="Add",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             bg=ModernColors.ACCENT_BLUE,
             fg="#ffffff",
             activebackground=ModernColors.ACCENT_BLUE_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#aeb6c4",
             bd=0,
             relief=tk.FLAT,
             cursor="hand2",
@@ -742,7 +756,24 @@ class ROKAutomationApp:
         )
         self.btn_add_gmail_account.pack(side=tk.LEFT, padx=(5, 0))
 
-        list_box = tk.Frame(panel, bg=ModernColors.BG_CARD_LIGHT)
+        self.btn_reset_gmail_progress = tk.Button(
+            add_row,
+            text="Reset Gmail Run Progress",
+            font=("Segoe UI", 9, "bold"),
+            bg=ModernColors.BG_CARD,
+            fg=ModernColors.ACCENT_AMBER,
+            activebackground=ModernColors.BG_BORDER,
+            activeforeground=ModernColors.ACCENT_AMBER,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self.reset_gmail_run_progress,
+            padx=6,
+            pady=2,
+        )
+        self.btn_reset_gmail_progress.pack(side=tk.LEFT, padx=(5, 0), fill=tk.Y)
+
+        list_box = tk.Frame(self.signed_in_accounts_details, bg=ModernColors.BG_CARD_LIGHT)
         list_box.pack(fill=tk.X)
         self.signed_in_accounts_canvas = tk.Canvas(
             list_box,
@@ -774,7 +805,75 @@ class ROKAutomationApp:
         self.signed_in_accounts_canvas.bind(
             "<Configure>", self._resize_signed_in_accounts_rows
         )
+        for widget in (list_box, self.signed_in_accounts_canvas, self.signed_in_accounts_rows, scrollbar):
+            self._bind_account_scroll(widget)
         self.refresh_signed_in_accounts()
+
+    def _bind_account_scroll(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._scroll_signed_in_accounts)
+        widget.bind("<Button-4>", self._scroll_signed_in_accounts)
+        widget.bind("<Button-5>", self._scroll_signed_in_accounts)
+
+    def _scroll_signed_in_accounts(self, event: tk.Event) -> str:
+        if event.num == 4:
+            units = -1
+        elif event.num == 5:
+            units = 1
+        else:
+            units = -int(event.delta / 120) if abs(event.delta) >= 120 else (-1 if event.delta > 0 else 1)
+        self.signed_in_accounts_canvas.yview_scroll(units, "units")
+        return "break"
+
+    def _toggle_signed_in_accounts(self) -> None:
+        if self.signed_in_accounts_details.winfo_manager():
+            self.signed_in_accounts_details.pack_forget()
+            self.btn_toggle_accounts.config(text="▸ Signed-in accounts")
+        else:
+            self.signed_in_accounts_details.pack(fill=tk.X)
+            self.btn_toggle_accounts.config(text="▾ Signed-in accounts")
+
+    def _state_path(self, name: str) -> Path:
+        base = self._base_accounts_path or DEFAULT_SIGNED_IN_ACCOUNTS_PATH
+        directory = Path(base).parent
+        if self._instance_index not in (None, 0):
+            directory = directory / "instances" / str(self._instance_index)
+        return directory / name
+
+    def _refresh_instances(self) -> None:
+        try:
+            instances = get_family(self.selected_emulator()).discover()
+            self._instances = {f"{item.name} (#{item.index})": item for item in instances}
+            self.instance_selector["values"] = list(self._instances)
+        except Exception as exc:
+            self._instances = {}
+            self.instance_selector["values"] = []
+            self.log_warning(f"Could not discover MuMu instances: {exc}")
+        if self._instance_index is not None:
+            match = next((label for label, item in self._instances.items() if item.index == self._instance_index), None)
+            if match:
+                self.instance_choice.set(match)
+            self.check_emulator_connection()
+        else:
+            self.emulator_status_badge.config(text="Select an instance", fg=ModernColors.TEXT_SECONDARY, bg=ModernColors.BG_CARD_LIGHT)
+
+    def _select_instance(self, _event: object = None) -> None:
+        instance = self._instances.get(self.instance_choice.get())
+        if instance is None or self._is_running:
+            return
+        self._instance_index = instance.index
+        self.gmail_state_path = self._base_gmail_state_path if instance.index == 0 else self._state_path("gmail_rotation.json")
+        self.session_summary_path = self._base_summary_path if instance.index == 0 else self._state_path("session_summary.json")
+        self.daily_reward_flag_path = self._base_daily_path if instance.index == 0 else self._state_path("daily_reward.flag")
+        self.signed_in_accounts = GmailAccountRegistry(self._base_accounts_path if instance.index == 0 else self._state_path("signed_in_gmail_accounts.json"))
+        self.root.title(f"ROKauto — {instance.name} (#{instance.index})")
+        self.refresh_signed_in_accounts()
+        self.check_emulator_connection()
+
+    def _require_instance(self) -> bool:
+        if self._instance_index is None:
+            self.log_warning("Select a MuMu instance first.")
+            return False
+        return True
 
     def _resize_signed_in_accounts_scroll_region(self, _event: object = None) -> None:
         self.signed_in_accounts_canvas.configure(
@@ -790,6 +889,8 @@ class ROKAutomationApp:
     def _add_signed_in_account(self, _event: object = None) -> None:
         """Save a manually supplied Gmail address as an unverified account."""
 
+        if not self._require_instance():
+            return
         value = self.gmail_account_entry.get()
         try:
             account = self.signed_in_accounts.add_manual(value)
@@ -818,6 +919,8 @@ class ROKAutomationApp:
     def reset_gmail_run_progress(self) -> None:
         """Clear saved Gmail completion status while retaining the account list."""
 
+        if not self._require_instance():
+            return
         if self._is_running:
             self.log_warning("Stop the automation before resetting Gmail progress.")
             return
@@ -848,6 +951,9 @@ class ROKAutomationApp:
 
         for child in self.signed_in_accounts_rows.winfo_children():
             child.destroy()
+        if self._instance_index is None:
+            tk.Label(self.signed_in_accounts_rows, text="Select an instance to view accounts", bg=ModernColors.BG_CARD_LIGHT, fg=ModernColors.TEXT_MUTED, anchor="w").pack(fill=tk.X, padx=3, pady=4)
+            return
         try:
             accounts = self.signed_in_accounts.load()
             farmed = GmailRotation.farmed_from_path(self.gmail_state_path)
@@ -899,7 +1005,7 @@ class ROKAutomationApp:
             tk.Label(
                 row,
                 text=account_text,
-                font=("Segoe UI", 8),
+                font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD_LIGHT,
                 fg=ModernColors.TEXT_PRIMARY,
                 anchor="w",
@@ -907,7 +1013,7 @@ class ROKAutomationApp:
             tk.Label(
                 row,
                 text="verified" if account.verified else "unknown",
-                font=("Segoe UI", 7, "bold"),
+                font=("Segoe UI", 9, "bold"),
                 bg=("#064e3b" if account.verified else ModernColors.BG_BORDER),
                 fg=(
                     ModernColors.ACCENT_GREEN
@@ -920,13 +1026,13 @@ class ROKAutomationApp:
             tk.Button(
                 row,
                 text="Remove",
-                font=("Segoe UI", 7),
+                font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD,
                 fg=ModernColors.TEXT_SECONDARY,
                 activebackground=ModernColors.BG_BORDER,
                 activeforeground=ModernColors.TEXT_PRIMARY,
-                bd=1,
-                relief=tk.SOLID,
+                bd=0,
+                relief=tk.FLAT,
                 cursor="hand2",
                 command=lambda identity=account.identity: self._remove_signed_in_account(
                     identity
@@ -935,6 +1041,10 @@ class ROKAutomationApp:
                 pady=1,
                 state=(tk.DISABLED if self._is_running else tk.NORMAL),
             ).pack(side=tk.RIGHT)
+        for row in self.signed_in_accounts_rows.winfo_children():
+            self._bind_account_scroll(row)
+            for widget in row.winfo_children():
+                self._bind_account_scroll(widget)
         self._resize_signed_in_accounts_scroll_region()
 
     def _build_planned_options_card(self, parent: tk.Widget) -> None:
@@ -954,7 +1064,7 @@ class ROKAutomationApp:
         badge = tk.Label(
             header_row,
             text="Optional",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD_LIGHT,
             fg=ModernColors.ACCENT_PURPLE,
             padx=6,
@@ -965,7 +1075,7 @@ class ROKAutomationApp:
         desc_lbl = tk.Label(
             parent,
             text="Configure optional routines to run for each RoK account:",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_MUTED,
             anchor="w",
@@ -984,6 +1094,12 @@ class ROKAutomationApp:
                 "Collect City Resources",
                 self.opt_collect_city_resources,
                 "Collect one ready icon for Food, Wood, Stone, and Gold after a small zoom out",
+                True,
+            ),
+            (
+                "Auto Forge Material",
+                self.opt_auto_forge,
+                "Produce the selected forge material",
                 True,
             ),
             (
@@ -1014,66 +1130,35 @@ class ROKAutomationApp:
                 selectcolor=ModernColors.BG_DARK,
                 activebackground=ModernColors.BG_CARD,
                 activeforeground=ModernColors.TEXT_PRIMARY,
-                command=lambda t=title, v=var: self._on_planned_option_toggled(t, v),
+                command=(self._on_auto_forge_toggled if title == "Auto Forge Material"
+                         else lambda t=title, v=var: self._on_planned_option_toggled(t, v)),
                 anchor="w",
             )
             cb.pack(side=tk.LEFT)
 
+            if title == "Auto Forge Material":
+                self.combo_forge_material = ttk.Combobox(
+                    row,
+                    textvariable=self.opt_forge_material,
+                    values=FORGE_MATERIALS,
+                    state="readonly",
+                    width=13,
+                    style="Dark.TCombobox",
+                    font=("Segoe UI", 9),
+                )
+                self.combo_forge_material.pack(side=tk.LEFT, padx=(4, 0))
+                self.combo_forge_material.bind(
+                    "<<ComboboxSelected>>", self._on_forge_material_changed
+                )
+
             tag = tk.Label(
                 row,
-                text="[Ready]" if is_ready else "[Planned]",
-                font=("Segoe UI", 8),
+                text="Ready" if is_ready else "Planned",
+                font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD,
                 fg=ModernColors.ACCENT_GREEN if is_ready else ModernColors.ACCENT_PURPLE,
             )
             tag.pack(side=tk.LEFT, padx=4)
-
-        forge_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
-        forge_row.pack(fill=tk.X, pady=(5, 1))
-        tk.Checkbutton(
-            forge_row,
-            text="Auto Forge Material",
-            variable=self.opt_auto_forge,
-            font=("Segoe UI", 9),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_PRIMARY,
-            selectcolor=ModernColors.BG_DARK,
-            activebackground=ModernColors.BG_CARD,
-            activeforeground=ModernColors.TEXT_PRIMARY,
-            command=self._on_auto_forge_toggled,
-            anchor="w",
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            forge_row,
-            text="[Ready]",
-            font=("Segoe UI", 8),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.ACCENT_GREEN,
-        ).pack(side=tk.LEFT, padx=4)
-
-        forge_material_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
-        forge_material_row.pack(fill=tk.X, pady=(0, 3))
-        tk.Label(
-            forge_material_row,
-            text="Forge material",
-            font=("Segoe UI", 8),
-            bg=ModernColors.BG_CARD,
-            fg=ModernColors.TEXT_MUTED,
-        ).pack(side=tk.LEFT)
-        self.combo_forge_material = ttk.Combobox(
-            forge_material_row,
-            textvariable=self.opt_forge_material,
-            values=("Leather", "Iron", "Wood", "Bone"),
-            state="readonly",
-            width=13,
-            style="Dark.TCombobox",
-            font=("Segoe UI", 8),
-        )
-        self.combo_forge_material.pack(side=tk.LEFT, padx=(8, 0))
-        self.combo_forge_material.bind(
-            "<<ComboboxSelected>>",
-            self._on_forge_material_changed,
-        )
 
         # Temporary Quick Action Buttons (for testing upcoming modules)
         action_lbl = tk.Label(
@@ -1098,31 +1183,31 @@ class ROKAutomationApp:
             btn = tk.Button(
                 quick_actions_box,
                 text=btn_text,
-                font=("Segoe UI", 8),
+                font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD_LIGHT,
                 fg=ModernColors.TEXT_PRIMARY,
                 activebackground=ModernColors.BG_BORDER,
                 activeforeground=ModernColors.TEXT_PRIMARY,
-                bd=1,
-                relief=tk.SOLID,
+                bd=0,
+                relief=tk.FLAT,
                 cursor="hand2",
                 command=lambda name=action_name: self.trigger_planned_feature_test(name),
-                padx=6,
+                padx=8,
                 pady=3,
             )
-            btn.pack(side=tk.LEFT, padx=(0, 4), pady=2)
+            btn.pack(side=tk.LEFT, padx=(0, 4))
 
         city_test_row = tk.Frame(parent, bg=ModernColors.BG_CARD)
-        city_test_row.pack(fill=tk.X)
-        for text, forge in (("Test City Resources", False), ("Test Forge Material", True)):
+        city_test_row.pack(fill=tk.X, pady=(4, 0))
+        for text, forge in (("🏙 City Resources", False), ("🔨 Forge Material", True)):
             tk.Button(
-                city_test_row, text=text, font=("Segoe UI", 8),
+                city_test_row, text=text, font=("Segoe UI", 9),
                 bg=ModernColors.BG_CARD_LIGHT, fg=ModernColors.TEXT_PRIMARY,
                 activebackground=ModernColors.BG_BORDER,
-                activeforeground=ModernColors.TEXT_PRIMARY, bd=1, relief=tk.SOLID,
-                cursor="hand2", padx=6, pady=3,
+                activeforeground=ModernColors.TEXT_PRIMARY, bd=0, relief=tk.FLAT,
+                cursor="hand2", padx=8, pady=3,
                 command=lambda is_forge=forge: self._test_city_task(is_forge),
-            ).pack(side=tk.LEFT, padx=(0, 4), pady=2)
+            ).pack(side=tk.LEFT, padx=(0, 4))
 
     def _build_console(self, parent: tk.Widget) -> None:
         """Build the bottom console area showing live application output."""
@@ -1141,7 +1226,7 @@ class ROKAutomationApp:
         self.console_line_count = tk.Label(
             header_bar,
             text="(Ready)",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_DARK,
             fg=ModernColors.TEXT_MUTED,
         )
@@ -1151,13 +1236,13 @@ class ROKAutomationApp:
         btn_copy = tk.Button(
             header_bar,
             text="📋 Copy Log",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_SECONDARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=self.copy_console_log,
             padx=6,
@@ -1168,13 +1253,13 @@ class ROKAutomationApp:
         btn_clear = tk.Button(
             header_bar,
             text="🗑 Clear",
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_CARD,
             fg=ModernColors.TEXT_SECONDARY,
             activebackground=ModernColors.BG_BORDER,
             activeforeground=ModernColors.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
+            bd=0,
+            relief=tk.FLAT,
             cursor="hand2",
             command=self.clear_console,
             padx=6,
@@ -1186,7 +1271,7 @@ class ROKAutomationApp:
             header_bar,
             text="Auto-scroll",
             variable=self.opt_autoscroll,
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
             bg=ModernColors.BG_DARK,
             fg=ModernColors.TEXT_SECONDARY,
             selectcolor=ModernColors.BG_CARD,
@@ -1247,6 +1332,11 @@ class ROKAutomationApp:
             "banner", foreground=ModernColors.ACCENT_GREEN, font=(console_font[0], console_font[1], "bold")
         )
 
+        for label, color in TAG_COLORS.items():
+            self.txt_console.tag_configure(
+                f"label_{label}", foreground=color,
+                font=(console_font[0], console_font[1], "bold"),
+            )
         self._print_welcome_banner()
 
     def _pick_console_font(self) -> tuple[str, int]:
@@ -1275,8 +1365,8 @@ class ROKAutomationApp:
             self.txt_console.see(tk.END)
 
     def log(self, message: str, tag: str | None = None) -> None:
-        """Format and append a log entry with timestamp."""
-        timestamp = datetime.now().strftime("[%H:%M:%S] ")
+        """Render a muted time, colored category and readable action text."""
+        timestamp = datetime.now().strftime("%H:%M:%S  ")
         self.txt_console.insert(tk.END, timestamp, "timestamp")
 
         # Automatic tag detection if not explicitly given
@@ -1295,7 +1385,10 @@ class ROKAutomationApp:
             else:
                 tag = "normal"
 
-        self.txt_console.insert(tk.END, message + "\n", tag)
+        label, action = split_log(message, tag if tag != "normal" else "Info")
+        self.txt_console.insert(tk.END, f"[{label}] ", f"label_{label}")
+        body_tag = tag if tag in {"error", "warning"} else "normal"
+        self.txt_console.insert(tk.END, action + "\n", body_tag)
         if self.opt_autoscroll.get():
             self.txt_console.see(tk.END)
 
@@ -1356,6 +1449,8 @@ class ROKAutomationApp:
     def _check_adb_ready(self) -> None:
         """Report whether the emulator accepts input over ADB."""
 
+        if not self._require_instance():
+            return
         self.log_info("MuMu uses native capture when available and ADB for input.")
 
         try:
@@ -1363,7 +1458,7 @@ class ROKAutomationApp:
 
             family = get_family(self.selected_emulator())
             adb_path = find_adb_executable(family)
-            preferred = family.preferred_serials()
+            preferred = [f"127.0.0.1:{item.details['adb_port']}" for item in family.discover() if item.index == self._instance_index and item.running and item.details.get("adb_port")]
             if family.key == "mumu":
                 if not preferred:
                     raise RuntimeError("No running MuMu instance was found")
@@ -1381,12 +1476,25 @@ class ROKAutomationApp:
             return
         self.log_success(f"ADB ready: {device} via {adb_path}")
 
+    def _cancel_connection_retry(self) -> None:
+        if self._connection_retry_id is not None:
+            self.root.after_cancel(self._connection_retry_id)
+            self._connection_retry_id = None
+
+    def _retry_emulator_connection(self) -> None:
+        self._connection_retry_id = None
+        self.check_emulator_connection()
+
     def check_emulator_connection(self) -> bool:
         """Check if the emulator is reachable and update the status badge.
 
         MuMu uses native capture when available and ADB for input.
         """
 
+        if self._instance_index is None:
+            self._cancel_connection_retry()
+            self.emulator_status_badge.config(text="Select an instance", fg=ModernColors.TEXT_SECONDARY, bg=ModernColors.BG_CARD_LIGHT)
+            return False
         try:
             from rok_automation.game.adb import (
                 find_adb_device,
@@ -1395,7 +1503,7 @@ class ROKAutomationApp:
 
             family = get_family(self.selected_emulator())
             adb_path = find_adb_executable(family)
-            preferred = family.preferred_serials()
+            preferred = [f"127.0.0.1:{item.details['adb_port']}" for item in family.discover() if item.index == self._instance_index and item.running and item.details.get("adb_port")]
             if family.key == "mumu":
                 if not preferred:
                     raise RuntimeError("No running MuMu instance was found")
@@ -1406,11 +1514,14 @@ class ROKAutomationApp:
                 raise RuntimeError("MuMu is not connected to ADB")
         except Exception:
             self.emulator_status_badge.config(
-                text="No emulator found",
+                text="Instance not opened",
                 fg=ModernColors.ACCENT_RED,
                 bg="#450a0a",
             )
+            if self._connection_retry_id is None:
+                self._connection_retry_id = self.root.after(5000, self._retry_emulator_connection)
             return False
+        self._cancel_connection_retry()
         self.emulator_status_badge.config(
             text=f"Emulator: Connected ({device})",
             fg=ModernColors.ACCENT_GREEN,
@@ -1420,6 +1531,8 @@ class ROKAutomationApp:
 
     def _on_planned_option_toggled(self, title: str, var: tk.BooleanVar) -> None:
         """Handle toggling of optional / future features."""
+        if self._instance_index is None:
+            return
         state_str = "ENABLED" if var.get() else "DISABLED"
         if title == "Collect Daily Rewards":
             # The automation runs in its own process, so the option is
@@ -1448,7 +1561,7 @@ class ROKAutomationApp:
         if title == "Collect City Resources":
             enabled = bool(var.get())
             try:
-                set_city_resources(enabled)
+                set_city_resources(enabled, self._state_path("city_resources.flag"))
             except OSError as exc:
                 self.log_error(f"Could not update city resource collection: {exc}")
                 return
@@ -1472,9 +1585,11 @@ class ROKAutomationApp:
     def _on_auto_forge_toggled(self) -> None:
         """Persist the selected forge material for the worker process."""
 
+        if self._instance_index is None:
+            return
         enabled = bool(self.opt_auto_forge.get())
         try:
-            set_forge_material(self.opt_forge_material.get() if enabled else None)
+            set_forge_material(self.opt_forge_material.get() if enabled else None, self._state_path("forge_material.txt"))
         except OSError as exc:
             self.log_error(f"Could not update the forge option: {exc}")
             return
@@ -1487,12 +1602,17 @@ class ROKAutomationApp:
         self.log(f"[Option] Auto Forge Material set to {state}. {detail}")
 
     def _on_forge_material_changed(self, _event: object = None) -> None:
-        """Apply a changed material immediately when automatic forging is on."""
+        """Remember the material and update a running forge when enabled."""
 
-        if not self.opt_auto_forge.get():
+        try:
+            FORGE_PREFERENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            FORGE_PREFERENCE_PATH.write_text(self.opt_forge_material.get(), encoding="utf-8")
+        except OSError as exc:
+            self.log_error(f"Could not save the forge material preference: {exc}")
+        if self._instance_index is None or not self.opt_auto_forge.get():
             return
         try:
-            set_forge_material(self.opt_forge_material.get())
+            set_forge_material(self.opt_forge_material.get(), self._state_path("forge_material.txt"))
         except OSError as exc:
             self.log_error(f"Could not select forge material: {exc}")
             return
@@ -1543,6 +1663,8 @@ class ROKAutomationApp:
             self.log_warning("Automation is already running.")
             return
 
+        if not self._require_instance():
+            return
         if scope not in {"all", "gmail", "rok"}:
             raise ValueError(f"Unsupported farm scope: {scope}")
 
@@ -1588,6 +1710,8 @@ class ROKAutomationApp:
                 tag="planned",
             )
 
+        if not self._acquire_instance_lock():
+            return
         cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
         cmd.extend(["--emulator", self.selected_emulator()])
         if self.gmail_state_path is not None:
@@ -1602,11 +1726,12 @@ class ROKAutomationApp:
                     bool(self.opt_daily_reward.get()),
                     self.daily_reward_flag_path,
                 )
-                set_city_resources(bool(self.opt_collect_city_resources.get()))
+                set_city_resources(bool(self.opt_collect_city_resources.get()), self._state_path("city_resources.flag"))
                 set_forge_material(
                     self.opt_forge_material.get()
                     if self.opt_auto_forge.get()
-                    else None
+                    else None,
+                    self._state_path("forge_material.txt"),
                 )
             except OSError as exc:
                 self.log_error(f"Could not apply automation options: {exc}")
@@ -1618,9 +1743,10 @@ class ROKAutomationApp:
             cmd.append("--current-rok-only")
 
         try:
-            clear_skip()
+            clear_skip(self._state_path("skip_account.flag"))
         except OSError as exc:
             self.log_error(f"Could not clear a previous skip request: {exc}")
+            self._release_instance_lock()
             return
         self._active_farm_scope = scope if farm_enabled else None
         self._active_gmail_switch = bool(farm_enabled and scope == "all" and self.opt_switch_gmail.get())
@@ -1647,6 +1773,7 @@ class ROKAutomationApp:
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONUTF8"] = "1"
+        env["ROK_STATE_DIR"] = str(self._state_path(".").resolve())
 
         creationflags = 0
         if sys.platform == "win32":
@@ -1664,13 +1791,45 @@ class ROKAutomationApp:
             env=env,
         )
 
+    def _acquire_instance_lock(self) -> bool:
+        if self._instance_lock is not None:
+            return True
+        path = self._state_path("instance.lock")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            self.log_warning("This MuMu instance is already controlled by another ROKauto window.")
+            return False
+        self._instance_lock = handle
+        return True
+
+    def _release_instance_lock(self) -> None:
+        if self._instance_lock is not None:
+            self._instance_lock.close()
+            self._instance_lock = None
+
     def _start_worker(self, cmd: list[str]) -> None:
         """Spawn the worker process and start streaming its output."""
 
+        if not self._require_instance():
+            return
+        if not self._acquire_instance_lock():
+            return
+        cmd.extend(["--emulator-index", str(self._instance_index)])
         try:
             process = self._spawn_process(cmd)
         except Exception as exc:
             self.log_error(f"Failed to start the automation process: {exc}")
+            self._release_instance_lock()
             self._set_running_state(False)
             return
 
@@ -1777,6 +1936,7 @@ class ROKAutomationApp:
                 line = self._output_queue.get_nowait()
                 if line is None:
                     # Sentinel received: process finished
+                    self._release_instance_lock()
                     self._set_running_state(False)
                     self.refresh_signed_in_accounts()
                     self.check_emulator_connection()
@@ -1821,7 +1981,7 @@ class ROKAutomationApp:
             return
 
         if self._is_paused:
-            clear_paused()
+            clear_paused(self._state_path("pause.flag"))
             self._is_paused = False
             self.log_info("Resuming automation.")
             self.lbl_run_state.config(
@@ -1833,7 +1993,7 @@ class ROKAutomationApp:
                 activebackground=ModernColors.ACCENT_BLUE_HOVER,
             )
         else:
-            set_paused()
+            set_paused(self._state_path("pause.flag"))
             self._is_paused = True
             self.log_warning("Pausing automation — the game will be left untouched.")
             self.lbl_run_state.config(
@@ -1858,7 +2018,7 @@ class ROKAutomationApp:
         # A paused run is blocked in its wait loop; make sure the pause flag
         # is cleared so nothing is left half-paused for the next run.
         if self._is_paused:
-            clear_paused()
+            clear_paused(self._state_path("pause.flag"))
             self._is_paused = False
 
         self._terminate_process(proc)
@@ -2003,6 +2163,7 @@ class ROKAutomationApp:
     def _set_running_state(self, is_running: bool) -> None:
         """Toggle UI controls based on active running state."""
         self._is_running = is_running
+        self.instance_selector.config(state="disabled" if is_running else "readonly")
         if is_running:
             self.btn_start.config(state=tk.DISABLED, bg=ModernColors.BG_CARD_LIGHT)
             self.btn_farm_current_gmail.config(state=tk.DISABLED)
@@ -2044,8 +2205,10 @@ class ROKAutomationApp:
                 "Automation is currently active. Do you want to stop it and exit?",
             ):
                 self.stop_automation()
+                self._cancel_connection_retry()
                 self.root.destroy()
         else:
+            self._cancel_connection_retry()
             self.root.destroy()
 
 

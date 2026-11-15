@@ -26,7 +26,7 @@ From the project directory:
 python -m pip install -e .
 ```
 
-Start MuMu and open the game, then launch `run_gui.vbs` or `run_gui.bat`. `run.bat` offers a menu for the GUI or CLI farming. The GUI also provides connection status and a refresh button.
+Start MuMu and open the game, then launch `run_gui.vbs` or `run_gui.bat`. Select a MuMu instance in the GUI before running a task. Instance names are read from MuMu; Refresh rediscovers instances. Each instance has its own saved account list and progress. The previous list and progress remain with instance #0. Open another GUI window to run a different instance; an instance can only have one active GUI worker at a time. Accounts are added manually or learned during rotation, not automatically read from Android on selection. `run.bat` offers a menu for the GUI or CLI farming.
 
 ## Command line
 
