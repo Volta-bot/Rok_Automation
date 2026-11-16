@@ -43,6 +43,46 @@ class CharacterProgressTests(unittest.TestCase):
             self.assertEqual(saved.get_character_progress(second)['direction'], 1)
             GmailRotation.reset_progress(path)
             self.assertIsNone(GmailRotation.load(path).get_character_progress(first))
+            remembered = GmailRotation.load(path).get_character_display_progress(first)
+            self.assertEqual((remembered['index'], remembered['total'], remembered['direction']), (11, 12, -1))
+
+    def test_completed_run_history_survives_new_run_and_multiple_resets(self):
+        identity = GmailIdentity(email='a@gmail.com', uid='123')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'progress.json'
+            rotation = GmailRotation(path=path)
+            rotation.set_character_progress(identity, 11, 12, 1)
+            rotation.get_character_progress(identity).update(farmed_count=12, resume_ready=True, next_index=None)
+            rotation.completed = True
+            rotation.save()
+            fresh = GmailRotation.load(path)
+            self.assertIsNone(fresh.get_character_progress(identity))
+            self.assertEqual(fresh.character_farmed_count(identity), 12)
+            fresh.save()
+            for _ in range(2):
+                GmailRotation.reset_progress(path)
+            fresh = GmailRotation.load(path)
+            remembered = fresh.get_character_display_progress(GmailIdentity(uid='123'))
+            self.assertEqual((remembered['index'], remembered['total']), (11, 12))
+            # A new run's count replaces the remembered count instead of adding to it.
+            fresh.set_character_progress(identity, 11, 12, -1)
+            fresh.get_character_progress(identity)['farmed_count'] = 1
+            fresh.save()
+            self.assertEqual(GmailRotation.load(path).character_farmed_count(identity), 1)
+
+    def test_legacy_progress_is_archived_when_reset_without_history_field(self):
+        import json
+
+        identity = GmailIdentity(email='a@gmail.com')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'progress.json'
+            path.write_text(json.dumps({'character_progress': [
+                {'identity': identity.to_dict(), 'index': 0, 'total': 12, 'direction': -1}
+            ]}), encoding='utf-8')
+            GmailRotation.reset_progress(path)
+            rotation = GmailRotation.load(path)
+            self.assertIsNone(rotation.get_character_progress(identity))
+            self.assertEqual(rotation.character_farmed_count(identity), 12)
 
     def test_resumes_pending_character_and_preserves_initial_skipped_position(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +134,7 @@ class CharacterProgressTests(unittest.TestCase):
             saved = GmailRotation.load(path).get_character_progress(identity)
             self.assertEqual((saved['index'], saved['next_index'], saved['skipped_index']), (2, 0, 2))
             self.assertEqual(saved['direction'], 1)
+            self.assertEqual(saved['farmed_count'], 1)
 
     def test_completed_characters_are_saved_before_next_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,6 +155,7 @@ class CharacterProgressTests(unittest.TestCase):
                 traversal.current_index = 10
                 traversal.anchored_to_top = True
                 self.assertEqual(GmailRotation.load(path).get_character_progress(identity)['index'], 11)
+                self.assertEqual(GmailRotation.load(path).character_farmed_count(identity), 1)
                 return 'next'
             switcher.switch_to_next.side_effect = switch
             def farm(**kwargs):
@@ -126,7 +168,21 @@ class CharacterProgressTests(unittest.TestCase):
                 # The second switch sees the completed second character.
                 def second_switch(traversal, *, on_initialized):
                     self.assertEqual(GmailRotation.load(path).get_character_progress(identity)['index'], 10)
+                    self.assertEqual(GmailRotation.load(path).character_farmed_count(identity), 2)
                     return None
                 switcher.switch_to_next.side_effect = lambda traversal, **kw: (switch if traversal.direction is None else second_switch)(traversal, **kw)
                 controller._farm_linked_characters()
-            self.assertEqual(events.count(GMAIL_PROGRESS_UPDATED), 2)
+            self.assertEqual(events.count(GMAIL_PROGRESS_UPDATED), 3)
+
+    def test_legacy_counts_include_initial_character_outside_traversed_range(self):
+        identity = GmailIdentity(email='a@gmail.com')
+        for index, direction, skipped, expected in [
+            (0, 1, None, 1), (11, -1, None, 1),
+            (0, 1, 2, 2), (11, -1, 2, 2),
+            (2, 1, 2, 1), (11, 1, 2, 12), (0, -1, 2, 12),
+        ]:
+            with self.subTest(index=index, direction=direction, skipped=skipped):
+                rotation = GmailRotation()
+                rotation.set_character_progress(identity, index, 12, direction)
+                rotation.get_character_progress(identity)['skipped_index'] = skipped
+                self.assertEqual(rotation.character_farmed_count(identity), expected)

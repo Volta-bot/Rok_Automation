@@ -312,6 +312,7 @@ class GmailRotation:
     completed: bool = False
     switches: int = 0
     character_progress: list[dict] = field(default_factory=list)
+    character_history: list[dict] = field(default_factory=list)
     started_at: str | None = None
     path: Path | None = None
 
@@ -330,8 +331,6 @@ class GmailRotation:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls._new(path)
-        if data.get("completed") and not include_completed:
-            return cls._new(path)
         rotation = cls(
             first=GmailIdentity.from_dict(data.get("first")),
             farmed=[
@@ -346,9 +345,15 @@ class GmailRotation:
             completed=bool(data.get("completed")),
             switches=int(data.get("switches", 0)),
             character_progress=data.get("character_progress", []) if isinstance(data.get("character_progress", []), list) else [],
+            character_history=data.get("character_history", []) if isinstance(data.get("character_history", []), list) else [],
             started_at=data.get("started_at"),
             path=path,
         )
+        rotation._remember_character_progress()
+        if rotation.completed and not include_completed:
+            fresh = cls._new(path)
+            fresh.character_history = rotation.character_history
+            return fresh
         return rotation
 
     @classmethod
@@ -382,7 +387,10 @@ class GmailRotation:
     def reset_progress(cls, path: Path | None = DEFAULT_GMAIL_STATE_PATH) -> None:
         """Replace the saved Gmail run with an empty, fresh rotation."""
 
-        cls._new(path).save()
+        previous = cls.load(path, include_completed=True)
+        fresh = cls._new(path)
+        fresh.character_history = previous.character_history
+        fresh.save()
 
     @property
     def is_resumed(self) -> bool:
@@ -430,6 +438,55 @@ class GmailRotation:
                 return entry
         return None
 
+    def character_farmed_count(self, identity: GmailIdentity) -> int:
+        """Read the completed count, including progress saved by older versions."""
+        entry = self.get_character_display_progress(identity)
+        if not entry:
+            return 0
+        if isinstance(entry.get("farmed_count"), int):
+            return entry["farmed_count"]
+        index, total = entry.get("index"), entry.get("total")
+        if not isinstance(index, int):
+            return 0
+        skipped = entry.get("skipped_index")
+        # A run may farm its initial character before moving to an endpoint.
+        if skipped == index:
+            return 1
+        if entry.get("direction") == 1:
+            return index + 1 + int(isinstance(skipped, int) and skipped > index)
+        if entry.get("direction") == -1 and isinstance(total, int):
+            return total - index + int(isinstance(skipped, int) and skipped < index)
+        return 1
+
+    def get_character_display_progress(self, identity: GmailIdentity) -> dict | None:
+        """Use current-run progress, falling back to the last remembered run."""
+        current = self.get_character_progress(identity)
+        if current is not None:
+            return current
+        for entry in self.character_history:
+            if not isinstance(entry, dict):
+                continue
+            saved = GmailIdentity.from_dict(entry.get("identity"))
+            if saved and saved.matches(identity):
+                return entry
+        return None
+
+    def _remember_character_progress(self) -> None:
+        """Keep display history separate from the cursor used to resume farming."""
+        for entry in self.character_progress:
+            if not isinstance(entry, dict):
+                continue
+            identity = GmailIdentity.from_dict(entry.get("identity"))
+            if identity is None:
+                continue
+            self.character_history = [
+                old for old in self.character_history
+                if not (isinstance(old, dict)
+                        and (saved := GmailIdentity.from_dict(old.get("identity")))
+                        and saved.matches(identity))
+            ]
+            self.character_history.append(dict(entry))
+
     def set_character_progress(self, identity: GmailIdentity, index: int,
                                total: int | None, direction: int) -> None:
         self.character_progress = [
@@ -444,6 +501,7 @@ class GmailRotation:
         self.save()
 
     def save(self) -> None:
+        self._remember_character_progress()
         if self.path is None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,6 +513,7 @@ class GmailRotation:
             "completed": self.completed,
             "switches": self.switches,
             "character_progress": self.character_progress,
+            "character_history": self.character_history,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
         temporary = self.path.with_suffix(".tmp")

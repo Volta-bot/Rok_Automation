@@ -16,6 +16,41 @@ from rok_automation.automation.gmail_switcher import GMAIL_PROGRESS_UPDATED
 
 
 class TestLiveGmailProgress(unittest.TestCase):
+    def test_account_rows_show_current_position_direction_and_completed_count(self):
+        from rok_automation.automation.gmail_switcher import GmailAccountRegistry, GmailIdentity, GmailRotation
+
+        with tempfile.TemporaryDirectory() as folder:
+            app = ROKAutomationApp.__new__(ROKAutomationApp)
+            app._instance_index = 0
+            app._is_running = True
+            app.signed_in_accounts_rows = MagicMock()
+            app.signed_in_accounts_rows.winfo_children.return_value = []
+            app._resize_signed_in_accounts_scroll_region = MagicMock()
+            app.signed_in_accounts = GmailAccountRegistry(Path(folder) / 'accounts.json')
+            app.signed_in_accounts.add_manual('sduy@gmail.com')
+            app.gmail_state_path = Path(folder) / 'progress.json'
+            identity = GmailIdentity(email='sduy@gmail.com')
+            rotation = GmailRotation.load(app.gmail_state_path)
+            for index, direction, count, current, expected in [
+                (0, 1, 1, 0, 'position 1↓ - farmed 1/12'),
+                (11, -1, 1, 10, 'position 11↑ - farmed 1/12'),
+                (10, -1, 2, 10, 'position 11↑ - farmed 2/12'),
+            ]:
+                rotation.set_character_progress(identity, index, 12, direction)
+                rotation.get_character_progress(identity).update(farmed_count=count, current_index=current)
+                rotation.save()
+                with patch('rok_automation.ui.app.tk.Frame'), patch('rok_automation.ui.app.tk.Button'), \
+                     patch('rok_automation.ui.app.tk.Label') as label:
+                    app.refresh_signed_in_accounts()
+                texts = [call.kwargs.get('text', '') for call in label.call_args_list]
+                self.assertIn(f'1. sduy@gmail.com - {expected}', texts)
+                GmailRotation.reset_progress(app.gmail_state_path)
+                with patch('rok_automation.ui.app.tk.Frame'), patch('rok_automation.ui.app.tk.Button'), \
+                     patch('rok_automation.ui.app.tk.Label') as label:
+                    app.refresh_signed_in_accounts()
+                texts = [call.kwargs.get('text', '') for call in label.call_args_list]
+                self.assertIn(f'1. sduy@gmail.com - {expected}', texts)
+
     def test_progress_notification_refreshes_before_process_exit(self):
         app = ROKAutomationApp.__new__(ROKAutomationApp)
         app.root = MagicMock()

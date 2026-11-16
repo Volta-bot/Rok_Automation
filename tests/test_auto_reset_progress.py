@@ -39,6 +39,9 @@ class AutoResetProgressTests(unittest.TestCase):
                 if outcome == 'complete':
                     self.assertEqual(saved.farmed, [])
                     self.assertEqual(saved.character_progress, [])
+                    remembered = saved.get_character_display_progress(current)
+                    self.assertEqual((remembered['index'], remembered['total']), (0, 2))
+                    self.assertEqual(saved.character_farmed_count(current), 1)
                     self.assertIsNone(saved.first)
                     self.assertFalse(saved.completed)
                     self.assertTrue(any('reset automatically' in line for line in logs))

@@ -412,11 +412,14 @@ class FarmingController:
         identity = getattr(self, "_current_gmail_for_progress", None)
         rotation = getattr(self, "_progress_rotation", None)
         saved = rotation.get_character_progress(identity) if identity is not None and rotation is not None else None
+        previously_farmed = rotation.character_farmed_count(identity) if saved else 0
+        farmed_accounts = 0
 
         def record_position(index, total, direction):
             if identity is not None and rotation is not None and index is not None and direction in (-1, 1):
                 rotation.set_character_progress(identity, index, total, direction)
                 entry = rotation.get_character_progress(identity)
+                entry["farmed_count"] = previously_farmed + farmed_accounts
                 entry["skipped_index"] = traversal.skipped_index
                 if traversal.skipped_index == index and traversal.current_index == index:
                     entry["next_index"] = (0 if direction == 1 else total - 1) if total is not None else None
@@ -425,6 +428,14 @@ class FarmingController:
                 entry["resume_ready"] = True
                 rotation.save()
                 self._log(GMAIL_PROGRESS_UPDATED)
+
+        def record_selected_position():
+            if identity is not None and rotation is not None:
+                entry = rotation.get_character_progress(identity)
+                if entry is not None:
+                    entry["current_index"] = traversal.current_index
+                    rotation.save()
+                    self._log(GMAIL_PROGRESS_UPDATED)
 
         resumed_name = None
         if saved and isinstance(saved.get("index"), int) and saved.get("direction") in (-1, 1):
@@ -456,8 +467,8 @@ class FarmingController:
                 self._log("RoK character traversal complete; finishing this Gmail")
                 self.context = FarmContext()
                 return self.context, 0, 0
+            record_selected_position()
 
-        farmed_accounts = 0
         total_dispatched = 0
         expected_account_name: str | None = resumed_name
         while True:
@@ -503,6 +514,7 @@ class FarmingController:
                 context.last_error = None
                 return context, farmed_accounts, total_dispatched
             expected_account_name = next_name
+            record_selected_position()
             self._log(f"Selected {next_name}; starting its farming run")
 
     def _open_world_map_directly(self) -> tuple[Path, ScreenDetection]:

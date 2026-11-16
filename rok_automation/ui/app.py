@@ -1002,6 +1002,14 @@ class ROKAutomationApp:
                 command=lambda identity=account.identity: self._toggle_gmail_progress(identity),
             ).pack(side=tk.LEFT)
             account_text = f"{position}. " + (account.identity.email or (f"UID {account.identity.uid}" if account.identity.uid else "unknown Gmail"))
+            progress = rotation.get_character_display_progress(account.identity) or {}
+            index = progress.get("current_index", progress.get("selected_index", progress.get("index")))
+            rok_position = index + 1 if isinstance(index, int) and index >= 0 else "?"
+            arrow = {1: "↓", -1: "↑"}.get(progress.get("direction"), "")
+            total = progress.get("total")
+            total_text = total if isinstance(total, int) and total > 0 else "?"
+            count = rotation.character_farmed_count(account.identity)
+            account_text += f" - position {rok_position}{arrow} - farmed {count}/{total_text}"
             tk.Label(
                 row,
                 text=account_text,
