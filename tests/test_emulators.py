@@ -166,6 +166,36 @@ class TestMuMuAdbCapture(unittest.TestCase):
             create_native_interface(emulator="mumu", index=2, adb_path="adb")
         connect.assert_called_once_with("adb", ["connect", "127.0.0.1:16416"], timeout=25)
         self.assertEqual(interface.call_args.kwargs["serial"], "127.0.0.1:16416")
+        self.assertEqual(interface.call_args.kwargs["screenshot_path"].parent.parent.name, "mumu-2")
+
+    def test_connections_get_distinct_screenshot_paths(self) -> None:
+        from rok_automation.game.native import create_native_interface
+
+        instances = [EmulatorInstance(i, f"MuMu {i}", running=True,
+                                      details={"adb_port": str(16400 + i)}) for i in (1, 2)]
+        family = get_family("mumu")
+        with patch("rok_automation.game.native.select_family", return_value=(family, None)), \
+             patch.object(type(family), "discover", return_value=instances), \
+             patch.object(type(family), "open_capture", side_effect=EmulatorError("unavailable")), \
+             patch("rok_automation.game.native._run_global"), \
+             patch("rok_automation.game.native.NativeInterface") as interface:
+            for index in (1, 2, 1):
+                create_native_interface(emulator="mumu", index=index, adb_path="adb")
+        paths = [call.kwargs["screenshot_path"] for call in interface.call_args_list]
+        self.assertEqual(len(set(paths)), 3)
+        self.assertEqual([path.parent.parent.name for path in paths], ["mumu-1", "mumu-2", "mumu-1"])
+
+    def test_multiple_running_instances_require_selection(self) -> None:
+        from rok_automation.game.native import create_native_interface
+        from rok_automation.game.adb import AdbError
+
+        instances = [EmulatorInstance(i, f"MuMu {i}", running=True,
+                                      details={"adb_port": str(16400 + i)}) for i in (1, 2)]
+        family = get_family("mumu")
+        with patch("rok_automation.game.native.select_family", return_value=(family, None)), \
+             patch.object(type(family), "discover", return_value=instances):
+            with self.assertRaisesRegex(AdbError, "Multiple MuMu"):
+                create_native_interface(emulator="mumu", adb_path="adb")
 
     def test_native_capture_is_verified_and_falls_back_on_error(self) -> None:
         from rok_automation.game.native import FallbackFrameSource, _matching_displays

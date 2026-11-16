@@ -39,6 +39,7 @@ from rok_automation.game.flags import (
     set_city_resources,
     set_daily_rewards,
     set_forge_material,
+    set_alliance_resource,
 )
 from rok_automation.game.pause import clear_paused, set_paused
 from rok_automation.game.skip import clear_skip, request_skip
@@ -194,6 +195,7 @@ class ROKAutomationApp:
 
         # Options state
         self.opt_farm = tk.BooleanVar(value=True)
+        self.opt_alliance_resource = tk.BooleanVar(value=True)
         self.opt_switch_gmail = tk.BooleanVar(value=True)
         self.gmail_account_entry = tk.StringVar()
         # Which emulator family to drive.
@@ -571,6 +573,15 @@ class ROKAutomationApp:
             anchor="w",
         )
         cb_farm.pack(fill=tk.X, pady=1)
+
+        tk.Checkbutton(
+            parent, text="Farm Alliance Resource Node (1 march using preset #1)",
+            variable=self.opt_alliance_resource, font=("Segoe UI", 9),
+            bg=ModernColors.BG_CARD, fg=ModernColors.TEXT_PRIMARY,
+            selectcolor=ModernColors.BG_DARK, activebackground=ModernColors.BG_CARD,
+            activeforeground=ModernColors.TEXT_PRIMARY, anchor="w",
+            command=self._on_alliance_resource_toggled,
+        ).pack(fill=tk.X, pady=1)
 
         cb_switch_gmail = tk.Checkbutton(
             parent,
@@ -1537,6 +1548,16 @@ class ROKAutomationApp:
         )
         return True
 
+    def _on_alliance_resource_toggled(self) -> None:
+        if self._instance_index is None:
+            return
+        try:
+            set_alliance_resource(bool(self.opt_alliance_resource.get()), self._state_path("alliance_resource.flag"))
+        except OSError as exc:
+            self.log_error(f"Could not update alliance resource farming: {exc}")
+            return
+        self.log_info("Alliance resource option updated; takes effect from the next character.")
+
     def _on_planned_option_toggled(self, title: str, var: tk.BooleanVar) -> None:
         """Handle toggling of optional / future features."""
         if self._instance_index is None:
@@ -1682,6 +1703,7 @@ class ROKAutomationApp:
         city_tasks_enabled = bool(self.opt_collect_city_resources.get() or self.opt_auto_forge.get())
         options = {
             "Auto Farm Resources": farm_enabled,
+            "Farm Alliance Resource Node": bool(self.opt_alliance_resource.get()),
             "Switch Gmail Accounts": bool(self.opt_switch_gmail.get()),
             "Daily Rewards": bool(self.opt_daily_reward.get()),
             "City Resources": bool(self.opt_collect_city_resources.get()),
@@ -1755,6 +1777,7 @@ class ROKAutomationApp:
                     self.daily_reward_flag_path,
                 )
                 set_city_resources(bool(self.opt_collect_city_resources.get()), self._state_path("city_resources.flag"))
+                set_alliance_resource(bool(self.opt_alliance_resource.get()), self._state_path("alliance_resource.flag"))
                 set_forge_material(
                     self.opt_forge_material.get()
                     if self.opt_auto_forge.get()

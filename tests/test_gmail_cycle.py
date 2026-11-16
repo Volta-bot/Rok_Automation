@@ -52,6 +52,7 @@ class GmailCycleTests(unittest.TestCase):
         app = ROKAutomationApp.__new__(ROKAutomationApp)
         app._is_running = False
         for name, value in {'opt_farm': farm, 'opt_switch_gmail': switch,
+                            'opt_alliance_resource': False,
                             'opt_collect_city_resources': chores, 'opt_auto_forge': chores,
                             'opt_daily_reward': chores, 'opt_alliance': False,
                             'opt_train_troops': False, 'opt_forge_material': 'Iron'}.items():
@@ -81,6 +82,7 @@ class GmailCycleTests(unittest.TestCase):
                      patch('rok_automation.ui.app.clear_skip'), \
                      patch('rok_automation.ui.app.set_daily_rewards'), \
                      patch('rok_automation.ui.app.set_city_resources'), \
+                     patch('rok_automation.ui.app.set_alliance_resource'), \
                      patch('rok_automation.ui.app.set_forge_material'):
                     app.start_automation()
                 dialog.assert_not_called()

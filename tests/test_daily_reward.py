@@ -123,6 +123,47 @@ class TestDailyReward(unittest.TestCase):
             self.assertIsNotNone(bounds)
             self.assertEqual(bounds, (400, 500, 200, 60))
 
+    def test_collected_vip_menu_is_not_a_reward_popup_and_x_is_inside_header(self) -> None:
+        path = _TEST_DIR / "fixtures/vip_menu_collected.png"
+        frame = cv2.imread(str(path))
+        self.assertIsNotNone(frame)
+        claimer = DailyRewardClaimer(FakeGame())
+        self.assertFalse(claimer._is_vip_points_popup(frame))
+        self.assertFalse(claimer._is_vip_chest_popup(frame))
+        self.assertTrue(claimer._is_vip_menu(frame))
+        # A stale coordinate from a previous failed attempt must be ignored.
+        claimer._pin_bounds((1280, 720), "vip_close_x", (1203, 11, 58, 40))
+        x, y, w, h = claimer._locate_vip_close_x(path, (1280, 720))
+        self.assertLess(abs(x + w / 2 - 1092), 15)
+        self.assertLess(abs(y + h / 2 - 82), 15)
+
+    def test_vip_daily_points_label_is_not_a_popup_title(self) -> None:
+        claimer = DailyRewardClaimer(FakeGame())
+        frame = np.zeros((720, 1280, 3), np.uint8)
+        for label in ("Điểm hôm nay: 200", "Miễn phí mỗi ngày", "Phần thưởng hàng ngày"):
+            with self.subTest(label=label), patch(
+                "rok_automation.automation.daily_reward.read_text_detections",
+                return_value=[(label, (300, 100, 200, 50), 0.95)],
+            ):
+                self.assertFalse(claimer._is_vip_points_popup(frame))
+
+    def test_recovery_on_real_vip_frame_clicks_x_then_confirms_city(self) -> None:
+        path = _TEST_DIR / "fixtures/vip_menu_collected.png"
+        frame = cv2.imread(str(path))
+        game = FakeGame()
+        detector = ScreenDetector()
+        claimer = DailyRewardClaimer(game, detector, log=lambda _: None)
+        with patch.object(claimer, "_capture", return_value=(path, frame, (1280, 720))), \
+             patch.object(detector, "detect", side_effect=[
+                 ScreenDetection(ScreenState.UNKNOWN, 0, "VIP"),
+                 ScreenDetection(ScreenState.CITY, 1, "city"),
+             ]):
+            self.assertTrue(claimer.ensure_city_view())
+        self.assertEqual(len(game.clicks), 1)
+        x, y, w, h = game.clicks[0]
+        self.assertLess(abs(x + w / 2 - 1092), 15)
+        self.assertLess(abs(y + h / 2 - 82), 15)
+
     def test_simulated_claim_all_flow(self) -> None:
         """Verify full claim_all sequence executes all steps and clicks."""
         game = FakeGame()
@@ -175,6 +216,45 @@ class TestDailyReward(unittest.TestCase):
             result = claimer.claim_all()
             self.assertFalse(result)
             mock_recover.assert_called_once()
+
+    def test_campaign_retries_back_until_city_is_detected(self) -> None:
+        game = MagicMock()
+        detector = MagicMock()
+        detector.detect.side_effect = [
+            ScreenDetection(ScreenState.UNKNOWN, 0, "menu"),
+            ScreenDetection(ScreenState.UNKNOWN, 0, "missed press"),
+            ScreenDetection(ScreenState.UNKNOWN, 0, "another menu"),
+            ScreenDetection(ScreenState.CITY, 1, "city"),
+        ]
+        claimer = DailyRewardClaimer(game, detector, log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        with patch.object(claimer, "_capture", return_value=(Path("frame.png"), frame, (1280, 720))), \
+             patch.object(claimer, "_detect_xac_nhan", return_value=None), \
+             patch.object(claimer, "_is_vip_points_popup", return_value=False), \
+             patch.object(claimer, "_is_vip_chest_popup", return_value=False), \
+             patch.object(claimer, "_is_vip_menu", return_value=False), \
+             patch("rok_automation.game.popups.close_scout_manager", return_value=False):
+            claimer._close_campaign_menus((1280, 720))
+        self.assertEqual(game.click.call_count, 3)
+        self.assertEqual(detector.detect.call_count, 4)
+
+    def test_vip_close_retries_x_and_fails_if_city_never_appears(self) -> None:
+        game = MagicMock()
+        detector = MagicMock()
+        detector.detect.return_value = ScreenDetection(ScreenState.UNKNOWN, 0, "vip")
+        claimer = DailyRewardClaimer(game, detector, log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        with patch.object(claimer, "_capture", return_value=(Path("frame.png"), frame, (1280, 720))), \
+             patch.object(claimer, "_locate_vip_close_x", return_value=(1, 2, 3, 4)), \
+             patch.object(claimer, "_detect_xac_nhan", return_value=None), \
+             patch.object(claimer, "_is_vip_points_popup", return_value=False), \
+             patch.object(claimer, "_is_vip_chest_popup", return_value=False), \
+             patch.object(claimer, "_is_vip_menu", return_value=True), \
+             patch("rok_automation.game.popups.close_scout_manager", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "VIP menu"):
+                claimer._close_vip_menu((1280, 720))
+        self.assertEqual(game.click.call_count, 6)
+        self.assertEqual(detector.detect.call_count, 6)
 
     @patch("rok_automation.automation.controller.city_resources_enabled", return_value=False)
     @patch("rok_automation.automation.controller.forge_material_to_produce", return_value=None)

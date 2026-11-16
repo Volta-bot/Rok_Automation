@@ -23,6 +23,7 @@ from rok_automation.vision.green_route import detect_green_incoming_route
 
 class ScreenState(str, Enum):
     UNKNOWN = "unknown"
+    MAILBOX = "mailbox"
     CITY = "city"
     WORLD_MAP = "world_map"
     RESOURCE_SEARCH = "resource_search"
@@ -63,6 +64,11 @@ class _Template:
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATES = (
+    _Template(
+        ScreenState.MAILBOX,
+        "mailbox tabs",
+        _PROJECT_ROOT / "templates/navigation/mailbox_tabs.png",
+    ),
     _Template(
         ScreenState.CITY,
         "city map button",
@@ -110,12 +116,17 @@ _FRAME_CACHE: dict[Path, tuple[int | None, int, Any, Any]] = {}
 
 # Normalized (left, top, right, bottom) search regions for static UI controls.
 _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
+    "mailbox_tabs.png": (0.00, 0.00, 0.14, 0.10),
+    "mailbox_close.png": (0.88, 0.00, 1.00, 0.12),
+    "unknown_menu_close_gold.png": (0.00, 0.00, 1.00, 0.12),
+    "unknown_menu_close_light.png": (0.00, 0.00, 1.00, 0.12),
     "scout_manager_title.png": (0.20, 0.00, 0.80, 0.20),
     "scout_manager_close.png": (0.80, 0.00, 1.00, 0.18),
     "world_search_button.png": (0.00, 0.56, 0.16, 0.88),
     "city_map_button.png": (0.00, 0.74, 0.16, 1.00),
     "world_city_button.png": (0.00, 0.74, 0.16, 1.00),
     "gather_button.png": (0.45, 0.44, 0.95, 0.86),
+    "gather_button_alliance.png": (0.45, 0.44, 0.95, 0.86),
     "new_troops_button.png": (0.55, 0.05, 0.98, 0.70),
     "march_button.png": (0.50, 0.64, 0.98, 0.98),
     "resource_food.png": (0.25, 0.72, 0.46, 0.99),
@@ -130,7 +141,7 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "vip_shield.png": (0.00, 0.00, 0.25, 0.18),
     "wooden_chest.png": (0.80, 0.05, 0.98, 0.25),
     "green_nhan.png": (0.70, 0.40, 0.95, 0.60),
-    "vip_close_x.png": (0.90, 0.00, 1.00, 0.12),
+    "vip_close_x.png": (0.78, 0.00, 0.96, 0.22),
     "menu_dots.png": (0.88, 0.85, 1.00, 1.00),
     "chien_dich.png": (0.50, 0.82, 0.65, 1.00),
     "chinh_phat_card.png": (0.02, 0.10, 0.30, 0.55),
@@ -156,6 +167,7 @@ _RESOURCE_ICON_NAMES: dict[Resource, str] = {
 # Look-alike cyan buttons whose inner text strip disambiguates them without OCR.
 _BLUE_TEXT_TEMPLATES = frozenset({
     "gather_button.png",
+    "gather_button_alliance.png",
     "new_troops_button.png",
     "submit_button.png",
 })

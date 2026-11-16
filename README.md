@@ -63,9 +63,13 @@ python -m rok_automation --help
 
 ## Runtime files
 
+Enable **Farm Alliance Resource Node** under **Core Farming Options** to attempt one preset #1 march after daily rewards and before normal gathering. The node must have more than 50 million resources and must not be under construction. A missing commander, unreadable node, or unavailable node skips this step. Normal gathering continues from the world map using the character's previously identified resource preference. The alliance march uses one of the five available march slots.
+
+The CLI equivalent is `python -m rok_automation --farm --alliance-resource`. Alliance tags, node coordinates, remaining resources, construction status, and check times are saved in `state/alliance_nodes.json` (or the selected instance's state directory). Matching alliances reuse this information; eligible nodes are checked again before dispatch, while unavailable results are reused for up to two minutes.
+
 The `state/` directory stores emulator selection, Gmail rotation and account records, feature flags, and recently farmed nodes. `artifacts/` holds screenshots and run output. Both directories are ignored by Git. The GUI's **Reset Gmail Run Progress** control resets rotation progress; use it when starting a fresh rotation. Treat account records and screenshots as private.
 
-Screenshot, screen-detection and stockpile diagnostics export PNG files. Routine farming updates `artifacts/emulator_native.png` on every capture; a farming failure also exports the last available frame to `artifacts/farming_error.png`.
+Screenshot, screen-detection and stockpile diagnostics export PNG files. Each connection uses its own folder under `artifacts/<emulator>-<index>/<session>/`, so concurrent instances and diagnostics cannot overwrite each other's frames. Routine farming updates `emulator_native.png` there on every capture; a farming failure also exports `farming_error.png` in the same folder. An explicit `--screenshot PATH` still writes to the requested path.
 
 Logs report elapsed seconds per successful army dispatch and per account, along with capture, detection, OCR, ADB input, wait and retry statistics. Completed account measurements are also stored under `performance` in `state/session_summary.json`. Component timings exclude nested measured work (for example, OCR is not counted twice inside detection); dispatch and account durations are overall wall-clock measurements, including pauses. Compare dispatch times and retry counts across similar runs when tuning performance.
 

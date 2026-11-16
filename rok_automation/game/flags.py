@@ -20,6 +20,21 @@ _STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
 DEFAULT_DAILY_REWARD_FLAG_PATH = _STATE_DIR / "daily_reward.flag"
 DEFAULT_CITY_RESOURCES_FLAG_PATH = _STATE_DIR / "city_resources.flag"
 DEFAULT_FORGE_MATERIAL_PATH = _STATE_DIR / "forge_material.txt"
+DEFAULT_ALLIANCE_RESOURCE_FLAG_PATH = _STATE_DIR / "alliance_resource.flag"
+
+
+def alliance_resource_enabled(path: Path | None = DEFAULT_ALLIANCE_RESOURCE_FLAG_PATH) -> bool:
+    return path is not None and path.is_file()
+
+
+def set_alliance_resource(enabled: bool, path: Path | None = DEFAULT_ALLIANCE_RESOURCE_FLAG_PATH) -> None:
+    if path is None:
+        return
+    if enabled:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("enabled", encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _resolve(path: Path | None) -> Path:

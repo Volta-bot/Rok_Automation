@@ -32,7 +32,7 @@ NORM_VIP_BUTTON = (0.075, 0.065, 0.075, 0.045)
 # below the chest artwork. Targeting the artwork can land beside the close X.
 NORM_WOODEN_NHAN = (0.820, 0.225, 0.140, 0.055)
 NORM_GREEN_NHAN = (0.771, 0.463, 0.080, 0.056)
-NORM_VIP_CLOSE_X = (0.940, 0.015, 0.045, 0.055)
+NORM_VIP_CLOSE_X = (0.840, 0.090, 0.030, 0.050)
 NORM_POPUP_DISMISS = (0.500, 0.920, 0.010, 0.010)
 
 NORM_MENU_DOTS = (0.925, 0.900, 0.055, 0.080)
@@ -130,9 +130,14 @@ class DailyRewardClaimer:
         """
         self._log("Starting daily reward routine (VIP & Campaign)...")
         try:
-            self.ensure_city_view()
+            if not self.ensure_city_view():
+                raise RuntimeError("Could not reach City before daily rewards")
             vip_ok = self.claim_vip_rewards()
+            if not self.ensure_city_view():
+                raise RuntimeError("Could not return to City after VIP rewards")
             campaign_ok = self.claim_campaign_rewards()
+            if not self.ensure_city_view():
+                raise RuntimeError("Could not return to City after campaign rewards")
             if vip_ok and campaign_ok:
                 self._log("Daily rewards collected successfully.")
                 return True
@@ -149,11 +154,15 @@ class DailyRewardClaimer:
 
     def ensure_city_view(self, max_attempts: int = 5) -> bool:
         """Ensure game is in City view before navigating menus."""
-        for attempt in range(max_attempts):
+        presses = 0
+        for attempt in range(max_attempts + 1):
             screenshot, frame, (w, h) = self._capture()
             detection = self.detector.detect(screenshot)
             if detection.state is ScreenState.CITY:
+                self._log(f"City view confirmed after {presses} navigation press(es).")
                 return True
+            if attempt == max_attempts:
+                break
             if detection.state is ScreenState.WORLD_MAP:
                 self._log("Currently on World Map; returning to City view...")
                 city_btn = (
@@ -163,35 +172,44 @@ class DailyRewardClaimer:
                     round(0.26 * h),
                 )
                 self.game.click(city_btn, screenshot)
+                presses += 1
                 self.game.wait(1.0)
                 continue
 
-            from rok_automation.game.popups import close_scout_manager
-            if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+            from rok_automation.game.popups import close_scout_manager, close_mailbox
+            if detection.state is ScreenState.MAILBOX:
+                if close_mailbox(self.game, self.detector, screenshot, log=self._log):
+                    presses += 1
                 continue
-            # In some open menu or popup: try clicking top-left back button or margin
-            self._log(f"Screen is {detection.state.value}; pressing Back to reach City...")
-            back_btn = self._get_cached_bounds((w, h), "back_button", NORM_BACK_BUTTON)
-            self.game.click(back_btn, screenshot)
-            self.game.wait(0.5)
+            if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                presses += 1
+                continue
+            confirm = self._detect_xac_nhan(screenshot, frame, (w, h))
+            if confirm is not None:
+                self._log("Confirmation dialog is still open; confirming...")
+                self.game.click(confirm, screenshot)
+            elif self._is_vip_points_popup(frame) or self._is_vip_chest_popup(frame):
+                self._log("Reward popup is still open; dismissing it...")
+                self._dismiss_vip_reward_popup((w, h))
+            elif self._is_vip_menu(frame):
+                self._log("VIP menu is still open; pressing X...")
+                self.game.click(self._locate_vip_close_x(screenshot, (w, h)), screenshot)
+            else:
+                self._log(f"Screen is {detection.state.value}; pressing Back to reach City...")
+                self.game.click(self._locate_back_button(screenshot, (w, h)), screenshot)
+            presses += 1
+            self.game.wait(0.8)
 
+        self._log(f"Could not confirm City view after {presses} navigation press(es).")
         return False
 
     def _recover_to_city(self) -> None:
         """Emergency recovery: close any open dialogs/menus back to City."""
         self._log("Attempting recovery back to City view...")
-        for _ in range(3):
-            try:
-                screenshot, frame, (w, h) = self._capture()
-                detection = self.detector.detect(screenshot)
-                if detection.state is ScreenState.CITY:
-                    return
-                # Tap top-left back button
-                back_btn = self._get_cached_bounds((w, h), "back_button", NORM_BACK_BUTTON)
-                self.game.click(back_btn, screenshot)
-                self.game.wait(0.5)
-            except Exception:
-                break
+        try:
+            self.ensure_city_view()
+        except Exception as exc:
+            self._log(f"Recovery failed: {exc}")
 
     # -------------------------------------------------------------------------
     # STEP 1: VIP Rewards
@@ -378,7 +396,9 @@ class DailyRewardClaimer:
             dets = read_text_detections(frame, roi)
             for text, _box, _score in dets:
                 norm = strip_accents_and_normalize(text)
-                if any(k in norm for k in ("thuongdiem", "thungdim", "diemhomnay", "dimhomnay", "hangngay")):
+                # "Điểm hôm nay" and "Miễn phí mỗi ngày" belong to the
+                # normal VIP page, not to a reward overlay.
+                if any(k in norm for k in ("thuongdiem", "thungdim")):
                     return True
         except Exception:
             pass
@@ -495,14 +515,8 @@ class DailyRewardClaimer:
         self.game.click(x_bounds, screenshot)
         self.game.wait(0.5)
 
-        # Verify VIP menu closed
-        closed = self._wait_for_condition(
-            condition=lambda f: not self._is_vip_menu(f),
-            timeout=2.5,
-            retry_action=lambda: self.game.click(x_bounds, self.game.screenshot()),
-        )
-        if not closed:
-            self._log("Warning: VIP menu did not close immediately; proceeding.")
+        if not self.ensure_city_view():
+            raise RuntimeError("VIP menu did not return to City")
 
     def _locate_vip_close_x(
         self,
@@ -510,20 +524,15 @@ class DailyRewardClaimer:
         size: tuple[int, int],
     ) -> tuple[int, int, int, int]:
         w, h = size
-        cached = _PINNED_COORDINATES.get((w, h, "vip_close_x"))
-        if cached is not None:
-            return cached
-
         tpl = _DAILY_REWARD_TEMPLATES / "vip_close_x.png"
         if tpl.is_file():
             hit = self.detector.locate_template(screenshot, tpl, confidence_threshold=0.75)
             if hit is not None:
-                self._pin_bounds(size, "vip_close_x", hit.bounds)
                 return hit.bounds
 
-        fallback = self._get_cached_bounds(size, "vip_close_x", NORM_VIP_CLOSE_X)
-        self._pin_bounds(size, "vip_close_x", fallback)
-        return fallback
+        # Revalidate the X on every frame; never retain an unverified fallback.
+        return (round(w * NORM_VIP_CLOSE_X[0]), round(h * NORM_VIP_CLOSE_X[1]),
+                round(w * NORM_VIP_CLOSE_X[2]), round(h * NORM_VIP_CLOSE_X[3]))
 
     # -------------------------------------------------------------------------
     # STEP 2: Campaign (Chiến Dịch / Chinh Phạt) Rewards
@@ -840,24 +849,10 @@ class DailyRewardClaimer:
         return None
 
     def _close_campaign_menus(self, size: tuple[int, int]) -> None:
-        """Press '<' back button twice to leave the campaign screens."""
-        w, h = size
-        self._log("Closing Chinh phạt and Chiến dịch menus (clicking Back button twice)...")
-        screenshot, frame, _ = self._capture()
-
-        back_bounds = self._locate_back_button(screenshot, size)
-
-        # First press: closes Chinh phạt -> returns to Chiến dịch
-        self._log("Pressing Back button (1/2) to exit Chinh phạt...")
-        self.game.click(back_bounds, screenshot)
-        self.game.wait(0.8)
-
-        # Second press at the same position: closes Chiến dịch -> returns to City
-        self._log("Pressing Back button (2/2) to exit Chiến dịch...")
-        self.game.click(back_bounds, self.game.screenshot())
-        self.game.wait(1.0)
-
-        self._log("Campaign menus closed.")
+        """Back out one screen at a time until City is confirmed."""
+        self._log("Closing campaign menus and checking for City view...")
+        if not self.ensure_city_view():
+            raise RuntimeError("Campaign menus did not return to City")
 
     def _locate_back_button(
         self,

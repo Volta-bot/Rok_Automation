@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -22,6 +23,13 @@ from rok_automation.game.frame import normalize_capture
 from rok_automation.game.interface import TimingConfig
 from rok_automation.vision.screen import cache_captured_frame
 from rok_automation.performance import timed
+
+
+def _screenshot_path(instance: EmulatorInstance, emulator: EmulatorFamily | None) -> Path:
+    """Give every connection its own directory, including direct callers."""
+    family = emulator.key if emulator is not None else "emulator"
+    return (Path(__file__).resolve().parents[2] / "artifacts"
+            / f"{family}-{instance.index}" / uuid.uuid4().hex / "emulator_native.png")
 
 
 class AdbFrameSource:
@@ -79,7 +87,7 @@ class NativeInterface(AdbInput):
         emulator: EmulatorFamily | None = None,
         adb_path: str | None = None,
         serial: str | None = None,
-        screenshot_path: Path = Path("artifacts/emulator_native.png"),
+        screenshot_path: Path | None = None,
         timing: TimingConfig = TimingConfig(),
         pause_flag_path: Path | None = None,
         log: Callable[[str], None] | None = None,
@@ -94,7 +102,9 @@ class NativeInterface(AdbInput):
             pause_flag_path=pause_flag_path,
             log=log,
         )
-        self.screenshot_path = screenshot_path
+        self.screenshot_path = (screenshot_path or _screenshot_path(instance, emulator)).expanduser().resolve()
+        if self.log is not None:
+            self.log(f"ADB device {self.serial}; screenshot path: {self.screenshot_path}")
         self._measure_latency()
 
     def _measure_latency(self) -> None:
@@ -130,7 +140,8 @@ class NativeInterface(AdbInput):
         destination = self.screenshot_path.expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
         resolved = destination.resolve()
-        cv2.imwrite(str(resolved), normalized)
+        if not cv2.imwrite(str(resolved), normalized):
+            raise OSError(f"Could not save screenshot: {resolved}")
         cache_captured_frame(resolved, normalized)
         return resolved
 
@@ -157,6 +168,13 @@ def create_native_interface(
         index = saved_index
 
     instances = family.discover()
+    if index is None and serial is None and sum(item.running for item in instances) > 1:
+        raise AdbError("Multiple MuMu instances are running. Select an emulator instance index explicitly.")
+    if index is None and serial is not None:
+        matching = [item for item in instances if item.running and
+                    serial == f"127.0.0.1:{item.details.get('adb_port')}"]
+        if len(matching) == 1:
+            index = matching[0].index
     instance = next((item for item in instances if item.running and
                      (index is None or item.index == index)), None)
     if instance is None:
@@ -193,7 +211,7 @@ def create_native_interface(
         emulator=family,
         adb_path=adb_path,
         serial=serial,
-        screenshot_path=Path("artifacts/emulator_native.png"),
+        screenshot_path=_screenshot_path(instance, family),
         timing=timing,
         pause_flag_path=pause_flag_path,
         log=log,

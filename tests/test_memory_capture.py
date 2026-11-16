@@ -36,6 +36,25 @@ class MemoryCaptureTests(unittest.TestCase):
         self.assertTrue(np.all(load_gray_frame(handle) == 72))
         self.assertTrue(np.all(cv2.imread(str(self.path)) == 72))
 
+    def test_direct_connections_keep_capture_pixels_separate(self):
+        from rok_automation.game.emulators import EmulatorInstance
+        games = []
+        with patch("rok_automation.game.native.AdbInput.__init__", return_value=None), \
+             patch.object(NativeInterface, "log", None, create=True), \
+             patch.object(NativeInterface, "_measure_latency"):
+            for index in (0, 1, 0):
+                game = NativeInterface(source=MagicMock(), instance=EmulatorInstance(index, str(index)))
+                game.source.capture.return_value = np.full((720, 1280, 3), 40 + len(games), np.uint8)
+                games.append(game)
+        self.assertEqual(len({game.screenshot_path for game in games}), 3)
+        # Keep test output temporary while preserving each generated instance/session path.
+        for game in games:
+            game.screenshot_path = Path(self.directory.name).joinpath(*game.screenshot_path.parts[-3:])
+        handles = [game.screenshot() for game in games]
+        _FRAME_CACHE.clear()
+        for index, handle in enumerate(handles):
+            self.assertTrue(np.all(load_color_frame(handle) == 40 + index))
+
     def test_export_then_capture_does_not_reuse_saved_pixels(self):
         self.game.source.capture.return_value = np.full((720, 1280, 3), 40, np.uint8)
         handle = self.game.screenshot()

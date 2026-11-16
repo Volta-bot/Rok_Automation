@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import random
 import time
-import unicodedata
 from dataclasses import replace
 from datetime import datetime
 import os
@@ -14,6 +13,9 @@ from typing import Any
 
 import cv2
 
+from rok_automation.automation.dispatch import (
+    DispatchScreenReader, _DISPATCH_BUTTONS, _DISPATCH_BUTTON_CONFIDENCE,
+)
 from rok_automation.automation.context import FarmContext
 from rok_automation.automation.account_switcher import (
     AccountSwitcher,
@@ -37,6 +39,7 @@ from rok_automation.game.flags import (
     DEFAULT_DAILY_REWARD_FLAG_PATH,
     city_resources_enabled,
     forge_material_to_produce,
+    alliance_resource_enabled,
 )
 from rok_automation.game.interface import GameInterface
 from rok_automation.logic.resource_selector import (
@@ -52,7 +55,6 @@ from rok_automation.logic.resource_selector import (
     resource_node_yield,
     search_plan,
 )
-from rok_automation.vision.account_label import read_text_region
 from rok_automation.performance import PerformanceStats, collect_performance, record_event
 from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
@@ -96,28 +98,6 @@ _RESOURCE_BUTTONS = {
 }
 # Gather flow: each screen is recognised by its button, and the button that
 # belongs to the recognised screen is the one pressed next.
-_DISPATCH_BUTTONS = {
-    ScreenState.RESOURCE_FOUND: "gather_button",
-    ScreenState.NEW_TROOPS_PROMPT: "new_troops_button",
-    ScreenState.TROOP_COMPOSITION: "march_button",
-    ScreenState.RESOURCE_SEARCH: "submit_button",
-}
-_DISPATCH_TEMPLATE_DIRS = {
-    ScreenState.RESOURCE_FOUND: _GATHERING_TEMPLATES,
-    ScreenState.NEW_TROOPS_PROMPT: _GATHERING_TEMPLATES,
-    ScreenState.TROOP_COMPOSITION: _GATHERING_TEMPLATES,
-    ScreenState.RESOURCE_SEARCH: _SEARCH_TEMPLATES,
-}
-# Diacritic-free, space-free OCR labels of each button (including RapidOCR's
-# occasional dropped-vowel variants such as "Quân mi" -> "quanmi").
-_DISPATCH_BUTTON_TEXT = {
-    ScreenState.RESOURCE_FOUND: ("thuthap", "thuth"),
-    ScreenState.NEW_TROOPS_PROMPT: ("quanmoi", "quanmi", "quanm"),
-    ScreenState.TROOP_COMPOSITION: ("hanhquan", "hanhq"),
-    ScreenState.RESOURCE_SEARCH: ("timkiem", "timk"),
-}
-_DISPATCH_BUTTON_CONFIDENCE = 0.78
-_DISPATCH_AMBIGUITY_MARGIN = 0.12
 _DISPATCH_TIMEOUT = 20.0
 _STEP_CHANGE_TIMEOUT = 0.70
 _STEP_SETTLE_DELAY = 0.05
@@ -153,6 +133,7 @@ class FarmingController:
         rng: random.Random | None = None,
         log=safe_print,
         daily_rewards: bool = False,
+        alliance_resource: bool = False,
         daily_rewards_flag_path: Path | None = DEFAULT_DAILY_REWARD_FLAG_PATH,
         switch_gmail: bool = True,
         switch_rok_accounts: bool = True,
@@ -168,6 +149,7 @@ class FarmingController:
         self.rng = rng or random.Random()
         self.log = log
         self.daily_rewards = daily_rewards
+        self.alliance_resource = alliance_resource
         self.daily_rewards_flag_path = daily_rewards_flag_path
         self._daily_rewards_enabled_before = False
         self.switch_gmail = switch_gmail
@@ -621,7 +603,7 @@ class FarmingController:
         if not isinstance(path, (str, Path)):
             return
         try:
-            output = save_frame(path, _PROJECT_ROOT / "artifacts/farming_error.png")
+            output = save_frame(path, Path(path).with_name("farming_error.png"))
             self._log(f"Last available frame saved: {output}")
         except (OSError, ValueError, cv2.error) as exc:
             self._log(f"Could not save the failure frame: {exc}")
@@ -652,6 +634,8 @@ class FarmingController:
                 log=self._log,
             )
             claimer.claim_all()
+            if not claimer.ensure_city_view():
+                raise FarmingError("Could not return to City after daily rewards")
             self.game.wait(1.5)
             screenshot, detection = self._open_world_map_directly()
         elif expected_account_name is None:
@@ -774,9 +758,29 @@ class FarmingController:
         if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
             self._check_skip_request()
         self.context.starting_armies_out = armies_out
+        alliance_enabled = self.alliance_resource or alliance_resource_enabled()
+        if not alliance_enabled:
+            self._log("[Alliance] Farm Alliance Resource Node is disabled for this character")
+        elif armies_out >= 5:
+            self._log("[Alliance] Skipping alliance node: all 5 march slots are already in use")
+        elif detection.state is not ScreenState.WORLD_MAP:
+            self._log(f"[Alliance] Skipping alliance node: started in {detection.state.value}, not World View")
+        if alliance_enabled and armies_out < 5 and detection.state is ScreenState.WORLD_MAP:
+            from rok_automation.automation.alliance_resource import AllianceResourceFarmer
+
+            runner = AllianceResourceFarmer(self.game, self.detector, log=self._log)
+            sent = runner.run(self.context.account_name)
+            self.context.armies_dispatched += sent
+            # Keep the resource/name read over our own city. The camera now
+            # points at the alliance node, so do not identify the account again.
+            screenshot = self.game.screenshot()
+            after = self.detector.detect(screenshot, read_account=False, candidate_states={ScreenState.WORLD_MAP})
+            observed = after.armies_out if after.state is ScreenState.WORLD_MAP else None
+            armies_out = max(armies_out + int(bool(sent or runner.march_attempted)), observed or 0)
+            self._next_world_screen = None
         dispatch_limit = min(
             self.max_armies,
-            5 - self.context.starting_armies_out,
+            5 - armies_out,
         )
 
         self._log(
@@ -784,8 +788,8 @@ class FarmingController:
             f"{self.context.preferred_resource.value}"
         )
         self._log(
-            f"Armies already marching: {self.context.starting_armies_out}/5; "
-            f"available slots: {5 - self.context.starting_armies_out}"
+            f"Armies already marching: {armies_out}/5; "
+            f"available slots: {5 - armies_out}"
         )
         if dispatch_limit == 0:
             self._run_enabled_city_tasks()
@@ -817,7 +821,7 @@ class FarmingController:
                 )
 
         for army_number in range(1, dispatch_limit + 1):
-            total_army_number = self.context.starting_armies_out + army_number
+            total_army_number = armies_out + army_number
             started = time.perf_counter()
             dispatched = self._farm_one_army(
                 total_army_number,
@@ -1309,15 +1313,28 @@ class FarmingController:
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
-        from rok_automation.game.popups import close_scout_manager
+        from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu, close_mailbox
         popup_closes = 0
         while True:
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
                 expected_states=expected_states,
             )
+            if detection.state is ScreenState.MAILBOX and popup_closes < 3:
+                if close_mailbox(self.game, self.detector, screenshot, log=self._log):
+                    popup_closes += 1
+                    screenshot = self.game.screenshot()
+                    previous = None
+                    continue
             if (detection.state is ScreenState.UNKNOWN or ambiguous) and popup_closes < 3:
                 if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                    popup_closes += 1
+                    screenshot = self.game.screenshot()
+                    previous = None
+                    continue
+                if detection.state is ScreenState.UNKNOWN and back_out_of_unknown_menu(
+                    self.game, self.detector, screenshot, log=self._log,
+                ):
                     popup_closes += 1
                     screenshot = self.game.screenshot()
                     previous = None
@@ -1528,6 +1545,7 @@ class FarmingController:
         last_state = ScreenState.UNKNOWN
         expected_next: tuple[ScreenState, ...] = (ScreenState.RESOURCE_FOUND,)
         pending_frame: tuple[Path, ScreenDetection, bool] | None = None
+        menu_backs = 0
 
         while time.monotonic() < deadline:
             if pending_frame is not None:
@@ -1541,9 +1559,25 @@ class FarmingController:
                 )
             last_state = detection.state
 
+            if detection.state is ScreenState.MAILBOX:
+                from rok_automation.game.popups import close_mailbox
+                if menu_backs < 3 and close_mailbox(
+                    self.game, self.detector, screenshot, log=self._log,
+                ):
+                    menu_backs += 1
+                fallback_since = None
+                self.game.wait(self.game.timing.poll_interval)
+                continue
+
             if detection.state is ScreenState.UNKNOWN:
-                from rok_automation.game.popups import close_scout_manager
+                from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu
                 if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
+                    continue
+                if menu_backs < 3 and back_out_of_unknown_menu(
+                    self.game, self.detector, screenshot, log=self._log,
+                ):
+                    menu_backs += 1
+                    fallback_since = None
                     continue
                 fallback_since = None
                 self.game.wait(self.game.timing.poll_interval)
@@ -1627,157 +1661,13 @@ class FarmingController:
             f"Lv{target.level}; last detected screen was {last_state.value}"
         )
 
-    def _classify_dispatch_screen(
-        self,
-        screenshot: Path,
-        *,
-        expected_states: tuple[ScreenState, ...] | None = None,
-    ) -> tuple[ScreenDetection, bool]:
-        """Identify which gather-flow screen is showing.
-
-        Checks ``expected_states`` first so the common happy path only checks
-        a single pinned ROI (< 2ms). Falls back to scanning the remaining
-        buttons and map HUD if the expected state isn't on screen.
-        """
-
-        if expected_states:
-            for exp_state in expected_states:
-                if exp_state in _DISPATCH_BUTTONS:
-                    template_name = _DISPATCH_BUTTONS[exp_state]
-                    hit = self.detector.locate_template(
-                        screenshot,
-                        _DISPATCH_TEMPLATE_DIRS[exp_state] / f"{template_name}.png",
-                        confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
-                        context_key=self._selected_resource,
-                    )
-                    if hit is not None:
-                        active_res = None
-                        if exp_state is ScreenState.RESOURCE_SEARCH:
-                            frame = load_gray_frame(screenshot)
-                            if frame is not None:
-                                res = ScreenDetector.identify_active_search_resource(
-                                    hit.bounds, frame.shape[1]
-                                )
-                                if isinstance(res, Resource):
-                                    active_res = res
-                        return (
-                            ScreenDetection(
-                                exp_state,
-                                hit.confidence,
-                                template_name,
-                                hit.bounds,
-                                preferred_resource=active_res,
-                            ),
-                            False,
-                        )
-                elif exp_state is ScreenState.WORLD_MAP:
-                    march_hit = self.detector.locate_template(
-                        screenshot,
-                        _GATHERING_TEMPLATES / "march_button.png",
-                        confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
-                    )
-                    if march_hit is None:
-                        world_hit = self.detector.locate_template(
-                            screenshot,
-                            _NAVIGATION_TEMPLATES / "world_search_button.png",
-                            confidence_threshold=0.75,
-                        )
-                        if world_hit is not None:
-                            return (
-                                ScreenDetection(
-                                    ScreenState.WORLD_MAP,
-                                    world_hit.confidence,
-                                    "world map search button",
-                                    world_hit.bounds,
-                                ),
-                                False,
-                            )
-
-        hits: list[tuple[float, ScreenState, Any, Any]] = []
-        for state, template_name in _DISPATCH_BUTTONS.items():
-            hit = self.detector.locate_template(
-                screenshot,
-                _DISPATCH_TEMPLATE_DIRS[state] / f"{template_name}.png",
-                confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
-                context_key=self._selected_resource,
-            )
-            if hit is not None:
-                active_res = None
-                if state is ScreenState.RESOURCE_SEARCH:
-                    frame = load_gray_frame(screenshot)
-                    if frame is not None:
-                        res = ScreenDetector.identify_active_search_resource(
-                            hit.bounds, frame.shape[1]
-                        )
-                        if isinstance(res, Resource):
-                            active_res = res
-                hits.append((hit.confidence, state, hit, active_res))
-                if hit.confidence >= 0.85:
-                    # Inner text is already verified in locate_template for
-                    # blue buttons, so a strong hit is unambiguous.
-                    return (
-                        ScreenDetection(
-                            state,
-                            hit.confidence,
-                            template_name,
-                            hit.bounds,
-                            preferred_resource=active_res,
-                        ),
-                        False,
-                    )
-        hits.sort(key=lambda item: item[0], reverse=True)
-        if hits:
-            score, state, hit, active_res = hits[0]
-            runner_up = hits[1] if len(hits) > 1 else None
-            ambiguous = (
-                runner_up is not None
-                and score - runner_up[0] < _DISPATCH_AMBIGUITY_MARGIN
-            )
-            return (
-                ScreenDetection(
-                    state,
-                    score,
-                    _DISPATCH_BUTTONS[state],
-                    hit.bounds,
-                    preferred_resource=active_res,
-                ),
-                ambiguous,
-            )
-
-        world = self.detector.detect(
-            screenshot,
-            read_account=False,
-            candidate_states={ScreenState.WORLD_MAP, ScreenState.CITY},
+    def _classify_dispatch_screen(self, screenshot, *, expected_states=None):
+        return DispatchScreenReader(self.detector, self._selected_resource).classify(
+            screenshot, expected_states=expected_states,
         )
-        if world.state in {ScreenState.WORLD_MAP, ScreenState.CITY}:
-            return world, False
-        return ScreenDetection(ScreenState.UNKNOWN, 0.0, "no gather-flow button"), False
 
-    def _read_button_state(
-        self,
-        screenshot: Path,
-        bounds: tuple[int, int, int, int] | None,
-    ) -> ScreenState | None:
-        """OCR a blue button's label to tell Thu thập / Quân mới / Tìm kiếm apart."""
-
-        if bounds is None:
-            return None
-        frame = load_color_frame(screenshot)
-        if frame is None:
-            return None
-        decomposed = unicodedata.normalize(
-            "NFD", " ".join(read_text_region(frame, bounds, upscale=1.5)).casefold()
-        )
-        folded = "".join(
-            character
-            for character in decomposed
-            if not unicodedata.category(character).startswith("M")
-            and not character.isspace()
-        ).replace("đ", "d")
-        for state, keywords in _DISPATCH_BUTTON_TEXT.items():
-            if any(keyword in folded for keyword in keywords):
-                return state
-        return None
+    def _read_button_state(self, screenshot, bounds):
+        return DispatchScreenReader(self.detector, self._selected_resource).read_button_state(screenshot, bounds)
 
     def _wait_for_dispatch_change(
         self,

@@ -140,7 +140,7 @@ def main() -> int:
     parser.add_argument(
         "--screenshot",
         nargs="?",
-        const=Path("artifacts/mumu.png"),
+        const=True,
         type=Path,
         metavar="PATH",
         help="capture the MuMu game screen over ADB",
@@ -175,6 +175,8 @@ def main() -> int:
         action="store_true",
         help="claim daily VIP and campaign rewards before farming each account",
     )
+    parser.add_argument("--alliance-resource", action="store_true",
+                        help="attempt one preset #1 march to an eligible alliance resource node before normal farming")
     parser.add_argument(
         "--daily-reward-only",
         action="store_true",
@@ -271,7 +273,8 @@ def main() -> int:
         return _run_stockpile_check(game)
 
     if args.screenshot is not None or args.detect_screen:
-        screenshot_path = args.screenshot or Path("artifacts/mumu.png")
+        screenshot_path = (args.screenshot if isinstance(args.screenshot, Path)
+                           else Path(game.screenshot_path).with_name("mumu.png"))
         try:
             output_path = game.screenshot()
             output_path = save_frame(output_path, screenshot_path)
@@ -394,6 +397,7 @@ def main() -> int:
             controller = FarmingController(
                 game,
                 daily_rewards=args.daily_reward,
+                alliance_resource=args.alliance_resource,
                 switch_gmail=not args.no_switch_gmail,
                 switch_rok_accounts=not args.current_rok_only,
                 gmail_state_path=args.gmail_state,

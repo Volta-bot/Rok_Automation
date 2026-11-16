@@ -18,7 +18,7 @@ TAG_COLORS = {
     "Rewards": "#F9E2AF", "Timing": "#94A3B8", "System": "#89B4FA",
     "Info": "#89B4FA", "Success": "#A6E3A1", "Warning": "#F9E2AF",
     "Error": "#F38BA8", "Option": "#CBA6F7", "Planned": "#94A3B8",
-    "Capture": "#89DCEB",
+    "Capture": "#89DCEB", "Alliance": "#F5C2E7",
 }
 _ALIASES = {tag.casefold(): tag for tag in TAG_COLORS}
 _ALIASES.update({"city tasks": "City", "daily reward": "Rewards", "notice": "Info"})
