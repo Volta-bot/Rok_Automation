@@ -57,62 +57,167 @@ class TestCityTasks(unittest.TestCase):
         forge.assert_called_once_with("leather")
         self.assertTrue(any("scanning the current city view" in line for line in logs))
 
-    def test_forge_opens_near_claimed_output_and_selects_five_times(self):
+    def _forge_runner(self, kind="idle", *, card_missing=False, button_missing=False):
         game, detector = MagicMock(), MagicMock()
-        game.screenshot.return_value = "city.png"
-        forge = TemplateHit(0.9, (500, 200, 100, 100))
+        game.screenshot.side_effect = [f"frame-{i}.png" for i in range(10)]
+        icon = TemplateHit(0.95, (500, 200, 40, 40))
         button = TemplateHit(0.9, (700, 400, 40, 40))
         card = TemplateHit(0.9, (800, 200, 60, 60))
-        detector.locate_template.side_effect = [forge, None, None, button, card]
-        detector._locate_in_frame.return_value = TemplateHit(0.9, (50, 50, 40, 30))
+        hits = [icon if name == kind else None
+                for name in ("idle", "leather", "iron", "wood", "bone")]
+        detector.locate_template.side_effect = hits[:1] + [
+            None if button_missing else button, None if card_missing else card,
+        ]
         runner = CityTaskRunner(game, detector, log=lambda _: None)
-        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280), dtype=np.uint8)), \
-             patch.object(runner, "_dismiss_material_menu"):
-            runner._claim_and_start_forge("leather")
-        self.assertEqual(game.click.call_count, 8)
-        self.assertEqual(game.click.call_args_list[0].args[0], (517, 150, 40, 30))
-        self.assertEqual(game.click.call_args_list[1].args[0], forge.bounds)
-        self.assertTrue(all(call.args[0] == card.bounds for call in game.click.call_args_list[3:]))
-        self.assertEqual(detector.locate_template.call_count, 5)
-        self.assertEqual(sum(call.args == (0.08,) for call in game.wait.call_args_list), 4)
+        runner._locate_forge_material = MagicMock(side_effect=hits[1:])
+        return runner, game, detector, button, card
 
-    def test_forge_stops_if_material_card_is_missing(self):
-        game, detector = MagicMock(), MagicMock()
-        game.screenshot.return_value = "city.png"
-        hit = TemplateHit(0.9, (500, 200, 40, 30))
-        detector.locate_template.side_effect = [hit, None, None, hit, None]
-        detector._locate_in_frame.return_value = hit
-        logs = []
-        runner = CityTaskRunner(game, detector, log=logs.append)
-        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280), dtype=np.uint8)):
-            runner._claim_and_start_forge("leather")
-        self.assertEqual(game.click.call_count, 3)
-        self.assertTrue(any("Could not find the leather material card" in line for line in logs))
+    def test_forge_material_outputs_claim_then_open_and_select_five_times(self):
+        for kind in ("leather", "iron", "wood", "bone"):
+            with self.subTest(kind=kind):
+                runner, game, detector, button, card = self._forge_runner(kind)
+                with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))), \
+                     patch.object(runner, "_dismiss_material_menu") as dismiss:
+                    self.assertTrue(runner._claim_and_start_forge("leather"))
+                self.assertEqual(game.click.call_count, 8)
+                self.assertEqual(game.click.call_args_list[0].args, ((520, 280, 1, 1), "frame-0.png"))
+                self.assertEqual(game.click.call_args_list[1].args, ((520, 280, 1, 1), "frame-0.png"))
+                self.assertEqual(game.click.call_args_list[2].args[0], button.bounds)
+                self.assertTrue(all(call.args[0] == card.bounds for call in game.click.call_args_list[3:]))
+                self.assertEqual(sum(call.args == (0.08,) for call in game.wait.call_args_list), 4)
+                templates = [call.args[1].name for call in runner._locate_forge_material.call_args_list]
+                self.assertEqual(templates, ["material_leather.png", "material_iron.png", "material_wood.png", "material_bone.png"])
+                dismiss.assert_called_once()
 
-    def test_forge_opens_and_selects_material_without_completed_output(self):
-        game, detector = MagicMock(), MagicMock()
-        game.screenshot.return_value = "city.png"
-        forge = TemplateHit(0.9, (500, 200, 100, 100))
-        button = TemplateHit(0.9, (700, 400, 40, 40))
-        card = TemplateHit(0.9, (800, 200, 60, 60))
-        detector.locate_template.side_effect = [forge, None, None, button, card]
-        detector._locate_in_frame.return_value = None
-        runner = CityTaskRunner(game, detector, log=lambda _: None)
-        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280), dtype=np.uint8)), \
+    def test_idle_forge_opens_once_before_material_selection(self):
+        runner, game, detector, button, card = self._forge_runner()
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))), \
              patch.object(runner, "_dismiss_material_menu"):
             self.assertTrue(runner._claim_and_start_forge("leather"))
         self.assertEqual(game.click.call_count, 7)
-        self.assertEqual(game.click.call_args_list[0].args[0], forge.bounds)
+        self.assertEqual(game.click.call_args_list[0].args[0], (520, 280, 1, 1))
         self.assertEqual(game.click.call_args_list[1].args[0], button.bounds)
         self.assertTrue(all(call.args[0] == card.bounds for call in game.click.call_args_list[2:]))
 
-    def test_forge_uses_alternate_building_reference(self):
-        game, detector = MagicMock(), MagicMock()
-        game.screenshot.return_value = "city.png"
-        forge = TemplateHit(0.95, (150, 200, 100, 80))
-        detector.locate_template.side_effect = [None, forge, None, None]
-        detector._locate_in_frame.return_value = TemplateHit(0.9, (70, 50, 25, 18))
-        runner = CityTaskRunner(game, detector, log=lambda _: None)
-        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280), dtype=np.uint8)):
-            runner._claim_and_start_forge("leather")
-        self.assertEqual(game.click.call_args_list[1].args[0], forge.bounds)
+    def test_missing_icon_does_not_click(self):
+        runner, game, _, _, _ = self._forge_runner("missing")
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))):
+            self.assertFalse(runner._claim_and_start_forge("leather"))
+        game.click.assert_not_called()
+
+    def test_forge_stops_if_material_card_or_button_is_missing(self):
+        for button_missing in (False, True):
+            with self.subTest(button_missing=button_missing):
+                runner, game, _, _, _ = self._forge_runner(card_missing=True, button_missing=button_missing)
+                with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))):
+                    self.assertTrue(runner._claim_and_start_forge("leather"))
+                self.assertEqual(game.click.call_count, 1 if button_missing else 2)
+
+    def test_forge_target_outside_frame_does_not_click(self):
+        runner, game, _, _, _ = self._forge_runner()
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((250, 1280))):
+            self.assertFalse(runner._claim_and_start_forge("leather"))
+        game.click.assert_not_called()
+
+    def test_unreadable_forge_frame_does_not_scan_or_click(self):
+        runner, game, detector, _, _ = self._forge_runner()
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=None):
+            self.assertFalse(runner._claim_and_start_forge("leather"))
+        detector.locate_template.assert_not_called()
+        game.click.assert_not_called()
+
+    def test_real_zoomed_out_forge_icon(self):
+        from pathlib import Path
+        from rok_automation.vision.screen import ScreenDetector, load_gray_frame
+        fixture = Path(__file__).parent / "fixtures" / "forge_zoomed_out.png"
+        template = Path(__file__).resolve().parents[1] / "templates" / "city" / "forge_icon.png"
+        frame = load_gray_frame(fixture)
+        self.assertIsNone(ScreenDetector._locate_in_frame(frame, template, confidence_threshold=0.80))
+        hit = ScreenDetector._locate_in_frame(
+            frame, template, confidence_threshold=0.72, minimum_scale=0.15, refine_scale=True,
+        )
+        self.assertIsNotNone(hit)
+        x, y, w, h = hit.bounds
+        self.assertTrue(210 <= x <= 218 and 234 <= y <= 242, hit)
+        self.assertTrue(35 <= w <= 43 and 34 <= h <= 42, hit)
+        # Remove the forge region: unrelated city icons must not pass.
+        without_forge = frame.copy()
+        without_forge[230:290, 200:265] = 0
+        self.assertIsNone(ScreenDetector._locate_in_frame(
+            without_forge, template, confidence_threshold=0.72,
+            minimum_scale=0.15, refine_scale=True,
+        ))
+
+    def test_idle_icon_wins_over_small_recipe_icons(self):
+        runner, game, detector, _, _ = self._forge_runner(button_missing=True)
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))):
+            runner._claim_and_start_forge("bone")
+        self.assertEqual(game.click.call_count, 1)
+        self.assertEqual(detector.locate_template.call_count, 2)
+
+    def test_real_bone_reward_ignores_recipe_label_and_toolbar(self):
+        from pathlib import Path
+        from rok_automation.automation.city_tasks import _MATERIAL_TEMPLATES
+        from rok_automation.vision.screen import ScreenDetector, load_gray_frame
+        fixture = Path(__file__).parent / "fixtures" / "forge_bone_zoomed_out.png"
+        frame = load_gray_frame(fixture)
+        game = MagicMock()
+        game.screenshot.return_value = fixture
+        runner = CityTaskRunner(game, ScreenDetector(), log=lambda _: None)
+        for kind, template in _MATERIAL_TEMPLATES.items():
+            hit = runner._locate_forge_material(frame, template, kind)
+            if kind == "bone":
+                self.assertIsNotNone(hit)
+                self.assertGreater(hit.confidence, 0.90)
+                self.assertEqual(hit.bounds, (158, 242, 22, 14))
+            else:
+                self.assertIsNone(hit, kind)
+        # Removing only the reward leaves the small bone recipe label intact.
+        without_reward = frame.copy()
+        without_reward[230:280, 145:195] = 0
+        self.assertIsNone(runner._locate_forge_material(
+            without_reward, _MATERIAL_TEMPLATES["bone"], "bone",
+        ))
+        self.assertTrue(runner._claim_and_start_forge("bone"))
+        self.assertEqual(game.click.call_count, 2)
+        for call in game.click.call_args_list:
+            self.assertEqual(call.args[0], (169, 286, 1, 1))
+
+    def test_all_materials_match_small_synthetic_overhead_bubbles(self):
+        import cv2
+        from rok_automation.automation.city_tasks import _MATERIAL_TEMPLATES
+        from rok_automation.vision.screen import ScreenDetector
+        runner = CityTaskRunner(MagicMock(), ScreenDetector(), log=lambda _: None)
+        for kind, template in _MATERIAL_TEMPLATES.items():
+            with self.subTest(material=kind):
+                frame = np.full((720, 1280), 60, dtype=np.uint8)
+                card = cv2.imread(str(template), cv2.IMREAD_GRAYSCALE)
+                card = cv2.resize(card, (round(card.shape[1] * .22), round(card.shape[0] * .22)), interpolation=cv2.INTER_AREA)
+                h, w = card.shape
+                frame[297:300+h+round(w*.6), 396:400+w+4] = 235
+                frame[300:300+h, 400:400+w] = card
+                hit = runner._locate_forge_material(frame, template, kind)
+                self.assertIsNotNone(hit)
+                self.assertLessEqual(abs(hit.bounds[0] - 400), 1)
+                self.assertLessEqual(abs(hit.bounds[1] - 300), 1)
+
+    def test_stacked_bone_reward_keeps_bubble_validation(self):
+        from pathlib import Path
+        from rok_automation.automation.city_tasks import _MATERIAL_TEMPLATES
+        from rok_automation.vision.screen import ScreenDetector, load_gray_frame
+        frame = load_gray_frame(Path(__file__).parent / "fixtures" / "forge_bone_stacked.png")
+        runner = CityTaskRunner(MagicMock(), ScreenDetector(), log=lambda _: None)
+        for kind, template in _MATERIAL_TEMPLATES.items():
+            hit = runner._locate_forge_material(frame, template, kind)
+            if kind == "bone":
+                self.assertIsNotNone(hit)
+                self.assertGreater(hit.confidence, 0.90)
+                self.assertEqual(hit.bounds, (183, 199, 22, 14))
+            else:
+                self.assertIsNone(hit, kind)
+        # Keep the progress label; remove only the overhead reward stack.
+        without_reward = frame.copy()
+        without_reward[185:235, 175:225] = 0
+        self.assertIsNone(runner._locate_forge_material(
+            without_reward, _MATERIAL_TEMPLATES["bone"], "bone",
+        ))

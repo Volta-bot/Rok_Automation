@@ -470,6 +470,8 @@ class ScreenDetector:
         confidence_threshold: float = 0.68,
         context_key: Any = None,
         fast_only: bool = False,
+        minimum_scale: float = 0.35,
+        refine_scale: bool = False,
     ) -> TemplateHit | None:
         """Locate a supplied visual control in a screenshot for safe clicking."""
 
@@ -483,6 +485,8 @@ class ScreenDetector:
             context_key=context_key,
             maximum_scale=1.35,
             fast_only=fast_only,
+            minimum_scale=minimum_scale,
+            refine_scale=refine_scale,
         )
 
     @classmethod
@@ -495,6 +499,8 @@ class ScreenDetector:
         context_key: Any = None,
         maximum_scale: float = 1.35,
         fast_only: bool = False,
+        minimum_scale: float = 0.35,
+        refine_scale: bool = False,
     ) -> TemplateHit | None:
         """Fast ROI + pinned-position template matcher for static UI buttons."""
 
@@ -566,10 +572,19 @@ class ScreenDetector:
         score, match = cls._best_scale_match(
             roi_frame,
             image_template,
-            minimum_scale=0.35,
+            minimum_scale=minimum_scale,
             maximum_scale=maximum_scale,
             frame_key_shape=(frame_h, frame_w),
         )
+        if refine_scale:
+            # Small overhead icons can fall between the coarse 5% scale steps.
+            coarse_step = round(match[2] * 100)
+            for step in range(max(round(minimum_scale * 100), coarse_step - 4),
+                              min(round(maximum_scale * 100), coarse_step + 4) + 1):
+                refined_score, location = cls._match_at_scale(roi_frame, image_template, step)
+                if refined_score > score:
+                    score = refined_score
+                    match = (location[0], location[1], step / 100.0)
         height, width = cls._scaled_size(image_template, match[2])
         hit_bounds = (rx0 + match[0], ry0 + match[1], width, height)
 
@@ -587,7 +602,7 @@ class ScreenDetector:
             score, match = cls._best_scale_match(
                 roi_frame,
                 image_template,
-                minimum_scale=0.35,
+                minimum_scale=minimum_scale,
                 maximum_scale=maximum_scale,
                 frame_key_shape=(frame_h, frame_w),
             )
