@@ -31,10 +31,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from rok_automation.runtime import data_root
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # Where the chosen emulator family is remembered between runs.
-DEFAULT_EMULATOR_STATE_PATH = _PROJECT_ROOT / "state" / "emulator.json"
+DEFAULT_EMULATOR_STATE_PATH = data_root() / "state" / "emulator.json"
 
 
 class EmulatorError(RuntimeError):

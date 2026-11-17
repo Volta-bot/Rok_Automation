@@ -28,7 +28,33 @@ python -m pip install -e .
 
 Start MuMu and open the game, then launch `run_gui.vbs` or `run_gui.bat`. Select a MuMu instance in the GUI before running a task. Instance names are read from MuMu; Refresh rediscovers instances. Each instance has its own saved account list and progress. The previous list and progress remain with instance #0. Open another GUI window to run a different instance; an instance can only have one active GUI worker at a time. Accounts are added manually or learned during rotation, not automatically read from Android on selection. `run.bat` offers a menu for the GUI or CLI farming.
 
-## Command line
+## Portable Windows release
+
+Extract the release ZIP completely, then run `ROKauto.exe`. Python, OCR models,
+and dependencies are included. Keep `ROKauto-worker.exe` and `_internal/` alongside
+the launcher. MuMu and the game still need the setup described above.
+
+Packaged builds save settings, account progress, and screenshots under
+`%LOCALAPPDATA%\ROKauto`; updating the extracted application preserves that data.
+Source runs retain their existing project-local data paths. Personal state and
+screenshots are never copied into the release.
+
+To build on Windows x64 with Python 3.11 or newer:
+
+```powershell
+python -m venv .venv-build
+.\.venv-build\Scripts\python.exe -m pip install -e . pyinstaller
+.\.venv-build\Scripts\python.exe packaging\build_portable.py
+```
+
+The build initializes OCR to cache the required models (network may be needed
+on the build machine), bundles the application, and checks offline OCR, templates,
+Tk, and worker startup before producing `dist/ROKauto-windows-x64.zip` and its
+SHA-256 file. Generated releases and build environments are ignored by Git.
+Validate actual emulator operation on a Windows machine without Python before
+publishing a release. `ROKauto-worker.exe --help` exposes the existing CLI.
+
+## Command line usage
 
 ```powershell
 # Farm all available characters and signed-in Gmail accounts
@@ -63,9 +89,13 @@ python -m rok_automation --help
 
 ## Runtime files
 
+Static button positions are learned during each worker session and reused across characters. Each reused position is visually checked in a small local region; changed or missing buttons trigger normal detection, and different frame sizes use separate cache entries. Alliance screenshots run OCR only when a step needs text. Position caches reset when the worker restarts.
+
 Enable **Farm Alliance Resource Node** under **Core Farming Options** to attempt one preset #1 march after daily rewards and before normal gathering. The node must have more than 50 million resources and must not be under construction. A missing commander, unreadable node, or unavailable node skips this step. Normal gathering continues from the world map using the character's previously identified resource preference. The alliance march uses one of the five available march slots.
 
 The CLI equivalent is `python -m rok_automation --farm --alliance-resource`. Alliance tags, node coordinates, remaining resources, construction status, and check times are saved in `state/alliance_nodes.json` (or the selected instance's state directory). Matching alliances reuse this information; eligible nodes are checked again before dispatch, while unavailable results are reused for up to two minutes.
+
+A **0/4** counter beside the alliance resource-center header means no node exists. This result is saved by alliance tag and skips alliance gathering for all remaining matching accounts in that worker run, without coordinate searches or scroll retries. A new worker run checks again so newly built nodes can be detected.
 
 The `state/` directory stores emulator selection, Gmail rotation and account records, feature flags, and recently farmed nodes. `artifacts/` holds screenshots and run output. Both directories are ignored by Git. The GUI's **Reset Gmail Run Progress** control resets rotation progress; use it when starting a fresh rotation. Treat account records and screenshots as private.
 

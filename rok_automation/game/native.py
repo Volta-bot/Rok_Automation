@@ -23,12 +23,13 @@ from rok_automation.game.frame import normalize_capture
 from rok_automation.game.interface import TimingConfig
 from rok_automation.vision.screen import cache_captured_frame
 from rok_automation.performance import timed
+from rok_automation.runtime import data_root
 
 
 def _screenshot_path(instance: EmulatorInstance, emulator: EmulatorFamily | None) -> Path:
     """Give every connection its own directory, including direct callers."""
     family = emulator.key if emulator is not None else "emulator"
-    return (Path(__file__).resolve().parents[2] / "artifacts"
+    return (data_root() / "artifacts"
             / f"{family}-{instance.index}" / uuid.uuid4().hex / "emulator_native.png")
 
 

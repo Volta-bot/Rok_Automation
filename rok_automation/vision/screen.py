@@ -116,6 +116,8 @@ _FRAME_CACHE: dict[Path, tuple[int | None, int, Any, Any]] = {}
 
 # Normalized (left, top, right, bottom) search regions for static UI controls.
 _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
+    "territory_flag.png": (0.40, 0.35, 0.90, 0.75),
+    "close.png": (0.75, 0.00, 1.00, 0.20),
     "mailbox_tabs.png": (0.00, 0.00, 0.14, 0.10),
     "mailbox_close.png": (0.88, 0.00, 1.00, 0.12),
     "unknown_menu_close_gold.png": (0.00, 0.00, 1.00, 0.12),
@@ -523,6 +525,16 @@ class ScreenDetector:
             if pinned is None:
                 continue
             px, py, pw, ph, p_step = pinned
+            # Truly static controls can be checked at the exact learned
+            # position without even searching the small neighbourhood.
+            exact = frame[py:py+ph, px:px+pw]
+            if exact.shape[:2] == (ph, pw):
+                score, _ = cls._match_at_scale(exact, image_template, p_step)
+                if score >= max(confidence_threshold, 0.72) and (
+                    template_name not in _BLUE_TEXT_TEMPLATES
+                    or cls._verify_blue_button_text(frame, image_template, (px, py, pw, ph))
+                ):
+                    return TemplateHit(score, (px, py, pw, ph))
             pad = 24
             x0 = max(0, px - pad)
             y0 = max(0, py - pad)
@@ -536,6 +548,7 @@ class ScreenDetector:
                     frame, image_template, (hit_x, hit_y, pw, ph)
                 ):
                     continue
+                _POSITION_CACHE[(frame_h, frame_w, template_name, cand_ctx)] = (hit_x, hit_y, pw, ph, p_step)
                 return TemplateHit(score, (hit_x, hit_y, pw, ph))
 
         if fast_only:

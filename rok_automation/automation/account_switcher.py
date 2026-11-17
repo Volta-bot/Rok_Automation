@@ -501,13 +501,18 @@ class AccountSwitcher:
 
         return screenshot, frame, top_down_cards
 
-    def _open_character_list(self) -> None:
+    def _open_character_list(
+        self, *, allow_login_confirmation: bool = False,
+    ) -> str:
         """Drive Top-Left Portrait → Cài đặt → Nhân vật → Character List by state.
 
         Every iteration detects which menu/screen is currently showing and
         presses the button for *that* screen. If a click misses or a menu closes
         back to an earlier screen, the loop re-detects the current state and
         continues from there.
+
+        During card-selection recovery, a delayed login dialog belongs to the
+        selected target. Hand it back to the caller instead of navigating behind it.
         """
 
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT * 2
@@ -525,7 +530,10 @@ class AccountSwitcher:
 
             if state == "character_list":
                 self.game.wait(0.20)
-                return
+                return state
+
+            if state == "login_confirmation" and allow_login_confirmation:
+                return state
 
             if state == "settings_menu" and bounds is not None:
                 clicks["characters"] += 1
@@ -757,7 +765,11 @@ class AccountSwitcher:
                     f"Menu fell back to {state} before login confirmation; "
                     "re-opening character list"
                 )
-                self._open_character_list()
+                recovered_state = self._open_character_list(
+                    allow_login_confirmation=True,
+                )
+                if recovered_state == "login_confirmation":
+                    continue
                 if target_index >= 6:
                     self._scroll_all_the_way(
                         traversal,

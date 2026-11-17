@@ -8,9 +8,12 @@ __pycache__/
 .eggs/
 build/
 dist/
+build-portable.log
+test-results.log
 
 # Virtual environments
 .venv/
+.venv-build/
 venv/
 ENV/
 

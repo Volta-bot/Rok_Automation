@@ -42,6 +42,82 @@ class DummyGame:
         pass
 
 
+class TestGmailLoginSettle(unittest.TestCase):
+    def test_transient_menus_are_ignored_and_yes_is_retried_before_city_loads(self):
+        elapsed = [0.0]
+        captures = []
+        game = MagicMock()
+        game.wait.side_effect = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+        switcher = GmailSwitcher(game, MagicMock(), log=lambda _: None)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        yes = (690, 480, 240, 60)
+
+        def capture():
+            captures.append(elapsed[0])
+            return Path("screen.png"), frame
+
+        switcher._capture = MagicMock(side_effect=capture)
+        switcher._read_lilith_screen = MagicMock(return_value=None)
+        switcher.rok_menus._detect_menu_state = MagicMock(side_effect=[
+            ("settings_menu", (1, 1, 20, 20), 1.0),
+            ("character_list", None, 1.0),
+            ("governor_profile", (2, 2, 20, 20), 1.0),
+            ("login_confirmation", yes, 0.95),
+            ("map_or_city", None, 1.0),
+        ])
+        switcher.rok_menus._wait_for_game = MagicMock()
+        switcher._close_lilith_ui = MagicMock()
+        with patch("rok_automation.automation.gmail_switcher.time.monotonic",
+                   side_effect=lambda: elapsed[0]):
+            switcher._wait_for_login(GmailIdentity(email="target@gmail.com"))
+
+        self.assertEqual(captures, [3.0, 6.0, 9.0, 12.0, 15.0])
+        game.click.assert_called_once_with(yes, Path("screen.png"))
+        switcher._close_lilith_ui.assert_not_called()
+        switcher.rok_menus._wait_for_game.assert_called_once_with("target@gmail.com")
+
+    def test_screen_checks_wait_three_seconds_after_login_and_retries(self):
+        login_button = (400, 400, 100, 40)
+        confirm_button = (500, 450, 100, 40)
+        for pending in (None, _LilithScreen(state="switch_popup", login_button=login_button),
+                        _LilithScreen(state="lilith_unknown", confirm_button=confirm_button)):
+            with self.subTest(pending=pending):
+                elapsed = [0.0]
+                captures = []
+                game = MagicMock()
+                game.timing.poll_interval = 0.05
+                game.wait.side_effect = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+                switcher = GmailSwitcher(game, MagicMock(), log=lambda _: None)
+                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+                def capture():
+                    captures.append(elapsed[0])
+                    return Path("screen.png"), frame
+
+                switcher._capture = MagicMock(side_effect=capture)
+                switcher._read_lilith_screen = MagicMock(
+                    side_effect=[pending, None] if pending is not None else [None],
+                )
+                switcher.rok_menus._detect_menu_state = MagicMock(
+                    return_value=("map_or_city", None, 1.0),
+                )
+                switcher.rok_menus._wait_for_game = MagicMock()
+                switcher._close_lilith_ui = MagicMock()
+                with patch("rok_automation.automation.gmail_switcher.time.monotonic",
+                           side_effect=lambda: elapsed[0]):
+                    switcher._wait_for_login(GmailIdentity(email="target@gmail.com"))
+
+                self.assertEqual(captures, [3.0, 6.0] if pending is not None else [3.0])
+                if pending is not None:
+                    game.click.assert_called_once_with(
+                        pending.login_button or pending.confirm_button, Path("screen.png"),
+                    )
+                else:
+                    game.click.assert_not_called()
+                switcher._close_lilith_ui.assert_not_called()
+                switcher.rok_menus._wait_for_game.assert_called_once_with("target@gmail.com")
+
+
 class TestGmailIdentity(unittest.TestCase):
     def test_email_normalization(self):
         self.assertEqual(email_key("FarmDuy06@gmail.com"), "farmduy06@gmail.com")

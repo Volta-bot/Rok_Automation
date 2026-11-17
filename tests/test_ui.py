@@ -49,7 +49,8 @@ class TestLiveGmailProgress(unittest.TestCase):
                      patch('rok_automation.ui.app.tk.Label') as label:
                     app.refresh_signed_in_accounts()
                 texts = [call.kwargs.get('text', '') for call in label.call_args_list]
-                self.assertIn(f'1. sduy@gmail.com - {expected}', texts)
+                reset_expected = expected.replace(f'farmed {count}/12', 'farmed 0/12').replace('↑', '').replace('↓', '')
+                self.assertIn(f'1. sduy@gmail.com - {reset_expected}', texts)
 
     def test_progress_notification_refreshes_before_process_exit(self):
         app = ROKAutomationApp.__new__(ROKAutomationApp)

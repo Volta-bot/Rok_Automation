@@ -7,12 +7,14 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from pathlib import Path
 
 import cv2
 
 from rok_automation.automation.dispatch import DispatchScreenReader
 from rok_automation.vision.account_label import read_text_detections
+from rok_automation.vision.button_positions import STATIC_BUTTON_POSITIONS
 from rok_automation.game.console import format_log
 from rok_automation.vision.screen import ScreenState, load_color_frame
 
@@ -21,6 +23,11 @@ DEFAULT_ALLIANCE_STATE_PATH = Path(os.environ.get("ROK_STATE_DIR", _ROOT / "stat
 _TEMPLATES = _ROOT / "templates" / "alliance"
 MIN_REMAINING = 50_000_000
 ACTION_ATTEMPTS = 5
+_ALLIANCE_CHECK_SESSION = uuid.uuid4().hex
+
+
+class _AllianceHasNoNode(Exception):
+    """The resource-center header explicitly reports zero built nodes."""
 
 
 def normalized(text):
@@ -50,6 +57,8 @@ class AllianceResourceFarmer:
         self.log = lambda message: log(format_log(message, "Alliance"))
         self.state_path = state_path
         self.march_attempted = False
+        self._words = None
+        self.button_positions = STATIC_BUTTON_POSITIONS
         self.nodes = {}
         try:
             data = json.loads(state_path.read_text(encoding="utf-8")) if state_path else {}
@@ -62,15 +71,33 @@ class AllianceResourceFarmer:
         self.frame = load_color_frame(self.shot)
         if self.frame is None:
             raise RuntimeError("unreadable alliance screen")
-        h, w = self.frame.shape[:2]
-        self.words = read_text_detections(self.frame, (0, 0, w, h), upscale=1.5)
-        return self.words
+        self._words = None
+
+    @property
+    def words(self):
+        if self._words is None:
+            h, w = self.frame.shape[:2]
+            self._words = read_text_detections(self.frame, (0, 0, w, h), upscale=1.5)
+        return self._words
+
+    @words.setter
+    def words(self, value):
+        self._words = value
 
     def _click(self, bounds):
         self.game.click(bounds, self.shot)
         self.game.wait(0.35)
 
     def _text(self, *labels, area=None):
+        stable = normalized(labels[0]) in {
+            "lienminh", "lanhtho", "hanhquan", "chamdegianhap",
+            "thuthap", "thunhap", "quanmoi", "nhan",
+        }
+        key = ('label', tuple(normalized(label) for label in labels), area)
+        if stable:
+            cached = self.button_positions.locate(self.frame, key)
+            if cached:
+                return cached
         for text, bounds, score in self.words:
             if score < 0.45:
                 continue
@@ -80,6 +107,8 @@ class AllianceResourceFarmer:
                 if not (area[0] <= (x + w / 2) / fw <= area[2] and area[1] <= (y + h / 2) / fh <= area[3]):
                     continue
             if any(normalized(label) in normalized(text) for label in labels):
+                if stable:
+                    self.button_positions.remember(self.frame, key, bounds)
                 return bounds
         return None
 
@@ -142,6 +171,7 @@ class AllianceResourceFarmer:
         self.log("Coordinates not found: scrolling back up to the alliance resource-center section")
         self._capture()
         for attempt in range(ACTION_ATTEMPTS + 1):
+            self._check_resource_center_count()
             bounds = self._text("trung tam tai nguyen")
             if bounds:
                 self.log("Reopening Trung Tâm Tài Nguyên Liên Minh with one click")
@@ -158,6 +188,7 @@ class AllianceResourceFarmer:
             self.log(f"Scanning alliance node coordinates: pass {cycle + 1}/{ACTION_ATTEMPTS}")
             self._capture()
             for scroll in range(ACTION_ATTEMPTS + 1):
+                self._check_resource_center_count()
                 node, bounds = self._node(preferred_coordinates)
                 if node:
                     self.log("Verified alliance resource node coordinates and remaining resources")
@@ -167,6 +198,26 @@ class AllianceResourceFarmer:
             if cycle < ACTION_ATTEMPTS - 1 and not self._reopen_resource_section():
                 break
         return None, None
+
+    def _resource_center_count(self):
+        # Associate the counter with its own header, not a fortress/flag
+        # counter elsewhere in the territory menu.
+        for text, (x, y, w, h), score in self.words:
+            if score < .65 or 'trungtamtainguyen' not in normalized(text):
+                continue
+            for count_text, (cx, cy, cw, ch), count_score in self.words:
+                if count_score < .7 or cx + cw < x + w:
+                    continue
+                if abs((cy + ch / 2) - (y + h / 2)) > max(h, ch):
+                    continue
+                match = re.search(r'(?<!\d)([0-4Oo])\s*[/／]\s*4(?!\d)', count_text)
+                if match:
+                    return int(match[1]) if match[1].isdigit() else 0
+        return None
+
+    def _check_resource_center_count(self):
+        if self._resource_center_count() == 0:
+            raise _AllianceHasNoNode()
 
     def _press_text(self, *labels, area=None, expected=None):
         self.log(f"Looking for {labels[0]}")
@@ -214,6 +265,10 @@ class AllianceResourceFarmer:
         return None
 
     def _alliance_menu_button(self):
+        cached = self.button_positions.locate(self.frame, 'alliance_shield')
+        if cached:
+            self.log(f"Using remembered Liên Minh button at {cached}")
+            return cached
         # Search the actual bottom menu at realistic icon sizes, rather than
         # accepting a tiny global match on another control.
         template = cv2.imread(str(_TEMPLATES / 'menu_shield.png'))
@@ -234,6 +289,7 @@ class AllianceResourceFarmer:
                     best_bounds = (left + point[0], top + point[1], w, h)
         self.log(f"Liên Minh shield match: {best_score:.3f} at {best_bounds} (frame {fw}x{fh})")
         if best_score >= .85:
+            self.button_positions.remember(self.frame, 'alliance_shield', best_bounds)
             return best_bounds
         return self._alliance_label_icon_bounds()
 
@@ -320,6 +376,10 @@ class AllianceResourceFarmer:
         return self._verified_action("load troop preset #1 (verify commanders/troops changed)", find, loaded)
 
     def _match_preset_icon(self):
+        cached = self.button_positions.locate(self.frame, 'troop_preset_1')
+        if cached:
+            self.log(f"Using remembered preset #1 button at {cached}")
+            return cached
         """Match inside the preset column so unrelated global hits cannot win."""
         template = cv2.imread(str(_TEMPLATES / "preset_1_button.png"))
         other = cv2.imread(str(_TEMPLATES / "preset_2_button.png"))
@@ -353,7 +413,10 @@ class AllianceResourceFarmer:
             if best_score - other_score < .02:
                 self.log(f"Rejecting preset match: resembles preset #2 ({other_score:.3f})")
                 return None
-        return best_bounds if best_score >= .88 else None
+        if best_score >= .88:
+            self.button_positions.remember(self.frame, 'troop_preset_1', best_bounds)
+            return best_bounds
+        return None
 
     def _template(self, name):
         match = self.detector.locate_template(self.shot, _TEMPLATES / (name + ".png"), confidence_threshold=0.78)
@@ -434,6 +497,13 @@ class AllianceResourceFarmer:
         self.log(f"Starting alliance resource check for {account_name}; reading current alliance tag")
         try:
             return self._run(account_name)
+        except _AllianceHasNoNode:
+            tag = self.current_alliance_tag
+            self._save(tag, {'node_count': 0, 'available': False, 'coordinates': None,
+                             'remaining': 0, 'building': False,
+                             'checked_session': _ALLIANCE_CHECK_SESSION})
+            self.log(f"Alliance [{tag}] resource center shows 0/4: no node; skipping all matching accounts this run")
+            return 0
         except (OSError, RuntimeError, ValueError, cv2.error) as exc:
             self.log(f"Alliance node skipped: {exc}")
             return 0
@@ -451,10 +521,14 @@ class AllianceResourceFarmer:
             self.log("Alliance node skipped: current account's alliance tag is unreadable")
             return 0
         self.log(f"Current account belongs to alliance [{tag}]")
+        self.current_alliance_tag = tag
         cached = self.nodes.get(tag, {})
         if isinstance(cached, dict) and cached:
+            if cached.get('node_count') == 0 and cached.get('checked_session') == _ALLIANCE_CHECK_SESSION:
+                self.log(f"Alliance [{tag}] has no resource node (0/4); skipping this account")
+                return 0
             self.log(f"Remembered alliance [{tag}] node: {cached.get('coordinates')}, remaining {cached.get('remaining')}")
-            if time.time() - cached.get("checked_at", 0) < 120 and (
+            if cached.get('node_count') != 0 and time.time() - cached.get("checked_at", 0) < 120 and (
                 cached.get("building") or isinstance(cached.get("remaining"), int) and cached["remaining"] <= MIN_REMAINING
             ):
                 self.log("Alliance node skipped: recently checked node is unavailable")
@@ -471,8 +545,10 @@ class AllianceResourceFarmer:
             return 0
         if not self._press_text("lanh tho", "lanh th", area=(.4, .45, .85, .75), expected=self._territory_visible):
             return 0
+        self._check_resource_center_count()
         self._press_once("nhan", area=(.65, .1, .9, .27), already_done=lambda: not self._claim_ready())
         self._press_once("trung tam tai nguyen", already_done=self._resource_cards_visible)
+        self._check_resource_center_count()
         node, bounds = self._find_alliance_node(cached.get("coordinates") if isinstance(cached, dict) else None)
         if not node:
             self.log("Alliance node skipped: remaining resources or node coordinates unreadable")

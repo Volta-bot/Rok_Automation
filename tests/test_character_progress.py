@@ -44,7 +44,10 @@ class CharacterProgressTests(unittest.TestCase):
             GmailRotation.reset_progress(path)
             self.assertIsNone(GmailRotation.load(path).get_character_progress(first))
             remembered = GmailRotation.load(path).get_character_display_progress(first)
-            self.assertEqual((remembered['index'], remembered['total'], remembered['direction']), (11, 12, -1))
+            self.assertEqual((remembered['index'], remembered['total']), (11, 12))
+            self.assertNotIn('direction', remembered)
+            self.assertEqual(GmailRotation.load(path).character_farmed_count(first), 0)
+            self.assertEqual(GmailRotation.load(path).character_farmed_count(second), 0)
 
     def test_completed_run_history_survives_new_run_and_multiple_resets(self):
         identity = GmailIdentity(email='a@gmail.com', uid='123')
@@ -57,13 +60,16 @@ class CharacterProgressTests(unittest.TestCase):
             rotation.save()
             fresh = GmailRotation.load(path)
             self.assertIsNone(fresh.get_character_progress(identity))
-            self.assertEqual(fresh.character_farmed_count(identity), 12)
+            self.assertEqual(fresh.character_farmed_count(identity), 0)
+            self.assertNotIn('direction', fresh.get_character_display_progress(identity))
             fresh.save()
             for _ in range(2):
                 GmailRotation.reset_progress(path)
             fresh = GmailRotation.load(path)
             remembered = fresh.get_character_display_progress(GmailIdentity(uid='123'))
             self.assertEqual((remembered['index'], remembered['total']), (11, 12))
+            self.assertNotIn('direction', remembered)
+            self.assertEqual(fresh.character_farmed_count(identity), 0)
             # A new run's count replaces the remembered count instead of adding to it.
             fresh.set_character_progress(identity, 11, 12, -1)
             fresh.get_character_progress(identity)['farmed_count'] = 1
@@ -82,7 +88,7 @@ class CharacterProgressTests(unittest.TestCase):
             GmailRotation.reset_progress(path)
             rotation = GmailRotation.load(path)
             self.assertIsNone(rotation.get_character_progress(identity))
-            self.assertEqual(rotation.character_farmed_count(identity), 12)
+            self.assertEqual(rotation.character_farmed_count(identity), 0)
 
     def test_resumes_pending_character_and_preserves_initial_skipped_position(self):
         with tempfile.TemporaryDirectory() as tmp:

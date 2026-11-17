@@ -55,7 +55,8 @@ _SCROLL_SETTLE_DELAY = 0.35
 # is trusted, but the switch proceeds after a few attempts if the list
 # keeps jittering, so it can never hang.
 _MAX_STABILITY_WAITS = 3
-_LOGIN_RECLICK_DELAY = 4.0
+_LOGIN_RECLICK_DELAY = 3.0
+_LOGIN_SETTLE_DELAY = 3.0
 _USER_CENTER_LINGER = 6.0
 # Lilith's account web UI is white/grey; RoK screens are saturated. Measured
 # on reference screenshots: Lilith UI >= 0.97 low-saturation, RoK <= 0.12.
@@ -351,16 +352,18 @@ class GmailRotation:
         )
         rotation._remember_character_progress()
         if rotation.completed and not include_completed:
-            fresh = cls._new(path)
-            fresh.character_history = rotation.character_history
-            return fresh
+            return cls._new(path, character_history=rotation.character_history)
         return rotation
 
     @classmethod
-    def _new(cls, path: Path | None) -> GmailRotation:
+    def _new(cls, path: Path | None, *, character_history: list[dict] | None = None) -> GmailRotation:
         return cls(
             started_at=datetime.now().isoformat(timespec="seconds"),
             path=path,
+            character_history=[
+                {key: value for key, value in entry.items() if key != "direction"}
+                for entry in (character_history or []) if isinstance(entry, dict)
+            ],
         )
 
     @classmethod
@@ -388,8 +391,7 @@ class GmailRotation:
         """Replace the saved Gmail run with an empty, fresh rotation."""
 
         previous = cls.load(path, include_completed=True)
-        fresh = cls._new(path)
-        fresh.character_history = previous.character_history
+        fresh = cls._new(path, character_history=previous.character_history)
         fresh.save()
 
     @property
@@ -439,8 +441,8 @@ class GmailRotation:
         return None
 
     def character_farmed_count(self, identity: GmailIdentity) -> int:
-        """Read the completed count, including progress saved by older versions."""
-        entry = self.get_character_display_progress(identity)
+        """Count this run's completions; display history supplies position/total only."""
+        entry = self.get_character_progress(identity)
         if not entry:
             return 0
         if isinstance(entry.get("farmed_count"), int):
@@ -1034,14 +1036,31 @@ class GmailSwitcher:
         last_login_click = time.monotonic()
         user_center_since: float | None = None
         extra_clicks = 0
+        # RoK can briefly expose stale settings/character menus while the
+        # account switch is loading. Let the transition settle before detection.
+        self._log("Waiting 3 seconds for Gmail switch to settle before checking the screen")
+        self.game.wait(_LOGIN_SETTLE_DELAY)
         while time.monotonic() < deadline:
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)
             if lilith is None:
-                state, _, _ = self.rok_menus._detect_menu_state(screenshot, frame)
-                if state in {"settings_menu", "governor_profile"}:
-                    self._close_lilith_ui(screenshot, None)
-                break
+                state, bounds, _ = self.rok_menus._detect_menu_state(screenshot, frame)
+                if state == "map_or_city":
+                    break
+                if state == "login_confirmation" and bounds is not None:
+                    extra_clicks += 1
+                    if extra_clicks > _MAX_ACTION_ATTEMPTS:
+                        raise RuntimeError(
+                            "Login confirmation 'Có' button did not respond "
+                            f"after {_MAX_ACTION_ATTEMPTS} clicks"
+                        )
+                    self._log("Login confirmation still open; clicking Có again")
+                    self.game.click(bounds, screenshot)
+                    last_login_click = time.monotonic()
+                # Settings, character lists and unknown frames can be stale
+                # during reload. Only a loaded game screen completes the switch.
+                self.game.wait(_LOGIN_SETTLE_DELAY)
+                continue
             now = time.monotonic()
             if lilith.state == "switch_popup" and lilith.login_button is not None:
                 user_center_since = None
@@ -1055,10 +1074,14 @@ class GmailSwitcher:
                     self._log("Account popup still open; clicking 'Đăng nhập' again")
                     self.game.click(lilith.login_button, screenshot)
                     last_login_click = now
+                    self.game.wait(_LOGIN_SETTLE_DELAY)
+                    continue
             elif lilith.confirm_button is not None:
                 self._log("Confirming Lilith account dialog")
                 self.game.click(lilith.confirm_button, screenshot)
                 last_login_click = now
+                self.game.wait(_LOGIN_SETTLE_DELAY)
+                continue
             elif lilith.state == "user_center":
                 # Some SDK builds switch in place and leave the user center
                 # open on the new account; close it so the game can reload.

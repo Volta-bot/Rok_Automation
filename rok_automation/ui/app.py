@@ -31,6 +31,7 @@ from rok_automation.automation.gmail_switcher import (
     GmailIdentity,
     GmailRotation,
 )
+from rok_automation.runtime import data_root, worker_command
 from rok_automation.game.display import enable_dpi_awareness
 from rok_automation.game.console import TAG_COLORS, split_log
 from rok_automation.game.emulators import families, get_family, select_family
@@ -53,7 +54,7 @@ from rok_automation.logic.resource_selector import (
 )
 
 
-FORGE_PREFERENCE_PATH = Path(__file__).resolve().parents[2] / "state" / "forge_preference.txt"
+FORGE_PREFERENCE_PATH = data_root() / "state" / "forge_preference.txt"
 FORGE_MATERIALS = ("Leather", "Iron", "Wood", "Bone")
 
 
@@ -677,7 +678,7 @@ class ROKAutomationApp:
 
     def request_account_skip(self, kind: str) -> None:
         if not self._is_running:
-            cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation",
+            cmd = [*worker_command(),
                    "--test-skip-account", kind, "--emulator", self.selected_emulator()]
             if self.gmail_state_path is not None:
                 cmd.extend(["--gmail-state", str(self.gmail_state_path)])
@@ -1655,7 +1656,7 @@ class ROKAutomationApp:
         if self._is_running:
             self.log_warning("Cannot run test while automation is active.")
             return
-        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation",
+        cmd = [*worker_command(),
                "--emulator", self.selected_emulator()]
         if forge:
             material = self.opt_forge_material.get()
@@ -1672,7 +1673,7 @@ class ROKAutomationApp:
             if self._is_running:
                 self.log_warning("Cannot run test while automation is active.")
                 return
-            cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation", "--daily-reward-only"]
+            cmd = [*worker_command(), "--daily-reward-only"]
             self.log(
                 "Executing Daily Rewards collection test (VIP & Campaign; planned feature active)...",
                 tag="planned",
@@ -1760,7 +1761,7 @@ class ROKAutomationApp:
 
         if not self._acquire_instance_lock():
             return
-        cmd = [_get_python_cli_executable(), "-u", "-m", "rok_automation"]
+        cmd = worker_command()
         cmd.extend(["--emulator", self.selected_emulator()])
         if self.gmail_state_path is not None:
             cmd.extend(["--gmail-state", str(self.gmail_state_path)])
@@ -1899,10 +1900,7 @@ class ROKAutomationApp:
             self.log_warning("Cannot run test while automation is active.")
             return
         cmd = [
-            _get_python_cli_executable(),
-            "-u",
-            "-m",
-            "rok_automation",
+            *worker_command(),
             "--screenshot",
             "--emulator",
             self.selected_emulator(),
@@ -1916,10 +1914,7 @@ class ROKAutomationApp:
             self.log_warning("Cannot run test while automation is active.")
             return
         cmd = [
-            _get_python_cli_executable(),
-            "-u",
-            "-m",
-            "rok_automation",
+            *worker_command(),
             "--detect-screen",
             "--emulator",
             self.selected_emulator(),
@@ -1933,10 +1928,7 @@ class ROKAutomationApp:
             self.log_warning("Cannot run test while automation is active.")
             return
         cmd = [
-            _get_python_cli_executable(),
-            "-u",
-            "-m",
-            "rok_automation",
+            *worker_command(),
             "--check-stockpiles",
             "--emulator",
             self.selected_emulator(),

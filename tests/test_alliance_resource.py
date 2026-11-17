@@ -124,6 +124,59 @@ class AllianceResourceTests(unittest.TestCase):
             restored._press_text.assert_not_called()
             self.assertEqual(json.loads(path.read_text())['93DE']['remaining'], 49000000)
 
+    def test_zero_node_counter_is_associated_with_resource_center_header(self):
+        runner = self.runner()
+        runner.words = [('Tòa nhà lãnh thổ', (100, 200, 300, 30), .99),
+                        ('0/4', (900, 200, 42, 30), .99),
+                        ('Trung Tâm Tài Nguyên Liên Minh', (162, 400, 348, 31), .99),
+                        ('1/4', (920, 401, 42, 31), .99)]
+        self.assertEqual(runner._resource_center_count(), 1)
+        runner.words[-1] = ('0/4', (920, 401, 42, 31), .99)
+        self.assertEqual(runner._resource_center_count(), 0)
+        runner.words.pop()
+        self.assertIsNone(runner._resource_center_count())
+
+    def test_zero_nodes_saved_by_alliance_and_reused_after_two_minutes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'alliance_nodes.json'
+            runner = self.runner(path)
+            self.setup_flow(runner)
+            runner.words = [('Trung Tâm Tài Nguyên Liên Minh', (162, 28, 348, 31), .99),
+                            ('0/4', (920, 29, 42, 31), .99)]
+            self.assertEqual(runner.run('first character'), 0)
+            runner._node.assert_not_called()
+            runner.game.drag.assert_not_called()
+            runner._load_preset.assert_not_called()
+            runner._close_to_world.assert_called_once()
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved['93DE']['node_count'], 0)
+            saved['93DE']['checked_at'] = 0
+            path.write_text(json.dumps(saved))
+            next_runner = self.runner(path)
+            self.setup_flow(next_runner)
+            self.assertEqual(next_runner.run('second character'), 0)
+            next_runner._tag.assert_called_once_with('second character')
+            next_runner._verified_action.assert_not_called()
+            next_runner._press_text.assert_not_called()
+            # A different alliance does not inherit this absence result.
+            other = self.runner(path)
+            self.setup_flow(other, remaining=49000000)
+            other._tag.return_value = 'OTHER'
+            other.run('different alliance character')
+            other._press_text.assert_called()
+
+    def test_node_search_stops_at_zero_counter_without_scroll_retries(self):
+        from rok_automation.automation.alliance_resource import _AllianceHasNoNode
+
+        runner = self.runner()
+        runner._capture = MagicMock()
+        runner._node = MagicMock()
+        runner.words = [('Trung Tâm Tài Nguyên Liên Minh 0/4', (100, 300, 900, 35), .99)]
+        with self.assertRaises(_AllianceHasNoNode):
+            runner._find_alliance_node()
+        runner._node.assert_not_called()
+        runner.game.drag.assert_not_called()
+
     def test_unexpected_read_failure_skips_feature(self):
         runner = self.runner()
         runner._capture = MagicMock(side_effect=RuntimeError('OCR failed'))
