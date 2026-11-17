@@ -290,10 +290,15 @@ def main() -> int:
 
         if args.detect_screen:
             try:
-                detection = ScreenDetector().detect(
+                detector = ScreenDetector()
+                detection = detector.detect(
                     output_path,
                     expected_resource_level=args.search_level,
                 )
+                extended_view = None
+                if detection.state.value == "world_map":
+                    from rok_automation.game.popups import locate_extended_view
+                    extended_view = locate_extended_view(detector, output_path)
             except (OSError, RuntimeError, ValueError) as exc:
                 print(f"Screen detection failed: {exc}")
                 return 1
@@ -328,6 +333,10 @@ def main() -> int:
                 f"(confidence={detection.confidence:.3f}, evidence={detection.evidence})"
             )
             if detection.state.value == "world_map":
+                print(
+                    "Extended view popup: "
+                    + ("detected" if extended_view is not None else "not detected")
+                )
                 account_name = detection.account_name or "not recognized"
                 resource_name = _RESOURCE_DISPLAY_NAMES.get(
                     detection.preferred_resource,
