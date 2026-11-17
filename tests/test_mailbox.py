@@ -56,7 +56,8 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(detection.state, ScreenState.MAILBOX)
         self.assertFalse(ambiguous)
 
-    def test_screen_read_closes_mailbox_and_detects_fresh_frame(self):
+    @patch("rok_automation.game.popups.close_extended_view", return_value=False)
+    def test_screen_read_closes_mailbox_and_detects_fresh_frame(self, _close_extended):
         game = MagicMock(timing=TimingConfig())
         game.screenshot.side_effect = [self.fixture, Path("world")]
         controller = FarmingController(game, log=lambda _: None)

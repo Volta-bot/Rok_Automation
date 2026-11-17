@@ -125,6 +125,7 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "scout_manager_title.png": (0.20, 0.00, 0.80, 0.20),
     "scout_manager_close.png": (0.80, 0.00, 1.00, 0.18),
     "world_search_button.png": (0.00, 0.56, 0.16, 0.88),
+    "extended_view_mountains.png": (0.00, 0.45, 0.25, 0.85),
     "city_map_button.png": (0.00, 0.74, 0.16, 1.00),
     "world_city_button.png": (0.00, 0.74, 0.16, 1.00),
     "gather_button.png": (0.45, 0.44, 0.95, 0.86),

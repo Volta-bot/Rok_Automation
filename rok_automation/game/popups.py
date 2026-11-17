@@ -15,6 +15,36 @@ _UNKNOWN_MENU_CONTROLS = (
 )
 
 
+def close_extended_view(
+    game: GameInterface, detector: ScreenDetector, screenshot: Path,
+    *, log: Callable[[str], None],
+) -> bool:
+    """Collapse the long-press view selector using its map/city button."""
+    icon = detector.locate_template(
+        screenshot, _NAVIGATION / "extended_view_mountains.png",
+        confidence_threshold=0.88,
+    )
+    if not isinstance(icon, TemplateHit):
+        return False
+    for name in ("world_city_button.png", "city_map_button.png"):
+        button = detector.locate_template(
+            screenshot, _NAVIGATION / name, confidence_threshold=0.68,
+        )
+        if not isinstance(button, TemplateHit):
+            continue
+        x, y, width, height = button.bounds
+        ix, iy, iw, ih = icon.bounds
+        # The mountains selector sits above and to the right of the toggle.
+        if not (x + width / 2 < ix + iw / 2 < x + 3 * width
+                and y - 3 * height < iy + ih / 2 < y):
+            continue
+        log("Closing extended view popup with the map/city button")
+        game.click(button.bounds, screenshot)
+        game.wait(0.5)
+        return True
+    return False
+
+
 def back_out_of_unknown_menu(
     game: GameInterface, detector: ScreenDetector, screenshot: Path,
     *, log: Callable[[str], None],

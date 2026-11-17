@@ -1313,13 +1313,19 @@ class FarmingController:
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
-        from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu, close_mailbox
+        from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu, close_mailbox, close_extended_view
         popup_closes = 0
         while True:
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
                 expected_states=expected_states,
             )
+            if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.UNKNOWN} and popup_closes < 3:
+                if close_extended_view(self.game, self.detector, screenshot, log=self._log):
+                    popup_closes += 1
+                    screenshot = self.game.screenshot()
+                    previous = None
+                    continue
             if detection.state is ScreenState.MAILBOX and popup_closes < 3:
                 if close_mailbox(self.game, self.detector, screenshot, log=self._log):
                     popup_closes += 1
@@ -1385,6 +1391,10 @@ class FarmingController:
             context_key=self._selected_resource,
         )
         if hit is None:
+            if template_path.name == "world_search_button.png":
+                from rok_automation.game.popups import close_extended_view
+                if close_extended_view(self.game, self.detector, screenshot, log=self._log):
+                    return self._read_screen()
             raise FarmingError(
                 f"Could not locate {template_path.name} on the "
                 f"{screen.state.value} screen"

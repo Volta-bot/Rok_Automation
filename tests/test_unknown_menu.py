@@ -70,7 +70,8 @@ class UnknownMenuTests(unittest.TestCase):
             ))
             game.click.assert_not_called()
 
-    def test_recovery_recaptures_and_detects_again(self):
+    @patch("rok_automation.game.popups.close_extended_view", return_value=False)
+    def test_recovery_recaptures_and_detects_again(self, _close_extended):
         game = MagicMock(timing=TimingConfig())
         game.screenshot.side_effect = [Path("event"), Path("world")]
         controller = FarmingController(game, log=lambda _: None)
@@ -87,7 +88,8 @@ class UnknownMenuTests(unittest.TestCase):
         back.assert_called_once()
         self.assertEqual(classify.call_args_list[1].args[0], Path("world"))
 
-    def test_recovery_is_bounded_and_leaves_known_screens_alone(self):
+    @patch("rok_automation.game.popups.close_extended_view", return_value=False)
+    def test_recovery_is_bounded_and_leaves_known_screens_alone(self, _close_extended):
         for unknown_count, expected_backs in ((0, 0), (4, 3)):
             with self.subTest(unknown_count=unknown_count):
                 game = MagicMock(timing=TimingConfig())
