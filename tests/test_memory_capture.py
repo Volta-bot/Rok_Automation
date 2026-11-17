@@ -103,7 +103,9 @@ class MemoryCaptureTests(unittest.TestCase):
              patch("builtins.print"):
             detector.return_value.detect.return_value = ScreenDetection(ScreenState.CITY, 1, "city")
             self.assertEqual(main(), 0)
-        detector.return_value.detect.assert_called_once_with(output.resolve(), expected_resource_level=None)
+            detector.return_value.detect.assert_called_once_with(
+                output.resolve(), expected_resource_level=None, include_menus=True,
+            )
         self.assertTrue(np.all(cv2.imread(str(output)) == 61))
 
     def test_stockpile_diagnostic_still_saves_its_capture(self):

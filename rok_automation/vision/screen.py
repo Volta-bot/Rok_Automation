@@ -17,6 +17,7 @@ from rok_automation.vision.account_label import (
     read_account_label,
     read_army_count,
     read_text_region,
+    read_text_detections,
 )
 from rok_automation.vision.green_route import detect_green_incoming_route
 
@@ -26,6 +27,9 @@ class ScreenState(str, Enum):
     MAILBOX = "mailbox"
     CITY = "city"
     WORLD_MAP = "world_map"
+    VIP = "vip"
+    CHIEN_DICH = "chien_dich"
+    CHINH_PHAT = "chinh_phat"
     RESOURCE_SEARCH = "resource_search"
     RESOURCE_FOUND = "resource_found"
     NO_RESULT = "no_result"
@@ -301,6 +305,7 @@ class ScreenDetector:
         read_account: bool = True,
         candidate_states: set[ScreenState] | None = None,
         context_key: Any = None,
+        include_menus: bool = False,
     ) -> ScreenDetection:
         """Classify an image and attach the active level to a found result.
 
@@ -321,6 +326,11 @@ class ScreenDetector:
         frame = load_gray_frame(image_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {image_path}")
+
+        if include_menus:
+            menu = self._detect_reward_menu(image_path)
+            if menu is not None:
+                return menu
 
         best = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no UI template matched")
         templates = (
@@ -427,6 +437,40 @@ class ScreenDetector:
                 armies_out=armies_out,
             )
         return best
+
+    def _detect_reward_menu(self, image_path: Path) -> ScreenDetection | None:
+        """Read menu titles for diagnostics without changing farming states."""
+        frame = load_color_frame(image_path)
+        if frame is None:
+            raise FileNotFoundError(f"Could not read screenshot: {image_path}")
+        h, w = frame.shape[:2]
+        # Menu titles occupy the top center; HUD VIP badges and campaign
+        # cards elsewhere on the screen must not count as menu titles.
+        roi = (int(w * 0.30), 0, int(w * 0.40), int(h * 0.18))
+        titles = {
+            "vip": (ScreenState.VIP, "VIP"),
+            "chiendich": (ScreenState.CHIEN_DICH, "Chiến dịch"),
+            "chindich": (ScreenState.CHIEN_DICH, "Chiến dịch"),
+            "chindch": (ScreenState.CHIEN_DICH, "Chiến dịch"),
+            "chinhphat": (ScreenState.CHINH_PHAT, "Chinh phạt"),
+            "chinhpht": (ScreenState.CHINH_PHAT, "Chinh phạt"),
+        }
+        for text, bounds, confidence in read_text_detections(frame, roi):
+            normalized = unicodedata.normalize("NFD", text.casefold())
+            normalized = "".join(c for c in normalized if c.isalnum()).replace("đ", "d")
+            if normalized in titles and confidence >= 0.70:
+                state, label = titles[normalized]
+                return ScreenDetection(state, confidence, f"{label} menu title OCR", bounds)
+        # The Chinh phạt card belongs to the Chiến dịch selection menu.
+        hit = self.locate_template(
+            image_path, _PROJECT_ROOT / "templates/daily_reward/chinh_phat_card.png",
+            confidence_threshold=0.88,
+        )
+        if hit is not None:
+            return ScreenDetection(
+                ScreenState.CHIEN_DICH, hit.confidence, "Chiến dịch: Chinh phạt card", hit.bounds,
+            )
+        return None
 
     @staticmethod
     def _read_resource_coordinates(

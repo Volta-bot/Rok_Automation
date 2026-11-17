@@ -294,6 +294,7 @@ def main() -> int:
                 detection = detector.detect(
                     output_path,
                     expected_resource_level=args.search_level,
+                    include_menus=True,
                 )
                 extended_view = None
                 if detection.state.value == "world_map":
