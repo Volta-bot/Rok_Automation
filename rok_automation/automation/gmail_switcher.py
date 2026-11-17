@@ -523,7 +523,16 @@ class GmailRotation:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        temporary.replace(self.path)
+        # Windows may briefly deny replacement while the UI or a scanner
+        # has the progress file open. Keep the pending save and retry it.
+        for attempt in range(6):  # Initial attempt plus five retries.
+            try:
+                temporary.replace(self.path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.2)
 
 
 @dataclass(frozen=True)
