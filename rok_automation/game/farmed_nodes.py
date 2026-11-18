@@ -15,9 +15,11 @@ probably depleted anyway, so the search will not return it.
 from __future__ import annotations
 
 import json
+import math
 import time
 import os
 from pathlib import Path
+from rok_automation.storage import write_json
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _STATE_DIR = Path(os.environ.get("ROK_STATE_DIR", _PROJECT_ROOT / "state"))
@@ -55,8 +57,7 @@ def _read(path: Path) -> dict:
 
 
 def _write(data: dict, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    write_json(path, data, indent=1)
 
 
 def _live_entries(
@@ -67,9 +68,9 @@ def _live_entries(
 ) -> dict[str, float]:
     live: dict[str, float] = {}
     for key, stamp in entries.items():
-        if not isinstance(stamp, (int, float)):
+        if not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
             continue
-        if now - stamp > window:
+        if not 0 <= now - stamp <= window:
             continue
         live[key] = float(stamp)
     return live

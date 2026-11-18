@@ -36,6 +36,13 @@ class MemoryCaptureTests(unittest.TestCase):
         self.assertTrue(np.all(load_gray_frame(handle) == 72))
         self.assertTrue(np.all(cv2.imread(str(self.path)) == 72))
 
+    def test_invalid_capture_reconnects_and_publishes_a_fresh_frame(self):
+        self.game.source.capture.side_effect = [None, np.full((720, 1280, 3), 76, np.uint8)]
+        with patch.object(self.game, "reconnect") as reconnect:
+            handle = self.game.screenshot()
+        reconnect.assert_called_once()
+        self.assertTrue(np.all(load_color_frame(handle) == 76))
+
     def test_direct_connections_keep_capture_pixels_separate(self):
         from rok_automation.game.emulators import EmulatorInstance
         games = []

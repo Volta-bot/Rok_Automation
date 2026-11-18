@@ -346,6 +346,7 @@ class AccountSwitcher:
             card_offset=card_offset,
             initial_screenshot=screenshot,
             initial_bounds=bounds,
+            expected_name=name,
         )
         self._wait_for_game(name)
         traversal.current_index = target_index
@@ -696,6 +697,7 @@ class AccountSwitcher:
         card_offset: int,
         initial_screenshot: Path,
         initial_bounds: tuple[int, int, int, int],
+        expected_name: str | None = None,
     ) -> None:
         """Click the target character card and confirm login ('Có') by state.
 
@@ -750,7 +752,11 @@ class AccountSwitcher:
                     direction=1,
                 )
                 if 0 <= card_offset < len(cards):
-                    _card_name, card_bounds = cards[card_offset]
+                    card_name, card_bounds = cards[card_offset]
+                    if (expected_name is not None and _casefolded_account_key(card_name)
+                            != _casefolded_account_key(expected_name)):
+                        self.game.wait(_ACTION_RETRY_DELAY)
+                        continue
                     card_clicks += 1
                     self._log(
                         f"Character list still open; clicking account card again "
@@ -1314,10 +1320,14 @@ class AccountSwitcher:
         deadline = time.monotonic() + _ACCOUNT_LOAD_TIMEOUT
         next_progress_log = time.monotonic() + 15.0
         reported_character_list = False
+        confirmations = 0
         for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             login_yes = self._find_login_confirmation_yes(frame)
             if login_yes is not None:
+                confirmations += 1
+                if confirmations > _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(f"Repeated login confirmation while loading {expected_name!r}")
                 yes_bounds, _title_score, _yes_score = login_yes
                 self._log("Login confirmation dialog still open; clicking Có again")
                 self.game.click(yes_bounds, screenshot)
@@ -1326,6 +1336,9 @@ class AccountSwitcher:
 
             dialog_confirm = self._find_dialog_confirmation(frame)
             if dialog_confirm is not None:
+                confirmations += 1
+                if confirmations > _MAX_ACTION_ATTEMPTS:
+                    raise RuntimeError(f"Repeated confirmation dialog while loading {expected_name!r}")
                 self._log("In-game confirmation dialog detected; clicking confirm")
                 self.game.click(dialog_confirm, screenshot)
                 self.game.wait(0.50)

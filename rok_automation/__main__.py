@@ -1,6 +1,7 @@
 """Command-line entry point for emulator detection and screenshot capture."""
 
 import argparse
+import os
 import sys
 from rok_automation.game.console import safe_print as print, format_log
 from pathlib import Path
@@ -265,6 +266,10 @@ def main() -> int:
         from rok_automation.ui.app import launch_gui
         return launch_gui(hide_console=not args.show_console)
 
+    # The GUI clears stale pause state before spawning, so a new pause request
+    # during worker startup is respected. CLI runs clear it here before capture.
+    if os.environ.get("ROK_GUI_WORKER") != "1":
+        clear_paused()
     game = _build_game(args)
     if game is None:
         return 1
@@ -353,7 +358,6 @@ def main() -> int:
 
     if args.cycle_gmail_only:
         from rok_automation.automation.gmail_cycle import cycle_gmail_accounts
-        clear_paused()
         try:
             cycle_gmail_accounts(game)
         except KeyboardInterrupt:
@@ -366,7 +370,6 @@ def main() -> int:
 
     if args.test_skip_account:
         from rok_automation.automation.skip_test import run_skip_test
-        clear_paused()
         try:
             run_skip_test(game, args.test_skip_account, args.gmail_state)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -375,7 +378,6 @@ def main() -> int:
         return 0
 
     if args.test_city_resources or args.test_forge_material:
-        clear_paused()
         try:
             FarmingController(game)._run_city_tasks_from_current_screen(
                 collect_resources=args.test_city_resources,
@@ -387,7 +389,6 @@ def main() -> int:
         return 0
 
     if args.city_tasks_only and not args.farm:
-        clear_paused()
         try:
             FarmingController(game)._run_enabled_city_tasks()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -401,8 +402,6 @@ def main() -> int:
         return 0 if success else 1
 
     if args.farm:
-        # A stale pause flag from an earlier run must not freeze this one.
-        clear_paused()
         try:
             controller = FarmingController(
                 game,

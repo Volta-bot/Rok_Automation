@@ -33,6 +33,14 @@ class AdbError(RuntimeError):
     """Raised when the emulator cannot be reached over ADB."""
 
 
+class AdbCommandTimeout(AdbError):
+    """The command may have reached Android; input must not be replayed."""
+
+
+class AdbDeviceUnavailable(AdbError):
+    """ADB rejected the command before delivery because the device was absent."""
+
+
 def find_adb_executable(emulator: "EmulatorFamily | None" = None) -> str:
     """Locate an adb client, preferring the emulator's own bundled copy."""
 
@@ -121,10 +129,13 @@ def _run(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise AdbError(f"adb command timed out: {' '.join(args)}") from exc
+        raise AdbCommandTimeout(f"adb command timed out: {' '.join(args)}") from exc
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", "replace").strip()
-        raise AdbError(f"adb {' '.join(args)} failed: {message}")
+        error = AdbError
+        if re.fullmatch(r"(?:adb: error: |error: )?(?:device offline|no devices/emulators found|device '[^']+' not found)", message):
+            error = AdbDeviceUnavailable
+        raise error(f"adb {' '.join(args)} failed: {message}")
     return result.stdout
 
 
@@ -262,7 +273,7 @@ class AdbInput:
             if port is not None:
                 _run_global(self.adb_path, ["connect", f"127.0.0.1:{port}"], timeout=30)
             else:
-                _run_global(self.adb_path, ["reconnect"], timeout=30)
+                _run(self.adb_path, self.serial, ["reconnect"], timeout=30)
         except AdbError:
             pass
 
@@ -273,8 +284,9 @@ class AdbInput:
                 devices = _run(self.adb_path, self.serial, ["get-state"], timeout=10)
             except AdbError:
                 continue
-            if b"device" in devices:
+            if devices.strip() == b"device":
                 return
+        raise AdbError(f"ADB device {self.serial} did not recover after reconnecting")
 
     # -- input ---------------------------------------------------------- #
 
@@ -282,13 +294,17 @@ class AdbInput:
     def _input(self, args: Sequence[str], *, timeout: float = 30.0) -> None:
         """Send an input command, reconnecting once if the link went stale."""
 
+        wait_while_paused(self.pause_flag_path, self.log)
         try:
             _run(self.adb_path, self.serial, args, timeout=timeout)
-        except AdbError:
+        # Only a pre-delivery rejection is safe to replay. A timeout or a
+        # failure inside Android may have already submitted a march or login.
+        except AdbDeviceUnavailable:
             record_event("adb_retry")
             if self.log is not None:
                 self.log(f"ADB input failed ({' '.join(args)}); reconnecting.")
             self.reconnect()
+            wait_while_paused(self.pause_flag_path, self.log)
             _run(self.adb_path, self.serial, args, timeout=timeout)
 
     def _to_guest(

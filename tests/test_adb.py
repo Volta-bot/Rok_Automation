@@ -8,6 +8,7 @@ can all be checked offline.
 from __future__ import annotations
 
 import unittest
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -174,7 +175,8 @@ class TestStaleConnectionRecovery(unittest.TestCase):
         def fake_run(adb_path, serial, args, **kwargs):
             calls.append(list(args))
             if len(calls) == 1:
-                raise AdbError("adb command timed out")
+                from rok_automation.game.adb import AdbDeviceUnavailable
+                raise AdbDeviceUnavailable("device offline")
             return b""
 
         with patch("rok_automation.game.adb._run", side_effect=fake_run), \
@@ -184,6 +186,18 @@ class TestStaleConnectionRecovery(unittest.TestCase):
 
         reconnect.assert_called_once()
         self.assertEqual(len(calls), 2)
+
+    def test_timeout_never_replays_a_tap(self) -> None:
+        from rok_automation.game.adb import AdbCommandTimeout
+
+        interface = self._interface()
+        with patch("rok_automation.game.adb.run_hidden",
+                   side_effect=subprocess.TimeoutExpired("adb", 30)) as run, \
+             patch.object(interface, "reconnect") as reconnect:
+            with self.assertRaises(AdbCommandTimeout):
+                interface._input(["shell", "input", "tap", "10", "20"])
+        run.assert_called_once()
+        reconnect.assert_not_called()
 
 
 class TestTimeoutScaling(unittest.TestCase):

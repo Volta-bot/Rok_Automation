@@ -12,6 +12,7 @@ from typing import Callable
 from rok_automation.game.adb import AdbError
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
+from rok_automation.game.popups import close_chat
 from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
 from rok_automation.vision.screen import ScreenDetector, ScreenState, TemplateHit, load_gray_frame
 
@@ -40,6 +41,9 @@ _MENU_WAIT_SECONDS = 1.0
 # Fractions of the canonical frame that avoid the top bar, side controls and
 # bottom chat overlay while retaining the visible city buildings.
 _RESOURCE_SCAN_AREA = (0.072, 0.143, 0.978, 0.892)
+# Keep the lower-left chat feed and its interaction area out of resource clicks.
+_CHAT_HUD_RIGHT = 0.45
+_CHAT_HUD_TOP = 0.84
 # The right commander portrait strip can resemble small material cards.
 _FORGE_MATERIAL_SCAN_AREA = (0.072, 0.143, 0.90, 0.892)
 
@@ -78,7 +82,9 @@ class CityTaskRunner:
 
         remaining_resources = set(_RESOURCE_TEMPLATES) if collect_resources else set()
         forge_pending = bool(material)
-        screenshot = self.game.screenshot()
+        screenshot, _ = self._capture_without_chat()
+        if screenshot is None:
+            return
         if not self._is_still_in_city(screenshot):
             self._log("City view changed; skipping city tasks")
             return
@@ -88,12 +94,14 @@ class CityTaskRunner:
         except AdbError as exc:
             self._log(f"Could not zoom out ({exc}); scanning the current city view")
         self.game.wait(0.50)
-        screenshot = self.game.screenshot()
+        screenshot, _ = self._capture_without_chat()
+        if screenshot is None:
+            return
         if not self._is_still_in_city(screenshot):
             self._log("Zoom left the city; skipping city tasks")
             return
-        if remaining_resources:
-            self._collect_visible_resources(remaining_resources)
+        if remaining_resources and not self._collect_visible_resources(remaining_resources):
+            return
         if forge_pending and self._claim_and_start_forge(material):
             forge_pending = False
 
@@ -117,11 +125,14 @@ class CityTaskRunner:
             )
         )
         area = frame[top:bottom, left:right]
+        chat_right = round(frame_width * _CHAT_HUD_RIGHT) - left
+        chat_top = round(frame_height * _CHAT_HUD_TOP) - top
         markers: list[tuple[str, tuple[int, int, int, int]]] = []
         for resource, templates in _RESOURCE_TEMPLATES.items():
             if resource not in resources:
                 continue
             search_area = area.copy()
+            search_area[chat_top:, :chat_right] = 0
             for _ in range(24):
                 hits = [
                     hit for template in templates
@@ -138,7 +149,8 @@ class CityTaskRunner:
                 cx, cy = bounds[0] + width / 2, bounds[1] + height / 2
                 # Both templates, or different resource templates, can match
                 # the same bubble. Keep only one click for each position.
-                if not any(
+                overlaps_chat = x < chat_right and y + height > chat_top
+                if not overlaps_chat and not any(
                     abs(cx - (bx + bw / 2)) < max(width, bw) * 0.7
                     and abs(cy - (by + bh / 2)) < max(height, bh) * 0.7
                     for _, (bx, by, bw, bh) in markers
@@ -149,14 +161,30 @@ class CityTaskRunner:
                             max(0, x - pad):x + width + pad] = 0
         return markers
 
-    def _collect_visible_resources(self, remaining_resources: set[str]) -> None:
-        resources = set(remaining_resources)
-        for pass_number in (1, 2):
+    def _capture_without_chat(self) -> tuple[Path | None, bool]:
+        for attempt in range(4):
             screenshot = self.game.screenshot()
+            detection = self.detector.detect(
+                screenshot, read_account=False, candidate_states={ScreenState.CHAT},
+            )
+            if detection.state is not ScreenState.CHAT:
+                return screenshot, attempt > 0
+            if attempt < 3:
+                close_chat(self.game, screenshot, detection, log=self._log)
+        self._log("Chat panel stayed open; stopping city tasks")
+        return None, True
+
+    def _collect_visible_resources(self, remaining_resources: set[str]) -> bool:
+        resources = set(remaining_resources)
+        screenshot, _ = self._capture_without_chat()
+        # A chat interruption on the double-check gets one fresh scan.
+        for pass_number in (1, 2, 3):
+            if screenshot is None:
+                return False
             frame = load_gray_frame(screenshot)
             if frame is None:
                 self._log("Could not read the city view; skipping resource collection")
-                return
+                return True
             markers = self._scan_resource_markers(frame, resources)
             if pass_number == 2:
                 self._log(f"Double-check found {len(markers)} remaining resource marker(s)")
@@ -165,10 +193,15 @@ class CityTaskRunner:
                 remaining_resources.discard(resource)
             if markers:
                 self._log(f"Clicked {len(markers)} resource marker(s) on pass {pass_number}")
-                self.game.wait(0.50)
-            elif pass_number == 1:
-                # A second image can reveal icons obscured by animation.
-                self.game.wait(0.50)
+            elif pass_number >= 2:
+                break
+            self.game.wait(0.50)
+            screenshot, recovered_chat = self._capture_without_chat()
+            if screenshot is None:
+                return False
+            if pass_number >= 2 and not recovered_chat:
+                break
+        return True
 
     def _locate_forge_material(self, frame, template: Path, kind: str):
         """Find a material inside an overhead bubble, excluding recipe labels."""

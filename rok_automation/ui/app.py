@@ -1787,6 +1787,8 @@ class ROKAutomationApp:
                 )
             except OSError as exc:
                 self.log_error(f"Could not apply automation options: {exc}")
+                self._release_instance_lock()
+                return
         if not farm_enabled and not cycle_only and self.opt_daily_reward.get():
             cmd.append("--daily-reward-only")
         if scope in {"gmail", "rok"} or not self.opt_switch_gmail.get():
@@ -1826,6 +1828,7 @@ class ROKAutomationApp:
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONUTF8"] = "1"
         env["ROK_STATE_DIR"] = str(self._state_path(".").resolve())
+        env["ROK_GUI_WORKER"] = "1"
 
         creationflags = 0
         if sys.platform == "win32":
@@ -1847,8 +1850,12 @@ class ROKAutomationApp:
         if self._instance_lock is not None:
             return True
         path = self._state_path("instance.lock")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+b")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(path, "a+b")
+        except OSError as exc:
+            self.log_error(f"Could not open the instance lock: {exc}")
+            return False
         try:
             if sys.platform == "win32":
                 import msvcrt
@@ -1878,6 +1885,7 @@ class ROKAutomationApp:
             return
         cmd.extend(["--emulator-index", str(self._instance_index)])
         try:
+            clear_paused(self._state_path("pause.flag"))
             process = self._spawn_process(cmd)
         except Exception as exc:
             self.log_error(f"Failed to start the automation process: {exc}")
@@ -1945,11 +1953,9 @@ class ROKAutomationApp:
         """Background worker thread that streams a subprocess's output."""
         try:
             if process.stdout is not None:
-                for line in iter(process.stdout.readline, ""):
-                    if line:
+                with process.stdout as stream:
+                    for line in iter(stream.readline, ""):
                         self._output_queue.put(line.rstrip("\r\n"))
-                    elif process.poll() is not None:
-                        break
 
             process.wait()
             return_code = process.returncode

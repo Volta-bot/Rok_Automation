@@ -90,6 +90,8 @@ python -m rok_automation --help
 
 ## Runtime files
 
+Screenshot recovery reconnects to the selected emulator and tries a fresh capture once. Input is retried only when ADB confirms the device was unavailable before delivery. If a march cannot be confirmed, farming stops and leaves saved account progress available for resuming. Damaged Gmail progress is reported and preserved until you restore it or explicitly reset it in the GUI.
+
 Static button positions are learned during each worker session and reused across characters. Each reused position is visually checked in a small local region; changed or missing buttons trigger normal detection, and different frame sizes use separate cache entries. Alliance screenshots run OCR only when a step needs text. Position caches reset when the worker restarts.
 
 Enable **Farm Alliance Resource Node** under **Core Farming Options** to attempt one preset #1 march after daily rewards and before normal gathering. The node must have more than 50 million resources and must not be under construction. A missing commander, unreadable node, or unavailable node skips this step. Normal gathering continues from the world map using the character's previously identified resource preference. The alliance march uses one of the five available march slots.

@@ -24,6 +24,15 @@ from rok_automation.game.interface import TimingConfig
 from rok_automation.vision.screen import cache_captured_frame
 from rok_automation.performance import timed
 from rok_automation.runtime import data_root
+from rok_automation.game.pause import wait_while_paused
+
+
+def _validate_frame(frame):
+    if (not isinstance(frame, np.ndarray) or frame.ndim != 3
+            or frame.shape[2] != 3 or min(frame.shape[:2]) <= 0
+            or frame.dtype != np.uint8):
+        raise AdbError("Capture returned an invalid BGR frame")
+    return frame
 
 
 def _screenshot_path(instance: EmulatorInstance, emulator: EmulatorFamily | None) -> Path:
@@ -42,6 +51,8 @@ class AdbFrameSource:
 
     def capture(self):
         data = _run(self.adb_path, self.serial, ["exec-out", "screencap", "-p"], timeout=25)
+        if not data:
+            raise AdbError("ADB returned an empty screenshot")
         frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise AdbError("ADB returned an invalid screenshot. Check that MuMu is running.")
@@ -59,13 +70,18 @@ class FallbackFrameSource:
     def capture(self):
         if self.primary is not None:
             try:
-                return self.primary.capture()
-            except (EmulatorError, OSError, ValueError, cv2.error) as exc:
+                return _validate_frame(self.primary.capture())
+            except (AdbError, EmulatorError, OSError, ValueError, cv2.error) as exc:
                 if self.log is not None:
                     self.log(f"Native capture failed ({exc}); switching to ADB screenshots")
-                self.primary.close()
+                failed_source = self.primary
                 self.primary = None
-        return self.fallback.capture()
+                try:
+                    failed_source.close()
+                except (EmulatorError, OSError, ValueError) as close_error:
+                    if self.log is not None:
+                        self.log(f"Could not close failed native capture: {close_error}")
+        return _validate_frame(self.fallback.capture())
 
 
 def _matching_displays(native_frame, adb_frame) -> bool:
@@ -114,7 +130,7 @@ class NativeInterface(AdbInput):
         samples = []
         for _ in range(3):
             started = time.perf_counter()
-            self.source.capture()
+            self._capture_with_recovery()
             samples.append(time.perf_counter() - started)
         latency = statistics.median(samples)
         self.timing = replace(self.timing, capture_latency=latency)
@@ -124,12 +140,25 @@ class NativeInterface(AdbInput):
                 f"screen timeouts scaled {self.timeout_scale:.1f}x"
             )
 
+    def _capture_with_recovery(self):
+        """Retry read-only capture once after reconnecting the selected device."""
+        for attempt in range(2):
+            wait_while_paused(getattr(self, "pause_flag_path", None), getattr(self, "log", None))
+            try:
+                return _validate_frame(self.source.capture())
+            except (AdbError, EmulatorError, OSError, ValueError, cv2.error) as exc:
+                if attempt:
+                    raise AdbError(f"Screenshot still unavailable after recovery: {exc}") from exc
+                if getattr(self, "log", None) is not None:
+                    self.log(f"Screenshot failed ({exc}); reconnecting and capturing again")
+                self.reconnect()
+
     def screenshot(self) -> Path:
         """Capture the emulator and store a canonical 1280x720 frame."""
 
         was_native = isinstance(self.source, FallbackFrameSource) and self.source.primary is not None
         started = time.perf_counter()
-        frame = self.source.capture()
+        frame = self._capture_with_recovery()
         if was_native and self.source.primary is None:
             self.timing = replace(self.timing, capture_latency=time.perf_counter() - started)
             if self.log is not None:
@@ -189,12 +218,12 @@ def create_native_interface(
     native_source = None
     try:
         native_source = family.open_capture(instance)
-        if not _matching_displays(native_source.capture(), adb_source.capture()):
+        if not _matching_displays(_validate_frame(native_source.capture()), adb_source.capture()):
             raise EmulatorError("native and ADB frames do not match")
         source = FallbackFrameSource(native_source, adb_source, log)
         if log is not None:
             log("Using verified MuMu native renderer capture")
-    except (EmulatorError, OSError, ValueError, cv2.error) as exc:
+    except (AdbError, EmulatorError, OSError, ValueError, cv2.error) as exc:
         if native_source is not None:
             native_source.close()
         if log is not None:

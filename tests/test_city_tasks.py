@@ -5,7 +5,7 @@ import numpy as np
 
 from rok_automation.automation.city_tasks import CityTaskRunner
 from rok_automation.game.adb import AdbError
-from rok_automation.vision.screen import TemplateHit
+from rok_automation.vision.screen import ScreenDetection, ScreenState, TemplateHit
 
 
 class TestCityTasks(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestCityTasks(unittest.TestCase):
 
     def test_batches_all_clicks_then_rescans_and_retries_missed_markers(self):
         game = MagicMock()
-        game.screenshot.side_effect = ["first.png", "check.png"]
+        game.screenshot.side_effect = ["first.png", "check.png", "verified.png"]
         runner = CityTaskRunner(game, MagicMock(), log=lambda _: None)
         events = []
         def scan(frame, resources):
@@ -45,6 +45,41 @@ class TestCityTasks(unittest.TestCase):
         self.assertEqual(events, ["scan", "click", "click", "scan", "click", "click"])
         self.assertEqual(game.click.call_args_list[2].args, ((10, 20, 10, 10), "check.png"))
         self.assertEqual(remaining, set())
+
+    def test_resource_scan_rejects_bounds_crossing_chat_region(self):
+        detector = MagicMock()
+        detector._locate_in_frame.side_effect = [
+            TemplateHit(0.95, (180, 490, 20, 20)), None,
+            TemplateHit(0.94, (550, 490, 20, 20)), None,
+            None, None,
+        ]
+        runner = CityTaskRunner(MagicMock(), detector, log=lambda _: None)
+        frame = np.full((720, 1280), 255, dtype=np.uint8)
+        self.assertEqual(runner._scan_resource_markers(frame, {"Gold"}), [
+            ("Gold", (642, 593, 20, 20)),
+        ])
+        search_area = detector._locate_in_frame.call_args_list[0].args[0]
+        self.assertEqual(search_area[520, 300], 0)
+        self.assertEqual(search_area[520, 550], 255)
+
+    def test_chat_after_double_check_is_closed_and_resources_are_rescanned(self):
+        game, detector = MagicMock(), MagicMock()
+        game.screenshot.side_effect = ["first", "second", "chat", "resumed", "verified"]
+        clear = ScreenDetection(ScreenState.UNKNOWN, 0.0, "")
+        close_bounds = (700, 340, 32, 38)
+        detector.detect.side_effect = [
+            clear, clear, ScreenDetection(ScreenState.CHAT, 0.99, "", close_bounds),
+            clear, clear,
+        ]
+        runner = CityTaskRunner(game, detector, log=lambda _: None)
+        marker = ("Gold", (610, 420, 20, 20))
+        with patch("rok_automation.automation.city_tasks.load_gray_frame"), \
+             patch.object(runner, "_scan_resource_markers", return_value=[marker]):
+            self.assertTrue(runner._collect_visible_resources({"Gold"}))
+        self.assertEqual([call.args for call in game.click.call_args_list], [
+            (marker[1], "first"), (marker[1], "second"),
+            (close_bounds, "chat"), (marker[1], "resumed"),
+        ])
 
     def test_forge_continues_when_zoom_is_unavailable(self):
         game = MagicMock()

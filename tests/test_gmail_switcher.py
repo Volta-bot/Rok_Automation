@@ -79,7 +79,8 @@ class TestGmailLoginSettle(unittest.TestCase):
     def test_screen_checks_wait_three_seconds_after_login_and_retries(self):
         login_button = (400, 400, 100, 40)
         confirm_button = (500, 450, 100, 40)
-        for pending in (None, _LilithScreen(state="switch_popup", login_button=login_button),
+        for pending in (None, _LilithScreen(state="switch_popup", login_button=login_button,
+                                           field_email="target@gmail.com"),
                         _LilithScreen(state="lilith_unknown", confirm_button=confirm_button)):
             with self.subTest(pending=pending):
                 elapsed = [0.0]

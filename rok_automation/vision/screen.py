@@ -25,6 +25,7 @@ from rok_automation.vision.green_route import detect_green_incoming_route
 class ScreenState(str, Enum):
     UNKNOWN = "unknown"
     MAILBOX = "mailbox"
+    CHAT = "chat"
     CITY = "city"
     WORLD_MAP = "world_map"
     VIP = "vip"
@@ -67,6 +68,7 @@ class _Template:
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_CHAT_CLOSE_TEMPLATE = _PROJECT_ROOT / "templates/navigation/chat_close_chevron.png"
 _TEMPLATES = (
     _Template(
         ScreenState.MAILBOX,
@@ -124,6 +126,7 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "close.png": (0.75, 0.00, 1.00, 0.20),
     "mailbox_tabs.png": (0.00, 0.00, 0.14, 0.10),
     "mailbox_close.png": (0.88, 0.00, 1.00, 0.12),
+    "chat_close_chevron.png": (0.53, 0.44, 0.60, 0.56),
     "unknown_menu_close_gold.png": (0.00, 0.00, 1.00, 0.12),
     "unknown_menu_close_light.png": (0.00, 0.00, 1.00, 0.12),
     "scout_manager_title.png": (0.20, 0.00, 0.80, 0.20),
@@ -326,6 +329,17 @@ class ScreenDetector:
         frame = load_gray_frame(image_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {image_path}")
+
+        if candidate_states is None or ScreenState.CHAT in candidate_states:
+            chat = self._locate_in_frame(
+                frame, _CHAT_CLOSE_TEMPLATE,
+                confidence_threshold=max(0.88, self.confidence_threshold),
+                minimum_scale=0.55, maximum_scale=1.65,
+            )
+            if chat is not None:
+                return ScreenDetection(
+                    ScreenState.CHAT, chat.confidence, "chat panel close chevron", chat.bounds,
+                )
 
         if include_menus:
             menu = self._detect_reward_menu(image_path)

@@ -6,10 +6,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rok_automation.automation.gmail_switcher import GmailRotation
+from rok_automation.automation.gmail_switcher import GmailRotation, InvalidProgressError
 
 
 class TestGmailSaveRetry(unittest.TestCase):
+    def test_corrupt_progress_requires_an_explicit_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gmail_rotation.json"
+            path.write_text('{"farmed": null}', encoding="utf-8")
+            with self.assertRaises(InvalidProgressError):
+                GmailRotation.load(path)
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"farmed": null}')
+            GmailRotation.reset_progress(path)
+            self.assertFalse(GmailRotation.load(path).is_resumed)
+
     def test_save_succeeds_on_fifth_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gmail_rotation.json"

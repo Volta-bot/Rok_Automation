@@ -275,9 +275,11 @@ class TestROKAutomationApp(unittest.TestCase):
 
         from rok_automation.game.flags import DEFAULT_DAILY_REWARD_FLAG_PATH
 
+        before = DEFAULT_DAILY_REWARD_FLAG_PATH.stat() if DEFAULT_DAILY_REWARD_FLAG_PATH.is_file() else None
         self.app.opt_daily_reward.set(True)
         self.app._on_planned_option_toggled("Collect Daily Rewards", self.app.opt_daily_reward)
-        self.assertFalse(DEFAULT_DAILY_REWARD_FLAG_PATH.is_file())
+        after = DEFAULT_DAILY_REWARD_FLAG_PATH.stat() if DEFAULT_DAILY_REWARD_FLAG_PATH.is_file() else None
+        self.assertEqual(before, after)
         self.assertTrue(self.flag_path.is_file())
 
     def test_copy_console_log(self) -> None:

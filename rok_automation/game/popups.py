@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Callable
 
 from rok_automation.game.interface import GameInterface
-from rok_automation.vision.screen import ScreenDetector, TemplateHit, load_gray_frame
+from rok_automation.vision.screen import (
+    ScreenDetection, ScreenDetector, ScreenState, TemplateHit, load_gray_frame,
+)
 
 _NAVIGATION = Path(__file__).resolve().parents[2] / "templates" / "navigation"
 _BACK_BUTTON = _NAVIGATION.parent / "daily_reward" / "back_button.png"
@@ -129,3 +131,14 @@ def close_mailbox(
     game.click(close.bounds, screenshot)
     game.wait(0.5)
     return True
+
+
+def close_chat(
+    game: GameInterface, screenshot: Path, detection: ScreenDetection,
+    *, log: Callable[[str], None],
+) -> None:
+    """Dismiss a recognized chat panel using its collapse chevron."""
+    if detection.state is ScreenState.CHAT and detection.bounds is not None:
+        log("Closing accidentally opened chat panel with the < button")
+        game.click(detection.bounds, screenshot)
+        game.wait(0.5)

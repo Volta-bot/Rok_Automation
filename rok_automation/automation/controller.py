@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import random
 import time
 from dataclasses import replace
@@ -57,6 +56,7 @@ from rok_automation.logic.resource_selector import (
     search_plan,
 )
 from rok_automation.performance import PerformanceStats, collect_performance, record_event
+from rok_automation.storage import write_json
 from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
     ScreenDetection,
@@ -75,6 +75,10 @@ class _SkipAccount(Exception):
 
 class FarmingError(RuntimeError):
     """Raised when the current screen cannot be handled safely."""
+
+
+class UnconfirmedMarchError(RuntimeError):
+    """A march was submitted; restarting the gather flow could duplicate it."""
 
 
 DEFAULT_SESSION_SUMMARY_PATH = Path(os.environ.get("ROK_STATE_DIR", "state")) / "session_summary.json"
@@ -116,10 +120,7 @@ _UNKNOWN_SCREEN_WAIT = 0.5
 _MAX_ARMY_STEPS = 80
 _SCREEN_READ_TIMEOUT = 3.0
 _CITY_TO_MAP_TIMEOUT = 6.0
-_DIRECT_MAP_SETTLE_DELAY = 1.0
 _STOCKPILE_CACHE_SECONDS = 30.0
-# The City map button is fixed at the lower-left corner of the game view.
-_NORM_CITY_MAP_BUTTON = (0.008, 0.825, 0.085, 0.165)
 
 
 class FarmingController:
@@ -501,34 +502,17 @@ class FarmingController:
             self._log(f"Selected {next_name}; starting its farming run")
 
     def _open_world_map_directly(self) -> tuple[Path, ScreenDetection]:
-        """Press the City map button without classifying the current view first."""
-
-        screenshot = self.game.screenshot()
-        from rok_automation.game.popups import close_scout_manager
-        if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
-            screenshot = self.game.screenshot()
-        frame = load_gray_frame(screenshot)
-        if frame is None:
-            raise FarmingError("Could not read the game frame before opening the world map")
-        height, width = frame.shape[:2]
-        map_bounds = (
-            round(_NORM_CITY_MAP_BUTTON[0] * width),
-            round(_NORM_CITY_MAP_BUTTON[1] * height),
-            round(_NORM_CITY_MAP_BUTTON[2] * width),
-            round(_NORM_CITY_MAP_BUTTON[3] * height),
-        )
-        self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
-        self._log("Pressing the City map button directly")
-        self.game.click(map_bounds, screenshot)
-        self.game.wait(_DIRECT_MAP_SETTLE_DELAY)
-
+        """Enter the world map only from a recognized city view."""
         screenshot, detection = self._read_screen()
-        for _attempt in range(_MAX_ACTION_ATTEMPTS - 1):
-            if detection.state is not ScreenState.UNKNOWN:
-                break
-            self.game.wait(_ACTION_RETRY_DELAY)
-            screenshot, detection = self._read_screen()
-        return screenshot, detection
+        if detection.state is not ScreenState.CITY:
+            return screenshot, detection
+        self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
+        changed = self._press_and_wait(
+            screenshot, detection, _NAVIGATION_TEMPLATES / "city_map_button.png",
+            confidence_threshold=0.68,
+            change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
+        )
+        return changed if changed is not None else self._read_screen()
 
     def _should_claim_daily_rewards(self) -> bool:
         """Whether this account should have its daily rewards claimed.
@@ -564,7 +548,10 @@ class FarmingController:
 
         if coordinates is None or not self.context.account_name:
             return
-        remember_farmed_node(self.context.account_name, coordinates)
+        try:
+            remember_farmed_node(self.context.account_name, coordinates)
+        except (OSError, ValueError) as exc:
+            self._log(f"Could not save recent node {coordinates}: {exc}")
 
     def _run_one_account(
         self,
@@ -1373,9 +1360,13 @@ class FarmingController:
                 ocr_state = self._read_button_state(screenshot, detection.bounds)
                 if ocr_state is not None:
                     return screenshot, replace(detection, state=ocr_state)
-                return screenshot, detection
+                return screenshot, ScreenDetection(
+                    ScreenState.UNKNOWN, 0.0, "ambiguous button label could not be verified"
+                )
             if time.monotonic() >= deadline and scans >= MIN_SCREEN_SCANS:
-                return screenshot, detection
+                return screenshot, (ScreenDetection(
+                    ScreenState.UNKNOWN, 0.0, "ambiguous button label could not be verified"
+                ) if ambiguous else detection)
             self.game.wait(self.game.timing.poll_interval)
             screenshot = self.game.screenshot()
 
@@ -1589,6 +1580,9 @@ class FarmingController:
                 )
             last_state = detection.state
 
+            if marched and (ambiguous or detection.state is not ScreenState.WORLD_MAP):
+                self.game.wait(self.game.timing.poll_interval)
+                continue
             if detection.state is ScreenState.MAILBOX:
                 from rok_automation.game.popups import close_mailbox
                 if menu_backs < 3 and close_mailbox(
@@ -1616,8 +1610,10 @@ class FarmingController:
             state = detection.state
             if ambiguous:
                 ocr_state = self._read_button_state(screenshot, detection.bounds)
-                if ocr_state is not None:
-                    state = ocr_state
+                if ocr_state is None:
+                    self.game.wait(self.game.timing.poll_interval)
+                    continue
+                state = ocr_state
 
             if state in {
                 ScreenState.CITY,
@@ -1661,6 +1657,9 @@ class FarmingController:
                 continue
             fallback_since = None
 
+            if state not in _DISPATCH_BUTTONS or detection.bounds is None:
+                self.game.wait(self.game.timing.poll_interval)
+                continue
             clicks[state] += 1
             template_name = _DISPATCH_BUTTONS[state]
             if clicks[state] > _MAX_ACTION_ATTEMPTS:
@@ -1686,6 +1685,11 @@ class FarmingController:
                 expected_states=expected_next or None,
             )
 
+        if marched:
+            raise UnconfirmedMarchError(
+                "March was submitted but could not be confirmed; stopping with "
+                "account progress preserved instead of dispatching again"
+            )
         raise FarmingError(
             f"Timed out sending troops to {target.resource.value} "
             f"Lv{target.level}; last detected screen was {last_state.value}"
@@ -1994,7 +1998,6 @@ class FarmingController:
         if self.session_summary_path is None:
             return
         try:
-            self.session_summary_path.parent.mkdir(parents=True, exist_ok=True)
             totals = calculate_farmed_resources(self.session_targets)
             grand_total = sum(totals.values())
             data = {
@@ -2014,11 +2017,9 @@ class FarmingController:
                 "grand_total_formatted": format_resource_amount(grand_total),
                 "performance": self.session_performance,
             }
-            temp_path = self.session_summary_path.with_suffix(".tmp")
-            temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            temp_path.replace(self.session_summary_path)
-        except Exception:
-            pass
+            write_json(self.session_summary_path, data)
+        except (OSError, ValueError) as exc:
+            self._log(f"Could not save the session summary: {exc}")
 
     def _log_resource_summary(
         self,

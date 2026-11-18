@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from rok_automation.runtime import data_root
+from rok_automation.storage import write_json
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # Where the chosen emulator family is remembered between runs.
@@ -286,7 +287,7 @@ def save_selection(key: str, index: int | None = None, path: Path | None = None)
     payload: dict[str, object] = {"family": key}
     if index is not None:
         payload["index"] = index
-    destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json(destination, payload)
     return destination
 
 
@@ -299,6 +300,8 @@ def load_selection(path: Path | None = None) -> tuple[str | None, int | None]:
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
         return None, None
     family = payload.get("family")
     index = payload.get("index")

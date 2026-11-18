@@ -16,6 +16,7 @@ from rok_automation.automation.dispatch import DispatchScreenReader
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.button_positions import STATIC_BUTTON_POSITIONS
 from rok_automation.game.console import format_log
+from rok_automation.storage import write_json
 from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
 from rok_automation.vision.screen import ScreenState, load_color_frame
 
@@ -444,10 +445,7 @@ class AllianceResourceFarmer:
         self.nodes[tag] = dict(node, checked_at=time.time())
         if self.state_path:
             try:
-                self.state_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = self.state_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(self.nodes, indent=2), encoding="utf-8")
-                temporary.replace(self.state_path)
+                write_json(self.state_path, self.nodes)
             except OSError as exc:
                 self.log(f"Could not save alliance node information: {exc}")
 

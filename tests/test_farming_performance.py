@@ -6,13 +6,30 @@ from unittest.mock import MagicMock, patch
 import cv2
 import numpy as np
 
-from rok_automation.automation.controller import FarmingController, FarmingError
+from rok_automation.automation.controller import FarmingController, FarmingError, UnconfirmedMarchError
 from rok_automation.game.interface import TimingConfig
-from rok_automation.logic.resource_selector import Resource
+from rok_automation.logic.resource_selector import Resource, SearchTarget
 from rok_automation.performance import PerformanceStats, collect_performance, timed
 from rok_automation.vision.screen import (
     ScreenDetection, ScreenDetector, ScreenState, _POSITION_CACHE, _SCALE_CACHE,
 )
+
+
+class DispatchRecoveryTests(unittest.TestCase):
+    def test_a_persistent_march_button_does_not_cause_a_second_dispatch(self):
+        game = MagicMock(timing=TimingConfig())
+        screenshot = Path("march.png")
+        game.screenshot.return_value = screenshot
+        controller = FarmingController(game, log=lambda _: None)
+        bounds = (800, 490, 160, 70)
+        march = ScreenDetection(ScreenState.TROOP_COMPOSITION, 0.98, "march", bounds)
+        with patch.object(controller, "_classify_dispatch_screen", return_value=(march, False)), \
+             patch.object(controller, "_wait_for_dispatch_change", return_value=None), \
+             patch("rok_automation.automation.controller.screen_scan_attempts", return_value=range(8)):
+            with self.assertRaises(UnconfirmedMarchError):
+                controller._dispatch_army(SearchTarget(Resource.GOLD, 8), 1)
+        game.click.assert_called_once_with(bounds, screenshot)
+        self.assertEqual(controller.context.armies_dispatched, 0)
 
 
 class ReadingCacheTests(unittest.TestCase):

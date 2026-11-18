@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 
 from rok_automation.game.screen_retry import screen_scan_attempts
+from rok_automation.storage import write_json
 from rok_automation.automation.account_switcher import AccountSwitcher
 from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
@@ -132,9 +133,13 @@ class GmailIdentity:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> GmailIdentity | None:
-        if not data:
+        if not isinstance(data, dict) or not data:
             return None
-        identity = cls(email=data.get("email"), uid=data.get("uid"))
+        email, uid = data.get("email"), data.get("uid")
+        identity = cls(
+            email=email.strip() if isinstance(email, str) and email.strip() else None,
+            uid=uid.strip() if isinstance(uid, str) and uid.strip() else None,
+        )
         return identity if identity.email or identity.uid else None
 
 
@@ -292,12 +297,11 @@ class GmailAccountRegistry:
             ],
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(self.path)
+        write_json(self.path, payload)
+
+
+class InvalidProgressError(OSError):
+    """Saved progress is damaged and must not silently become a fresh run."""
 
 
 @dataclass
@@ -327,12 +331,20 @@ class GmailRotation:
     ) -> GmailRotation:
         """Resume an unfinished run, or start a new one."""
 
-        if path is None or not path.exists():
+        if path is None:
             return cls._new(path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return cls._new(path)
+        except ValueError as exc:
+            raise InvalidProgressError(f"Unreadable Gmail progress in {path}; restore or reset progress") from exc
+        if (not isinstance(data, dict)
+                or not isinstance(data.get("farmed", []), list)
+                or type(data.get("switches", 0)) is not int
+                or data.get("switches", 0) < 0
+                or type(data.get("completed", False)) is not bool):
+            raise InvalidProgressError(f"Invalid Gmail progress in {path}; restore or reset progress")
         rotation = cls(
             first=GmailIdentity.from_dict(data.get("first")),
             farmed=[
@@ -379,6 +391,8 @@ class GmailRotation:
             return []
         if not isinstance(data, dict):
             return []
+        if not isinstance(data.get("farmed", []), list):
+            return []
         return [
             identity
             for identity in (
@@ -391,7 +405,11 @@ class GmailRotation:
     def reset_progress(cls, path: Path | None = DEFAULT_GMAIL_STATE_PATH) -> None:
         """Replace the saved Gmail run with an empty, fresh rotation."""
 
-        previous = cls.load(path, include_completed=True)
+        try:
+            previous = cls.load(path, include_completed=True)
+        except InvalidProgressError:
+            # An explicit reset is the user's way out of damaged progress.
+            previous = cls._new(path)
         fresh = cls._new(path, character_history=previous.character_history)
         fresh.save()
 
@@ -519,21 +537,7 @@ class GmailRotation:
             "character_history": self.character_history,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        # Windows may briefly deny replacement while the UI or a scanner
-        # has the progress file open. Keep the pending save and retry it.
-        for attempt in range(6):  # Initial attempt plus five retries.
-            try:
-                temporary.replace(self.path)
-                break
-            except PermissionError:
-                if attempt == 5:
-                    raise
-                time.sleep(0.2)
+        write_json(self.path, payload)
 
 
 @dataclass(frozen=True)
@@ -1082,6 +1086,11 @@ class GmailSwitcher:
                             f"{_MAX_ACTION_ATTEMPTS} clicks"
                         )
                     self._log("Account popup still open; clicking 'Đăng nhập' again")
+                    if not self._field_matches(lilith.field_email, target):
+                        raise RuntimeError(
+                            "Gmail selection changed or became unreadable during login; "
+                            "stopping instead of logging into an unverified account"
+                        )
                     self.game.click(lilith.login_button, screenshot)
                     last_login_click = now
                     self.game.wait(_LOGIN_SETTLE_DELAY)

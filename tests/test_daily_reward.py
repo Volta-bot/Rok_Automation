@@ -302,10 +302,10 @@ class TestDailyReward(unittest.TestCase):
                         account_name="TestAcc",
                     ),
                 ]
-                with patch.object(controller, "_press_and_wait"):
+                with patch.object(controller, "_press_and_wait", return_value=None):
                     context = controller._run_one_account()
                     mock_claim.assert_called_once()
-                    self.assertIn(FarmState.CLAIM_DAILY_REWARD, [FarmState.CLAIM_DAILY_REWARD])
+                    self.assertEqual(context.current_state, FarmState.COMPLETE)
 
     def test_skip_already_collected_rewards(self) -> None:
         """Verify already collected rewards are skipped cleanly without attempting claim clicks."""

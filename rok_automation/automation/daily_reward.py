@@ -178,7 +178,11 @@ class DailyRewardClaimer:
                 self.game.wait(1.0)
                 continue
 
-            from rok_automation.game.popups import close_scout_manager, close_mailbox
+            from rok_automation.game.popups import close_chat, close_scout_manager, close_mailbox
+            if detection.state is ScreenState.CHAT:
+                close_chat(self.game, screenshot, detection, log=self._log)
+                presses += 1
+                continue
             if detection.state is ScreenState.MAILBOX:
                 if close_mailbox(self.game, self.detector, screenshot, log=self._log):
                     presses += 1
