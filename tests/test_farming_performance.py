@@ -97,7 +97,7 @@ class FastDetectionTests(unittest.TestCase):
         self.assertIsNotNone(locate(moved))
         self.assertIsNotNone(locate(moved, fast=True))
 
-    def test_transition_immediately_recovers_an_unexpected_screen(self):
+    def test_transition_rescans_before_recovering_an_unexpected_screen(self):
         game = MagicMock()
         game.timing = TimingConfig()
         controller = FarmingController(game, detector=MagicMock(), log=lambda _: None)
@@ -113,7 +113,7 @@ class FastDetectionTests(unittest.TestCase):
                 expected_states=(ScreenState.NEW_TROOPS_PROMPT,),
             )
         self.assertEqual(result[1].state, ScreenState.CITY)
-        self.assertEqual(check.call_count, 1)
+        self.assertEqual(check.call_count, 6)
         self.assertNotIn("fast_only", check.call_args_list[-1].kwargs)
 
     def test_each_army_reads_a_fresh_screen_even_with_a_recent_world_frame(self):

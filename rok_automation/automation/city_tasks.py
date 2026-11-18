@@ -12,6 +12,7 @@ from typing import Callable
 from rok_automation.game.adb import AdbError
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
+from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
 from rok_automation.vision.screen import ScreenDetector, ScreenState, TemplateHit, load_gray_frame
 
 
@@ -248,11 +249,8 @@ class CityTaskRunner:
         self._log("Opened forge building")
         self.game.wait(_MENU_WAIT_SECONDS)
 
-        screenshot = self.game.screenshot()
-        materials_button = self.detector.locate_template(
-            screenshot,
+        screenshot, materials_button = self._wait_for_menu_control(
             _FORGE_MATERIALS_BUTTON_TEMPLATE,
-            confidence_threshold=0.64,
             context_key="forge-materials-button",
         )
         if materials_button is None:
@@ -261,11 +259,8 @@ class CityTaskRunner:
         self.game.click(materials_button.bounds, screenshot)
         self.game.wait(_MENU_WAIT_SECONDS)
 
-        screenshot = self.game.screenshot()
-        material_hit = self.detector.locate_template(
-            screenshot,
+        screenshot, material_hit = self._wait_for_menu_control(
             _MATERIAL_TEMPLATES[material],
-            confidence_threshold=0.64,
             context_key=f"forge-material-{material}",
         )
         if material_hit is None:
@@ -279,6 +274,17 @@ class CityTaskRunner:
         self._dismiss_material_menu()
         self._log(f"Selected forge material five times: {material.title()}")
         return True
+
+    def _wait_for_menu_control(self, template: Path, *, context_key: str):
+        for _scan in range(MIN_SCREEN_SCANS):
+            screenshot = self.game.screenshot()
+            hit = self.detector.locate_template(
+                screenshot, template, confidence_threshold=0.64, context_key=context_key,
+            )
+            if hit is not None:
+                return screenshot, hit
+            self.game.wait(0.25)
+        return screenshot, None
 
     def _dismiss_material_menu(self) -> None:
         """Close the material dialog when choosing a card leaves it open."""

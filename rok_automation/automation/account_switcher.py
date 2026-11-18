@@ -12,6 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from rok_automation.game.screen_retry import screen_scan_attempts
 from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
@@ -523,7 +524,7 @@ class AccountSwitcher:
         }
         last_state = "unknown"
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             state, bounds, score = self._detect_menu_state(screenshot, frame)
             last_state = state
@@ -680,7 +681,7 @@ class AccountSwitcher:
 
         self.game.wait(_ACTION_RETRY_DELAY)
         deadline = time.monotonic() + self.game.timing.scaled(2.5)
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             state, _bounds, _score = self._detect_menu_state(screenshot, frame)
             if state != previous_state and state != "unknown":
@@ -709,7 +710,7 @@ class AccountSwitcher:
         confirmed_login = False
         deadline = time.monotonic() + self.game.timing.scaled(20.0)
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             self.game.wait(_ACTION_RETRY_DELAY)
             screenshot, frame = self._capture()
             state, bounds, _score = self._detect_menu_state(screenshot, frame)
@@ -872,7 +873,7 @@ class AccountSwitcher:
 
     def _wait_for_text(self, keyword: str) -> None:
         deadline = time.monotonic() + _OPEN_MENU_TIMEOUT
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             detections = read_text_detections(
                 frame,
@@ -1313,7 +1314,7 @@ class AccountSwitcher:
         deadline = time.monotonic() + _ACCOUNT_LOAD_TIMEOUT
         next_progress_log = time.monotonic() + 15.0
         reported_character_list = False
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             login_yes = self._find_login_confirmation_yes(frame)
             if login_yes is not None:

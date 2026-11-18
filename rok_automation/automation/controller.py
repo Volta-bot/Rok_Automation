@@ -13,6 +13,7 @@ from typing import Any
 
 import cv2
 
+from rok_automation.game.screen_retry import MIN_SCREEN_SCANS, screen_scan_attempts
 from rok_automation.automation.dispatch import (
     DispatchScreenReader, _DISPATCH_BUTTONS, _DISPATCH_BUTTON_CONFIDENCE,
 )
@@ -982,6 +983,13 @@ class FarmingController:
                     screenshot, screen = self._read_screen()
                 state = screen.state
 
+                if state is ScreenState.MAILBOX:
+                    # A navigation wait can hand us a popup directly, without
+                    # passing through _read_screen's normal recovery first.
+                    pending_result = None
+                    pending_screen = self._read_screen()
+                    continue
+
                 if state is ScreenState.UNKNOWN:
                     unknown_reads += 1
                     if unknown_reads > _MAX_UNKNOWN_READS:
@@ -1315,7 +1323,9 @@ class FarmingController:
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
         from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu, close_mailbox, close_extended_view
         popup_closes = 0
+        scans = 0
         while True:
+            scans += 1
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
                 expected_states=expected_states,
@@ -1364,7 +1374,7 @@ class FarmingController:
                 if ocr_state is not None:
                     return screenshot, replace(detection, state=ocr_state)
                 return screenshot, detection
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= deadline and scans >= MIN_SCREEN_SCANS:
                 return screenshot, detection
             self.game.wait(self.game.timing.poll_interval)
             screenshot = self.game.screenshot()
@@ -1384,12 +1394,20 @@ class FarmingController:
             change_timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         if screenshot is None:
             screenshot = self.game.screenshot()
-        hit = self.detector.locate_template(
-            screenshot,
-            template_path,
-            confidence_threshold=confidence_threshold,
-            context_key=self._selected_resource,
-        )
+        hit = None
+        for scan in range(MIN_SCREEN_SCANS):
+            if scan:
+                self.game.wait(_ACTION_RETRY_DELAY)
+                screenshot = self.game.screenshot()
+            hit = self.detector.locate_template(
+                screenshot,
+                template_path,
+                confidence_threshold=confidence_threshold,
+                context_key=self._selected_resource,
+            )
+            if hit is not None:
+                break
+            self._recover_search_mailbox(screenshot)
         if hit is None:
             if template_path.name == "world_search_button.png":
                 from rok_automation.game.popups import close_extended_view
@@ -1496,7 +1514,7 @@ class FarmingController:
         last_state = ScreenState.UNKNOWN
         attempts = 0
         next_screenshot = initial_screenshot
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+        while time.monotonic() < deadline or attempts < MIN_SCREEN_SCANS:
             attempts += 1
             screenshot = (
                 next_screenshot
@@ -1511,6 +1529,8 @@ class FarmingController:
                 context_key=self._selected_resource,
             )
             last_state = detection.state
+            if detection.state is ScreenState.UNKNOWN:
+                self._recover_search_mailbox(screenshot)
             if (
                 detection.state is ScreenState.RESOURCE_SEARCH
                 and detection.resource_level is not None
@@ -1557,7 +1577,7 @@ class FarmingController:
         pending_frame: tuple[Path, ScreenDetection, bool] | None = None
         menu_backs = 0
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             if pending_frame is not None:
                 screenshot, detection, ambiguous = pending_frame
                 pending_frame = None
@@ -1626,7 +1646,7 @@ class FarmingController:
                         fallback_since = time.monotonic()
                     elif time.monotonic() - fallback_since >= self._budget(
                         _FALLBACK_CONFIRM_SECONDS
-                    ):
+                    ) and _scan >= MIN_SCREEN_SCANS:
                         expected = (
                             "Quân mới / Hành quân"
                             if any(clicks.values())
@@ -1693,7 +1713,7 @@ class FarmingController:
             timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         self.game.wait(_STEP_SETTLE_DELAY)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot = self.game.screenshot()
             detection, ambiguous = self._classify_dispatch_screen(
                 screenshot,
@@ -1702,7 +1722,9 @@ class FarmingController:
             if detection.state is not ScreenState.UNKNOWN:
                 if expected_states and detection.state in expected_states:
                     return screenshot, detection, ambiguous
-                if detection.state is not clicked_state:
+                if detection.state is ScreenState.MAILBOX:
+                    return screenshot, detection, ambiguous
+                if detection.state is not clicked_state and _scan >= MIN_SCREEN_SCANS:
                     return screenshot, detection, ambiguous
             self.game.wait(self.game.timing.poll_interval)
         return None
@@ -1737,7 +1759,7 @@ class FarmingController:
         last_state = ScreenState.UNKNOWN
         attempts = 0
         next_screenshot = initial_screenshot
-        while time.monotonic() < deadline or attempts < _MAX_ACTION_ATTEMPTS:
+        while time.monotonic() < deadline or attempts < MIN_SCREEN_SCANS:
             attempts += 1
             screenshot = (
                 next_screenshot
@@ -1764,6 +1786,7 @@ class FarmingController:
                         self.game.wait(_LEVEL_REPEAT_PAUSE)
                 return screenshot
 
+            self._recover_search_mailbox(screenshot)
             detection = self.detector.detect(
                 screenshot,
                 read_account=False,
@@ -1774,7 +1797,7 @@ class FarmingController:
             if (
                 detection.state is not expected_state
                 and detection.state is not ScreenState.UNKNOWN
-                and attempts >= _MAX_ACTION_ATTEMPTS
+                and attempts >= MIN_SCREEN_SCANS
             ):
                 self._require_state(detection, expected_state)
 
@@ -1784,6 +1807,15 @@ class FarmingController:
             f"Could not confirm {expected_state.value} and locate "
             f"{template_path.name}; last detected screen was {last_state.value}"
         )
+
+    def _recover_search_mailbox(self, screenshot: Path) -> None:
+        """Close an unexpected mailbox and restart the current search step."""
+        from rok_automation.game.popups import close_mailbox
+
+        if close_mailbox(self.game, self.detector, screenshot, log=self._log):
+            # The outer farming loop re-reads the screen and retries the same
+            # target; do not treat an interrupted search as a missing resource.
+            raise FarmingError("Closed accidental mailbox; restarting resource search")
 
     def _wait_for_search_result(
         self,
@@ -1801,7 +1833,7 @@ class FarmingController:
         unchanged_frames = 0
         last_detection: ScreenDetection | None = None
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot = self.game.screenshot()
             gather_button = self.detector.locate_template(
                 screenshot,
@@ -1818,6 +1850,8 @@ class FarmingController:
                     context_key=self._selected_resource,
                 )
             )
+            if gather_button is None and submit_button is None:
+                self._recover_search_mailbox(screenshot)
             if gather_button is not None and (
                 submit_button is None
                 or gather_button.confidence > submit_button.confidence
@@ -1852,6 +1886,7 @@ class FarmingController:
                 if (
                     time.monotonic() - started >= self._budget(_SEARCH_SETTLE_SECONDS)
                     and unchanged_frames >= _UNCHANGED_SEARCH_FRAMES
+                    and _scan >= MIN_SCREEN_SCANS
                 ):
                     return screenshot, ScreenDetection(
                         ScreenState.NO_RESULT,
@@ -1921,7 +1956,7 @@ class FarmingController:
         timeout = self._budget(self.game.timing.transition_timeout)
         deadline = time.monotonic() + timeout
         last_detection: ScreenDetection | None = None
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot = self.game.screenshot()
             detection = self.detector.detect(
                 screenshot,

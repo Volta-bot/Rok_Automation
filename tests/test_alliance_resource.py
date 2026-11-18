@@ -436,12 +436,13 @@ class AllianceResourceTests(unittest.TestCase):
                 runner.game.click.assert_called_once()
                 runner._text.assert_called_once()
 
-    def test_missing_single_click_button_is_not_retried(self):
+    def test_missing_single_click_button_is_rescanned_without_clicking(self):
         runner = self.runner()
         runner._capture = MagicMock()
         runner._text = MagicMock(return_value=None)
         self.assertFalse(runner._press_once('nhan'))
-        runner._text.assert_called_once()
+        self.assertEqual(runner._text.call_count, 6)
+        self.assertEqual(runner._capture.call_count, 6)
         runner.game.click.assert_not_called()
 
     def test_missing_coordinates_scroll_back_up_reopen_then_scan_down_again(self):

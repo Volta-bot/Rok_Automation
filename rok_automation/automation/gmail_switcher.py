@@ -29,6 +29,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from rok_automation.game.screen_retry import screen_scan_attempts
 from rok_automation.automation.account_switcher import AccountSwitcher
 from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
@@ -637,7 +638,7 @@ class GmailSwitcher:
         last_signature: tuple[str, ...] | None = None
         last_state = "unknown"
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)
 
@@ -1049,7 +1050,7 @@ class GmailSwitcher:
         # account switch is loading. Let the transition settle before detection.
         self._log("Waiting 3 seconds for Gmail switch to settle before checking the screen")
         self.game.wait(_LOGIN_SETTLE_DELAY)
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)
             if lilith is None:
@@ -1124,7 +1125,7 @@ class GmailSwitcher:
         clicks = {"popup": 0, "user_center": 0, "settings_menu": 0, "governor_profile": 0}
         frame = None
         last_state = "unknown"
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             if frame is None and lilith is None:
                 screenshot, frame = self._capture()
                 lilith = self._read_lilith_screen(frame)
@@ -1180,7 +1181,7 @@ class GmailSwitcher:
 
         self.game.wait(_ACTION_RETRY_DELAY)
         deadline = time.monotonic() + self.game.timing.scaled(_STATE_CHANGE_TIMEOUT)
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             lilith = self._read_lilith_screen(frame)
             if lilith is not None:

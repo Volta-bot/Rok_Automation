@@ -65,9 +65,10 @@ class TestCityTasks(unittest.TestCase):
         card = TemplateHit(0.9, (800, 200, 60, 60))
         hits = [icon if name == kind else None
                 for name in ("idle", "leather", "iron", "wood", "bone")]
-        detector.locate_template.side_effect = hits[:1] + [
-            None if button_missing else button, None if card_missing else card,
-        ]
+        detector.locate_template.side_effect = (
+            hits[:1] + ([None] * 6 if button_missing else [button])
+            + ([None] * 6 if card_missing else [card])
+        )
         runner = CityTaskRunner(game, detector, log=lambda _: None)
         runner._locate_forge_material = MagicMock(side_effect=hits[1:])
         return runner, game, detector, button, card
@@ -153,7 +154,7 @@ class TestCityTasks(unittest.TestCase):
         with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))):
             runner._claim_and_start_forge("bone")
         self.assertEqual(game.click.call_count, 1)
-        self.assertEqual(detector.locate_template.call_count, 2)
+        self.assertEqual(detector.locate_template.call_count, 7)
 
     def test_real_bone_reward_ignores_recipe_label_and_toolbar(self):
         from pathlib import Path

@@ -16,6 +16,7 @@ from rok_automation.automation.dispatch import DispatchScreenReader
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.button_positions import STATIC_BUTTON_POSITIONS
 from rok_automation.game.console import format_log
+from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
 from rok_automation.vision.screen import ScreenState, load_color_frame
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -124,7 +125,7 @@ class AllianceResourceFarmer:
             if bounds:
                 self._click(bounds)
                 # Allow a delayed transition before issuing another click.
-                for _ in range(2):
+                for _ in range(MIN_SCREEN_SCANS):
                     self._capture()
                     if succeeded():
                         self.log(f"Verified {label}")
@@ -147,11 +148,16 @@ class AllianceResourceFarmer:
 
     def _press_once(self, label, *, area=None, already_done=None):
         """One click only for claim/section toggles; never repeat a toggle."""
-        self._capture()
-        if already_done is not None and already_done():
-            self.log(f"{label}: already completed/open; no click needed")
-            return True
-        bounds = self._text(label, area=area)
+        bounds = None
+        for _scan in range(MIN_SCREEN_SCANS):
+            self._capture()
+            if already_done is not None and already_done():
+                self.log(f"{label}: already completed/open; no click needed")
+                return True
+            bounds = self._text(label, area=area)
+            if bounds:
+                break
+            self.game.wait(.3)
         if not bounds:
             self.log(f"{label}: button not found; not retrying this click")
             return False

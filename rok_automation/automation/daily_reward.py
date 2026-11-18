@@ -11,6 +11,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from rok_automation.game.screen_retry import MIN_SCREEN_SCANS, screen_scan_attempts
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.account_label import read_text_detections
@@ -154,6 +155,7 @@ class DailyRewardClaimer:
 
     def ensure_city_view(self, max_attempts: int = 5) -> bool:
         """Ensure game is in City view before navigating menus."""
+        max_attempts = max(max_attempts, MIN_SCREEN_SCANS - 1)
         presses = 0
         for attempt in range(max_attempts + 1):
             screenshot, frame, (w, h) = self._capture()
@@ -340,8 +342,7 @@ class DailyRewardClaimer:
         self.game.wait(_VIP_REWARD_CLAIM_DELAY)
 
         # Check for 'Thưởng điểm hàng ngày' popup
-        _, popup_frame, _ = self._capture()
-        if self._is_vip_points_popup(popup_frame):
+        if self._wait_for_condition(self._is_vip_points_popup):
             self._log("Daily VIP points popup appeared. Dismissing popup...")
             self._dismiss_vip_reward_popup(size)
             self.game.wait(0.3)
@@ -448,8 +449,7 @@ class DailyRewardClaimer:
         self.game.wait(_VIP_REWARD_CLAIM_DELAY)
 
         # Check for 'Xin chúc mừng' popup
-        _, popup_frame, _ = self._capture()
-        if self._is_vip_chest_popup(popup_frame):
+        if self._wait_for_condition(self._is_vip_chest_popup):
             self._log("VIP daily gift popup appeared ('Xin chúc mừng'). Dismissing...")
             self._dismiss_vip_reward_popup(size)
             self.game.wait(0.3)
@@ -624,7 +624,7 @@ class DailyRewardClaimer:
             retry_action=lambda: self.game.click(cd_bounds, self.game.screenshot()),
         )
         if not opened:
-            self._log("Warning: Chiến dịch menu may not have opened; proceeding anyway.")
+            raise RuntimeError("Chiến dịch menu did not open after rescanning")
 
     def _locate_chien_dich(
         self,
@@ -697,7 +697,7 @@ class DailyRewardClaimer:
             retry_action=lambda: self.game.click(cp_bounds, self.game.screenshot()),
         )
         if not opened:
-            self._log("Warning: Chinh phạt screen may not have opened; proceeding anyway.")
+            raise RuntimeError("Chinh phạt screen did not open after rescanning")
 
     def _locate_chinh_phat(
         self,
@@ -790,8 +790,13 @@ class DailyRewardClaimer:
         self.game.wait(0.6)
 
         # Check for 'XÁC NHẬN' reward popup
-        popup_path, popup_frame, _ = self._capture()
-        xac_nhan_bounds = self._detect_xac_nhan(popup_path, popup_frame, size)
+        xac_nhan_bounds = None
+        for _scan in range(MIN_SCREEN_SCANS):
+            popup_path, popup_frame, _ = self._capture()
+            xac_nhan_bounds = self._detect_xac_nhan(popup_path, popup_frame, size)
+            if xac_nhan_bounds is not None:
+                break
+            self.game.wait(0.25)
         if xac_nhan_bounds is not None:
             self._log("Chinh phạt reward popup appeared. Clicking 'Xác nhận'...")
             self.game.click(xac_nhan_bounds, popup_path)
@@ -886,16 +891,18 @@ class DailyRewardClaimer:
         interval: float = 0.25,
         retry_action: Callable[[], None] | None = None,
     ) -> bool:
-        """Poll condition with periodic retry until True or timeout."""
+        """Poll fresh frames until success, allowing at least five rescans."""
         deadline = time.monotonic() + timeout
         retry_deadline = time.monotonic() + (timeout / 2.0)
         retried = False
 
-        while time.monotonic() < deadline:
+        for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             try:
                 _p, frame, _s = self._capture()
                 if condition(frame):
                     return True
+                from rok_automation.game.popups import close_mailbox
+                close_mailbox(self.game, self.detector, _p, log=self._log)
             except Exception:
                 pass
 
