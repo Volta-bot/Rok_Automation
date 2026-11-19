@@ -52,6 +52,7 @@ from rok_automation.logic.resource_selector import (
     format_resource_amount,
     resource_node_yield,
 )
+from rok_automation.ui.help_topics import HELP_TOPICS
 
 
 FORGE_PREFERENCE_PATH = data_root() / "state" / "forge_preference.txt"
@@ -171,6 +172,7 @@ class ROKAutomationApp:
         self._instances = {}
         self._instance_lock = None
         self._connection_retry_id = None
+        self._help_window: tk.Toplevel | None = None
         self.root.title("Rise of Kingdoms Automation — ROKauto")
         # Wide enough for the whole layout: the two option cards side by
         # side need about 1160px, and the button row needs the rest.
@@ -221,6 +223,7 @@ class ROKAutomationApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<F5>", lambda event: self.start_automation())
         self.root.bind("<Escape>", lambda event: self.stop_automation())
+        self.root.bind("<F1>", self.open_help)
 
         # Check emulator status initially
         self.root.after(200, self._refresh_instances)
@@ -336,11 +339,8 @@ class ROKAutomationApp:
 
     def _build_header(self, parent: tk.Widget) -> None:
         """Build top application header with title and emulator status."""
-        title_box = tk.Frame(parent, bg=ModernColors.BG_DARK)
-        title_box.pack(side=tk.LEFT, fill=tk.Y)
-
         title_lbl = tk.Label(
-            title_box,
+            parent,
             text="Rise of Kingdoms Automation",
             font=("Segoe UI", 15, "bold"),
             bg=ModernColors.BG_DARK,
@@ -348,18 +348,28 @@ class ROKAutomationApp:
         )
         title_lbl.pack(anchor="w")
 
-        sub_lbl = tk.Label(
-            title_box,
-            text="Autonomous multi-account farming & rotation for MuMu Player",
-            font=("Segoe UI", 9),
-            bg=ModernColors.BG_DARK,
-            fg=ModernColors.TEXT_MUTED,
-        )
-        sub_lbl.pack(anchor="w")
+        controls_row = tk.Frame(parent, bg=ModernColors.BG_DARK)
+        controls_row.pack(fill=tk.X, pady=(4, 0))
 
-        # Status badge & emulator indicator on right
-        status_box = tk.Frame(parent, bg=ModernColors.BG_DARK)
-        status_box.pack(side=tk.RIGHT, fill=tk.Y)
+        self.btn_help = tk.Button(
+            controls_row,
+            text="Help",
+            font=("Segoe UI", 9, "bold"),
+            bg=ModernColors.BG_CARD_LIGHT,
+            fg=ModernColors.TEXT_PRIMARY,
+            activebackground=ModernColors.BG_BORDER,
+            activeforeground=ModernColors.TEXT_PRIMARY,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self.open_help,
+            padx=10,
+            pady=2,
+        )
+        self.btn_help.pack(side=tk.LEFT)
+
+        status_box = tk.Frame(controls_row, bg=ModernColors.BG_DARK)
+        status_box.pack(side=tk.RIGHT)
 
         self.emulator_display = tk.StringVar(value=_emulator_label(self.opt_emulator.get()))
         self.combo_emulator = ttk.Combobox(
@@ -406,6 +416,64 @@ class ROKAutomationApp:
             pady=2,
         )
         check_btn.pack(side=tk.LEFT)
+
+    def open_help(self, _event: tk.Event | None = None) -> None:
+        """Open the guide without taking control away from the main window."""
+        window = self._help_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+
+        window = self._help_window = tk.Toplevel(self.root)
+        window.title("ROKauto Help")
+        window.configure(bg=ModernColors.BG_DARK)
+        scale = self.display_scale
+        width = min(round(760 * scale), window.winfo_screenwidth() * 9 // 10)
+        height = min(round(540 * scale), window.winfo_screenheight() * 9 // 10)
+        window.geometry(f"{width}x{height}")
+        window.bind("<Escape>", lambda _event: window.destroy())
+
+        style = ttk.Style(window)
+        style.configure("Help.TNotebook", background=ModernColors.BG_DARK, borderwidth=0)
+        style.configure(
+            "Help.TNotebook.Tab",
+            background=ModernColors.BG_CARD,
+            foreground=ModernColors.TEXT_SECONDARY,
+            font=("Segoe UI", 9),
+            padding=(10, 6),
+        )
+        style.map(
+            "Help.TNotebook.Tab",
+            background=[("selected", ModernColors.BG_CARD_LIGHT)],
+            foreground=[("selected", ModernColors.TEXT_PRIMARY)],
+        )
+
+        ttk.Label(window, text="ROKauto Help", style="Title.TLabel").pack(
+            anchor="w", padx=16, pady=(12, 8)
+        )
+        notebook = ttk.Notebook(window, style="Help.TNotebook")
+        notebook.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        notebook.enable_traversal()
+        for tab, entries in HELP_TOPICS:
+            page = ttk.Frame(notebook, style="Card.TFrame")
+            notebook.add(page, text=tab)
+            guide = tk.Text(
+                page, wrap=tk.WORD, font=("Segoe UI", 10),
+                bg=ModernColors.BG_CARD, fg=ModernColors.TEXT_PRIMARY,
+                padx=14, pady=10, spacing2=3, relief=tk.FLAT, borderwidth=0,
+            )
+            scrollbar = ttk.Scrollbar(page, orient=tk.VERTICAL, command=guide.yview)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            guide.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            guide.configure(yscrollcommand=scrollbar.set)
+            guide.tag_configure("heading", font=("Segoe UI", 10, "bold"))
+            for heading, description in entries:
+                guide.insert(tk.END, heading + "\n", "heading")
+                guide.insert(tk.END, description + "\n\n")
+            guide.configure(state=tk.DISABLED)
+        notebook.focus_set()
 
     def _build_execution_card(self, parent: tk.Widget) -> None:
         """Build the main execution buttons and core configuration options."""

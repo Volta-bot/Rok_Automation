@@ -6,6 +6,8 @@ ROKauto - portable Windows x64 application
    Use a landscape 16:9 emulator display.
 4. Double-click ROKauto.exe, select your instance, and start your task.
 
+Click Help below the title or press F1 to open the in-app guide.
+
 Python is included. No Python installation or pip commands are needed.
 Keep ROKauto-worker.exe and the _internal folder beside ROKauto.exe.
 OCR models are included; no model download is required at first launch.

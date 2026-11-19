@@ -29,6 +29,8 @@ python -m pip install -e .
 
 Start MuMu and open the game, then launch `run_gui.vbs` or `run_gui.bat`. Select a MuMu instance in the GUI before running a task. Instance names are read from MuMu; Refresh rediscovers instances. Each instance has its own saved account list and progress. The previous list and progress remain with instance #0. Open another GUI window to run a different instance; an instance can only have one active GUI worker at a time. Accounts are added manually or learned during rotation, not automatically read from Android on selection. `run.bat` offers a menu for the GUI or CLI farming.
 
+Click **Help** at the far left below the title, or press **F1**, to open the in-app guide. It covers setup, run controls, account rotation, optional tasks, diagnostics, and less obvious actions such as the Gmail-only cycle and the idle Skip tests.
+
 ## Portable Windows release
 
 Extract the release ZIP completely, then run `ROKauto.exe`. Python, OCR models,
