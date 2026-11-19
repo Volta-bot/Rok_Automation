@@ -35,8 +35,8 @@ _MATERIAL_TEMPLATES = {
     "bone": _CITY_TEMPLATES / "material_bone.png",
 }
 
-# Click one icon height below its bottom edge, scaling with city zoom.
-_FORGE_CLICK_BELOW_ICON = 1.0
+# Try the roof, then slightly deeper and shallower points on the building.
+_FORGE_TAP_OFFSETS = (1.0, 1.4, 0.65)
 _MENU_WAIT_SECONDS = 1.0
 # Fractions of the canonical frame that avoid the top bar, side controls and
 # bottom chat overlay while retaining the visible city buildings.
@@ -234,61 +234,73 @@ class CityTaskRunner:
             area[y:y + height, x:x + width] = 0
         return None
 
+    def _find_forge_marker(self, screenshot: Path, frame) -> tuple[str, TemplateHit] | None:
+        # Output can be any material, independent of the next requested recipe.
+        idle = self.detector.locate_template(
+            screenshot, _FORGE_ICON_TEMPLATE, confidence_threshold=0.72,
+            context_key="forge-overhead-idle", minimum_scale=0.15, refine_scale=True,
+        )
+        if idle is not None:
+            return "idle", idle
+        hits = [
+            (kind, hit) for kind, template in _MATERIAL_TEMPLATES.items()
+            if (hit := self._locate_forge_material(frame, template, kind)) is not None
+        ]
+        return max(hits, key=lambda candidate: candidate[1].confidence, default=None)
+
+    def _open_forge(self) -> tuple[Path, TemplateHit] | None:
+        screenshot = self.game.screenshot()
+        taps = 0
+        for attempt in range(1, len(_FORGE_TAP_OFFSETS) + 1):
+            if attempt > 1:
+                self.game.wait(0.35)
+                screenshot, _ = self._capture_without_chat()
+                if screenshot is None or not self._is_still_in_city(screenshot):
+                    self._log("City view unavailable; stopping forge retries")
+                    return None
+
+            frame = load_gray_frame(screenshot)
+            if frame is None:
+                self._log(f"Forge attempt {attempt}: could not read the city view")
+                continue
+            marker = self._find_forge_marker(screenshot, frame)
+            if marker is None:
+                self._log(f"Forge attempt {attempt}: no forge marker visible")
+                continue
+
+            kind, icon = marker
+            x, y, width, height = icon.bounds
+            frame_height, frame_width = frame.shape[:2]
+            click_x = round(x + width / 2)
+            target_height = height if kind == "idle" else max(width, height)
+            click_y = round(y + target_height * (1 + _FORGE_TAP_OFFSETS[taps]))
+            if not (0 <= click_x < frame_width and 0 <= click_y < frame_height):
+                self._log(f"Forge attempt {attempt}: target is outside the city view")
+                continue
+
+            forge_bounds = (click_x, click_y, 1, 1)
+            self.game.click(forge_bounds, screenshot)
+            taps += 1
+            if kind != "idle":
+                # The game needs time to clear a claimed reward before selecting the building.
+                self.game.wait(0.25)
+                self.game.click(forge_bounds, screenshot)
+            self.game.wait(_MENU_WAIT_SECONDS)
+            screenshot, button = self._wait_for_menu_control(
+                _FORGE_MATERIALS_BUTTON_TEMPLATE, context_key="forge-materials-button",
+            )
+            if button is not None:
+                self._log("Opened forge building")
+                return screenshot, button
+            self._log(f"Forge attempt {attempt}: Materials button missing after {kind} marker tap at ({click_x}, {click_y})")
+        return None
+
     def _claim_and_start_forge(self, material: str) -> bool:
         """Claim any completed output and select the requested material."""
-
-        screenshot = self.game.screenshot()
-        frame = load_gray_frame(screenshot)
-        if frame is None:
-            self._log("Could not read the city view; skipped forge")
+        opened = self._open_forge()
+        if opened is None:
             return False
-        # Output can be any material, independent of the next requested recipe.
-        templates = {"idle": _FORGE_ICON_TEMPLATE, **_MATERIAL_TEMPLATES}
-        hits = []
-        for kind, template in templates.items():
-            if kind == "idle":
-                hit = self.detector.locate_template(
-                    screenshot, template, confidence_threshold=0.72,
-                    context_key="forge-overhead-idle",
-                    minimum_scale=0.15, refine_scale=True,
-                )
-            else:
-                hit = self._locate_forge_material(frame, template, kind)
-            if hit is not None:
-                hits.append((kind, hit))
-                # An idle marker is definitive. Tiny recipe/progress icons below
-                # the building must not be mistaken for completed output.
-                if kind == "idle":
-                    break
-        if not hits:
-            self._log("No forge or material icon was visible; skipped")
-            return False
-        kind, icon = max(hits, key=lambda candidate: candidate[1].confidence)
-        x, y, width, height = icon.bounds
-        frame_height, frame_width = frame.shape[:2]
-        click_x = round(x + width / 2)
-        target_height = height if kind == "idle" else max(width, height)
-        click_y = round(y + target_height * (1 + _FORGE_CLICK_BELOW_ICON))
-        if not (0 <= click_x < frame_width and 0 <= click_y < frame_height):
-            self._log("Forge below the icon is outside the city view; skipped")
-            return False
-        # A narrow target keeps click randomization away from the overhead icon.
-        forge_bounds = (click_x, click_y, 1, 1)
-        self.game.click(forge_bounds, screenshot)
-        if kind != "idle":
-            # Double-click the same building position without an intervening capture.
-            self.game.click(forge_bounds, screenshot)
-            self._log(f"Double-clicked forge to claim {kind.title()} and open it")
-        self._log("Opened forge building")
-        self.game.wait(_MENU_WAIT_SECONDS)
-
-        screenshot, materials_button = self._wait_for_menu_control(
-            _FORGE_MATERIALS_BUTTON_TEMPLATE,
-            context_key="forge-materials-button",
-        )
-        if materials_button is None:
-            self._log("Forge material button did not appear; skipped")
-            return True
+        screenshot, materials_button = opened
         self.game.click(materials_button.bounds, screenshot)
         self.game.wait(_MENU_WAIT_SECONDS)
 
@@ -298,7 +310,8 @@ class CityTaskRunner:
         )
         if material_hit is None:
             self._log(f"Could not find the {material} material card; skipped")
-            return True
+            self._dismiss_material_menu()
+            return False
         for selection in range(5):
             self.game.click(material_hit.bounds, screenshot)
             if selection < 4:

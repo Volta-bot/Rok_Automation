@@ -14,7 +14,6 @@ from rok_automation.vision.screen import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
 _GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
-_NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
 _DISPATCH_BUTTONS = {
     ScreenState.RESOURCE_FOUND: "gather_button",
     ScreenState.NEW_TROOPS_PROMPT: "new_troops_button",
@@ -112,21 +111,13 @@ class DispatchScreenReader:
                         confidence_threshold=_DISPATCH_BUTTON_CONFIDENCE,
                     )
                     if march_hit is None:
-                        world_hit = self.detector.locate_template(
+                        map_screen = self.detector.detect(
                             screenshot,
-                            _NAVIGATION_TEMPLATES / "world_search_button.png",
-                            confidence_threshold=0.75,
+                            read_account=False,
+                            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
                         )
-                        if world_hit is not None:
-                            return (
-                                ScreenDetection(
-                                    ScreenState.WORLD_MAP,
-                                    world_hit.confidence,
-                                    "world map search button",
-                                    world_hit.bounds,
-                                ),
-                                False,
-                            )
+                        if map_screen.state is ScreenState.WORLD_MAP:
+                            return map_screen, False
 
         hits: list[tuple[float, ScreenState, Any, Any]] = []
         for state, template_name in _DISPATCH_BUTTONS.items():

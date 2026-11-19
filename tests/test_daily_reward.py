@@ -17,7 +17,7 @@ from rok_automation.automation.daily_reward import (
 )
 from rok_automation.automation.states import FarmState
 from rok_automation.game.interface import GameInterface, TimingConfig
-from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState
+from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState, TemplateHit
 
 _TEST_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _TEST_DIR.parent
@@ -30,11 +30,15 @@ class FakeGame:
     def __init__(self, frames: list[Path] | None = None) -> None:
         self.timing = TimingConfig()
         self.clicks: list[tuple[int, int, int, int]] = []
+        self.taps: list[tuple[int, int]] = []
+        self.waits: list[float] = []
+        self.capture_tap_counts: list[int] = []
         self._frames = list(frames or [])
         self._frame_idx = 0
         self._default_frame = _ARTIFACTS_DIR / "test_960.png"
 
     def screenshot(self) -> Path:
+        self.capture_tap_counts.append(len(self.taps))
         if self._frame_idx < len(self._frames):
             frame = self._frames[self._frame_idx]
             self._frame_idx += 1
@@ -44,11 +48,14 @@ class FakeGame:
     def click(self, bounds: tuple[int, int, int, int], screenshot_path: str | Path) -> None:
         self.clicks.append(bounds)
 
+    def tap(self, x: int, y: int) -> None:
+        self.taps.append((x, y))
+
     def drag(self, start: tuple[int, int], end: tuple[int, int], screenshot_path: str | Path) -> None:
         pass
 
     def wait(self, seconds: float) -> None:
-        pass
+        self.waits.append(seconds)
 
 
 class TestDailyReward(unittest.TestCase):
@@ -164,54 +171,106 @@ class TestDailyReward(unittest.TestCase):
         self.assertLess(abs(x + w / 2 - 1092), 15)
         self.assertLess(abs(y + h / 2 - 82), 15)
 
-    def test_simulated_claim_all_flow(self) -> None:
-        """Verify full claim_all sequence executes all steps and clicks."""
-        game = FakeGame()
-        detector = MagicMock(spec=ScreenDetector)
-        detector.detect.return_value = ScreenDetection(
-            state=ScreenState.CITY,
-            confidence=0.95,
-            evidence="city map button",
+    def test_world_to_city_taps_fortress_first_and_falls_back_to_map(self) -> None:
+        screenshot = Path("frame.png")
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        world = ScreenDetection(ScreenState.WORLD_MAP, 0.95, "search")
+        city = ScreenDetection(ScreenState.CITY, 0.95, "build")
+        fortress = TemplateHit(0.85, (10, 600, 90, 90))
+        map_button = TemplateHit(0.98, (14, 604, 90, 90))
+        for hits, expected in (([fortress, map_button], fortress), ([None, map_button], map_button)):
+            with self.subTest(expected=expected):
+                game = FakeGame()
+                detector = MagicMock(spec=ScreenDetector)
+                detector.detect.side_effect = [world, city]
+                detector.locate_template.side_effect = hits
+                claimer = DailyRewardClaimer(game, detector, log=lambda _: None)
+                with patch.object(claimer, "_capture", return_value=(screenshot, frame, (1280, 720))):
+                    self.assertTrue(claimer.ensure_city_view())
+                self.assertEqual(game.clicks, [expected.bounds])
+
+    def test_claim_all_uses_cached_taps_and_only_captures_after_claims(self) -> None:
+        vip_frame = _TEST_DIR / "fixtures/vip_menu_collected.png"
+        detector = ScreenDetector()
+        locate = detector.locate_template
+
+        def match_reward(shot, tpl, **options):
+            if tpl.name == "chinh_phat_chest_collected.png":
+                self.assertEqual(len(game.taps), 11)
+                self.assertEqual(game.waits[-2:], [1.0, 1.25])
+                return object()
+            self.assertEqual(len(game.taps), 5)
+            self.assertEqual(game.waits[-1], 2.25)
+            return locate(shot, tpl, **options)
+
+        with patch.object(detector, "locate_template", side_effect=match_reward) as match:
+            for _ in range(2):
+                game = FakeGame([vip_frame, vip_frame])
+                claimer = DailyRewardClaimer(game, detector=detector)
+                tap = game.tap
+
+                def check_tap(x, y):
+                    if len(game.taps) == 6:
+                        self.assertEqual(game.waits[-1], 1.0)
+                    tap(x, y)
+
+                with patch.object(game, "tap", side_effect=check_tap):
+                    self.assertTrue(claimer.claim_all())
+                self.assertEqual(game.capture_tap_counts, [5, 11])
+                self.assertEqual(len(game.taps), 13)
+                self.assertEqual(game.waits[:4], [0.75, 0.9, 0.55, 0.9])
+                self.assertEqual(game.waits[-2:], [0.7, 0.7])
+                self.assertEqual(game.taps[-1], game.taps[-2])
+                self.assertFalse(game.clicks)
+                claimer._pin_bounds((1280, 720), "vip_button", (110, 50, 16, 16))
+        self.assertEqual(game.taps[0], (118, 58))
+        self.assertEqual(
+            [call.args[1].name for call in match.call_args_list],
+            ["wooden_chest_collected.png", "metal_chest_collected.png",
+             "chinh_phat_chest_collected.png"] * 2,
         )
-        detector.locate_template.return_value = None
 
-        claimer = DailyRewardClaimer(game, detector=detector)
+    def test_vip_checkpoint_checks_metal_chest_even_when_wooden_chest_was_missed(self) -> None:
+        claimer = DailyRewardClaimer(FakeGame())
+        screenshot = Path("vip.png")
+        frame = object()
+        with patch.object(claimer, "_is_wooden_chest_collected", return_value=False), \
+             patch.object(claimer, "_is_metal_chest_collected", return_value=True) as metal:
+            self.assertFalse(claimer._vip_rewards_collected(screenshot, frame, (1280, 720)))
+        metal.assert_called_once_with(frame, screenshot)
 
-        # Mock sub-steps to simulate smooth successful progression
-        with patch.object(claimer, "_is_vip_menu", side_effect=[True, False]), \
-             patch.object(claimer, "_is_wooden_chest_collected", return_value=False), \
-             patch.object(claimer, "_is_metal_chest_collected", return_value=False), \
-             patch.object(claimer, "_is_chinh_phat_chest_collected", return_value=False), \
-             patch.object(claimer, "_is_vip_points_popup", return_value=True), \
-             patch.object(claimer, "_is_vip_chest_popup", return_value=True), \
-             patch.object(claimer, "_is_chien_dich_menu", return_value=True), \
-             patch.object(claimer, "_is_chinh_phat_screen", return_value=True), \
-             patch.object(claimer, "_detect_xac_nhan", return_value=(400, 500, 200, 80)):
+    def test_failed_campaign_checkpoint_retries_only_campaign_and_refreshes_position(self) -> None:
+        game = FakeGame()
+        claimer = DailyRewardClaimer(game)
+        claimer._pin_bounds((1280, 720), "golden_chest", (10, 10, 10, 10))
 
-            success = claimer.claim_all()
-            self.assertTrue(success)
-            # Check that clicks were made for each required button:
-            # 1. VIP button
-            # 2. Wooden chest
-            # 3. Dismiss popup 1
-            # 4. Green Nhận
-            # 5. Dismiss popup 2
-            # 6. VIP Close X
-            # 7. Menu dots
-            # 8. Chiến dịch
-            # 9. Chinh phạt
-            # 10. Golden chest
-            # 11. Xác nhận
-            # 12. Back button (1/2)
-            # 13. Back button (2/2)
-            self.assertGreaterEqual(len(game.clicks), 10)
+        def retry_campaign():
+            self.assertNotIn((1280, 720, "golden_chest"), _PINNED_COORDINATES)
+            self.assertIn((1280, 720, "vip_button"), _PINNED_COORDINATES)
+            claimer._pin_bounds((1280, 720), "golden_chest", (100, 200, 20, 20))
+            return True
+
+        with patch.object(claimer, "_vip_rewards_collected", return_value=True), \
+             patch.object(claimer, "_campaign_reward_collected", return_value=False), \
+             patch.object(claimer, "ensure_city_view", return_value=True) as city, \
+             patch.object(claimer, "claim_vip_rewards") as retry_vip, \
+             patch.object(claimer, "claim_campaign_rewards", side_effect=retry_campaign) as retry:
+            self.assertTrue(claimer.claim_all())
+        self.assertEqual(game.capture_tap_counts, [5, 11])
+        self.assertIn((15, 15), game.taps)
+        self.assertEqual(_PINNED_COORDINATES[(1280, 720, "golden_chest")], (100, 200, 20, 20))
+        retry_vip.assert_not_called()
+        city.assert_called_once_with()
+        retry.assert_called_once_with()
 
     def test_error_recovery_graceful_exit(self) -> None:
         """Verify unexpected errors do not crash caller and recovery is invoked."""
         game = FakeGame()
         claimer = DailyRewardClaimer(game)
 
-        with patch.object(claimer, "claim_vip_rewards", side_effect=RuntimeError("Simulated menu error")), \
+        with patch.object(claimer, "_vip_rewards_collected", return_value=False), \
+             patch.object(claimer, "ensure_city_view", return_value=True), \
+             patch.object(claimer, "claim_vip_rewards", side_effect=RuntimeError("Simulated menu error")), \
              patch.object(claimer, "_recover_to_city") as mock_recover:
             result = claimer.claim_all()
             self.assertFalse(result)
@@ -261,9 +320,11 @@ class TestDailyReward(unittest.TestCase):
     def test_controller_daily_rewards_flag_triggers_claimer(self, _forge, _resources) -> None:
         """Verify FarmingController invokes DailyRewardClaimer when daily_rewards is True."""
         mock_game = MagicMock()
+        events = []
         # The controller reads the captured frame, so the mock has to hand
         # back a real image instead of a placeholder.
-        mock_game.screenshot.return_value = _ARTIFACTS_DIR / "test_960.png"
+        mock_game.screenshot.side_effect = lambda: events.append("capture") or _ARTIFACTS_DIR / "test_960.png"
+        mock_game.wait.side_effect = lambda delay: events.append(("wait", delay))
         mock_detector = MagicMock()
         mock_detector.locate_template.return_value = None
         mock_detector.detect.return_value = ScreenDetection(
@@ -280,7 +341,7 @@ class TestDailyReward(unittest.TestCase):
         )
 
         with patch("rok_automation.automation.daily_reward.DailyRewardClaimer.claim_all") as mock_claim:
-            mock_claim.return_value = True
+            mock_claim.side_effect = lambda: events.append("claimed rewards") or True
             # Simulate _run_one_account up to the world map transition
             with patch.object(controller, "_farm_one_army", return_value=True):
                 # When detector returns WORLD_MAP with 5 armies out, it completes immediately
@@ -302,13 +363,15 @@ class TestDailyReward(unittest.TestCase):
                         account_name="TestAcc",
                     ),
                 ]
-                with patch.object(controller, "_press_and_wait", return_value=None):
+                with patch.object(controller, "_press_and_wait", return_value=None) as press:
                     context = controller._run_one_account()
                     mock_claim.assert_called_once()
+                    self.assertEqual(events[:3], ["claimed rewards", ("wait", 0.60), "capture"])
+                    self.assertEqual(press.call_count, 2)
                     self.assertEqual(context.current_state, FarmState.COMPLETE)
 
-    def test_skip_already_collected_rewards(self) -> None:
-        """Verify already collected rewards are skipped cleanly without attempting claim clicks."""
+    def test_recovery_skips_rewards_already_collected(self) -> None:
+        """Recovery checks claim state before retrying each reward."""
         game = FakeGame()
         detector = MagicMock(spec=ScreenDetector)
         detector.detect.return_value = ScreenDetection(
@@ -320,7 +383,7 @@ class TestDailyReward(unittest.TestCase):
 
         claimer = DailyRewardClaimer(game, detector=detector)
 
-        with patch.object(claimer, "_is_vip_menu", side_effect=[True, False]), \
+        with patch.object(claimer, "_is_vip_menu", return_value=True), \
              patch.object(claimer, "_is_wooden_chest_collected", return_value=True), \
              patch.object(claimer, "_is_metal_chest_collected", return_value=True), \
              patch.object(claimer, "_is_chinh_phat_chest_collected", return_value=True), \
@@ -330,8 +393,8 @@ class TestDailyReward(unittest.TestCase):
              patch.object(claimer, "_claim_metal_chest") as mock_claim_metal, \
              patch.object(claimer, "_claim_chinh_phat_chest") as mock_claim_cp:
 
-            success = claimer.claim_all()
-            self.assertTrue(success)
+            self.assertTrue(claimer.claim_vip_rewards())
+            self.assertTrue(claimer.claim_campaign_rewards())
             # Verify claiming functions were NOT called because rewards were already collected
             mock_claim_wood.assert_not_called()
             mock_claim_metal.assert_not_called()
@@ -365,8 +428,7 @@ class TestDailyReward(unittest.TestCase):
             mock_dets.return_value = [("VIP 16", (700, 100, 100, 30), 0.95)]
             self.assertFalse(claimer._is_wooden_chest_collected(dummy, frame_path))
 
-    def test_is_metal_chest_collected_timer_and_no_nhan(self) -> None:
-        """Verify metal chest detects timer or absence of green Nhận button."""
+    def test_is_metal_chest_collected_requires_positive_evidence(self) -> None:
         claimer = DailyRewardClaimer(FakeGame())
         dummy = np.zeros((600, 1000, 3), dtype=np.uint8)
         frame_path = _ARTIFACTS_DIR / "test_960.png"
@@ -376,10 +438,11 @@ class TestDailyReward(unittest.TestCase):
             mock_dets.return_value = [("09:23:34", (700, 400, 100, 30), 0.95)]
             self.assertTrue(claimer._is_metal_chest_collected(dummy, frame_path))
 
-        # 2. Uncollected with green Nhận detected -> False
         with patch("rok_automation.automation.daily_reward.read_text_detections") as mock_dets, \
-             patch.object(claimer.detector, "locate_template", side_effect=lambda s, tpl, **kw: MagicMock() if "green_nhan" in str(tpl) else None):
+             patch.object(claimer.detector, "locate_template", return_value=None):
             mock_dets.return_value = [("NHẬN", (750, 450, 80, 40), 0.95)]
+            self.assertFalse(claimer._is_metal_chest_collected(dummy, frame_path))
+            mock_dets.return_value = []
             self.assertFalse(claimer._is_metal_chest_collected(dummy, frame_path))
 
     def test_is_chinh_phat_chest_collected_saturation_and_template(self) -> None:

@@ -42,6 +42,7 @@ from rok_automation.game.flags import (
     alliance_resource_enabled,
 )
 from rok_automation.game.interface import GameInterface
+from rok_automation.game.popups import locate_view_toggle
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
     Resource,
@@ -59,6 +60,8 @@ from rok_automation.performance import PerformanceStats, collect_performance, re
 from rok_automation.storage import write_json
 from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
+    VIEW_TOGGLE_MIN_CONFIDENCE,
+    WORLD_SEARCH_MIN_CONFIDENCE,
     ScreenDetection,
     ScreenDetector,
     ScreenState,
@@ -120,6 +123,7 @@ _UNKNOWN_SCREEN_WAIT = 0.5
 _MAX_ARMY_STEPS = 80
 _SCREEN_READ_TIMEOUT = 3.0
 _CITY_TO_MAP_TIMEOUT = 6.0
+_POST_REWARD_SETTLE_DELAY = 0.60
 _STOCKPILE_CACHE_SECONDS = 30.0
 
 
@@ -503,16 +507,28 @@ class FarmingController:
 
     def _open_world_map_directly(self) -> tuple[Path, ScreenDetection]:
         """Enter the world map only from a recognized city view."""
-        screenshot, detection = self._read_screen()
-        if detection.state is not ScreenState.CITY:
-            return screenshot, detection
-        self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
-        changed = self._press_and_wait(
-            screenshot, detection, _NAVIGATION_TEMPLATES / "city_map_button.png",
-            confidence_threshold=0.68,
-            change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
-        )
-        return changed if changed is not None else self._read_screen()
+        return self._enter_world_map(*self._read_screen())
+
+    def _enter_world_map(
+        self, screenshot: Path, detection: ScreenDetection,
+    ) -> tuple[Path, ScreenDetection]:
+        for _attempt in range(_MAX_ACTION_ATTEMPTS):
+            if detection.state is not ScreenState.CITY:
+                break
+            self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map from City")
+            changed = self._press_and_wait(
+                screenshot, detection, _NAVIGATION_TEMPLATES / "city_map_button.png",
+                confidence_threshold=VIEW_TOGGLE_MIN_CONFIDENCE,
+                change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
+            )
+            if changed is not None and changed[1].state is ScreenState.WORLD_MAP:
+                self._log("World map confirmed")
+                return changed
+            self.game.wait(_ACTION_RETRY_DELAY)
+            screenshot, detection = self._read_screen()
+            if detection.state is ScreenState.WORLD_MAP:
+                self._log("World map confirmed")
+        return screenshot, detection
 
     def _should_claim_daily_rewards(self) -> bool:
         """Whether this account should have its daily rewards claimed.
@@ -622,10 +638,12 @@ class FarmingController:
                 log=self._log,
             )
             claimer.claim_all()
-            if not claimer.ensure_city_view():
-                raise FarmingError("Could not return to City after daily rewards")
-            self.game.wait(1.5)
+            self.game.wait(_POST_REWARD_SETTLE_DELAY)
             screenshot, detection = self._open_world_map_directly()
+            if detection.state not in {ScreenState.CITY, ScreenState.WORLD_MAP}:
+                if not claimer.ensure_city_view():
+                    raise FarmingError("Could not return to City after daily rewards")
+                screenshot, detection = self._open_world_map_directly()
         elif expected_account_name is None:
             screenshot, detection = self._open_world_map_directly()
         else:
@@ -635,21 +653,10 @@ class FarmingController:
                     break
                 self.game.wait(_ACTION_RETRY_DELAY)
                 screenshot, detection = self._read_screen()
+            screenshot, detection = self._enter_world_map(screenshot, detection)
 
         if detection.state is ScreenState.CITY:
-            for _attempt in range(_MAX_ACTION_ATTEMPTS):
-                self._transition(FarmState.OPEN_WORLD_MAP, "Opening the world map")
-                self._press_and_wait(
-                    screenshot,
-                    detection,
-                    _NAVIGATION_TEMPLATES / "city_map_button.png",
-                    confidence_threshold=0.68,
-                    change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
-                )
-                screenshot, detection = self._read_screen()
-                if detection.state is not ScreenState.CITY:
-                    break
-                self.game.wait(_ACTION_RETRY_DELAY)
+            raise FarmingError("Could not confirm the world map after tapping the City map button")
 
         world_flow_states = {
             ScreenState.WORLD_MAP,
@@ -749,11 +756,13 @@ class FarmingController:
         alliance_enabled = self.alliance_resource or alliance_resource_enabled()
         if not alliance_enabled:
             self._log("[Alliance] Farm Alliance Resource Node is disabled for this character")
-        elif armies_out >= 5:
-            self._log("[Alliance] Skipping alliance node: all 5 march slots are already in use")
+        elif armies_out > 0:
+            self._log(f"[Alliance] Skipping alliance node: {armies_out}/5 march slots are already in use")
         elif detection.state is not ScreenState.WORLD_MAP:
             self._log(f"[Alliance] Skipping alliance node: started in {detection.state.value}, not World View")
-        if alliance_enabled and armies_out < 5 and detection.state is ScreenState.WORLD_MAP:
+        elif world_detection.state is not ScreenState.WORLD_MAP:
+            self._log("[Alliance] Skipping alliance node: could not confirm the world-map troop count")
+        else:
             from rok_automation.automation.alliance_resource import AllianceResourceFarmer
 
             runner = AllianceResourceFarmer(self.game, self.detector, log=self._log)
@@ -995,7 +1004,7 @@ class FarmingController:
                         screenshot,
                         screen,
                         _NAVIGATION_TEMPLATES / "city_map_button.png",
-                        confidence_threshold=0.68,
+                        confidence_threshold=VIEW_TOGGLE_MIN_CONFIDENCE,
                         change_timeout=self._budget(_CITY_TO_MAP_TIMEOUT),
                     )
                     continue
@@ -1006,7 +1015,7 @@ class FarmingController:
                         screenshot,
                         screen,
                         _NAVIGATION_TEMPLATES / "world_search_button.png",
-                        confidence_threshold=0.65,
+                        confidence_threshold=WORLD_SEARCH_MIN_CONFIDENCE,
                         change_timeout=1.5,
                     )
                     continue
@@ -1224,7 +1233,7 @@ class FarmingController:
                             fresh_path,
                             result,
                             _NAVIGATION_TEMPLATES / "world_search_button.png",
-                            confidence_threshold=0.65,
+                            confidence_threshold=WORLD_SEARCH_MIN_CONFIDENCE,
                             change_timeout=1.5,
                         )
                         continue
@@ -1385,36 +1394,67 @@ class FarmingController:
             change_timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         if screenshot is None:
             screenshot = self.game.screenshot()
+        opening_search = template_path.name == "world_search_button.png"
+        opening_world = screen.state is ScreenState.CITY and template_path.name == "city_map_button.png"
+        if opening_search:
+            confidence_threshold = max(confidence_threshold, WORLD_SEARCH_MIN_CONFIDENCE)
         hit = None
+        button_template = template_path
         for scan in range(MIN_SCREEN_SCANS):
             if scan:
                 self.game.wait(_ACTION_RETRY_DELAY)
                 screenshot = self.game.screenshot()
-            hit = self.detector.locate_template(
-                screenshot,
-                template_path,
-                confidence_threshold=confidence_threshold,
-                context_key=self._selected_resource,
-            )
-            if hit is not None:
+            if opening_world:
+                if scan:
+                    view = self.detector.detect(
+                        screenshot, read_account=False,
+                        candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+                    )
+                    if view.state is ScreenState.WORLD_MAP:
+                        return screenshot, view
+                    if view.state is not ScreenState.CITY:
+                        self._recover_search_mailbox(screenshot)
+                        continue
+                toggle = locate_view_toggle(self.detector, screenshot)
+                if toggle is not None:
+                    button_template, hit = toggle
+                    break
+            else:
+                hit = self.detector.locate_template(
+                    screenshot,
+                    template_path,
+                    confidence_threshold=confidence_threshold,
+                    context_key=self._selected_resource,
+                )
+            if hit is not None and hit.confidence >= confidence_threshold:
+                if opening_search:
+                    map_screen = self.detector.detect(
+                        screenshot,
+                        read_account=False,
+                        candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+                    )
+                    if map_screen.state is ScreenState.CITY:
+                        return screenshot, map_screen
+                    if map_screen.state is not ScreenState.WORLD_MAP:
+                        hit = None
+                        continue
                 break
+            hit = None
             self._recover_search_mailbox(screenshot)
         if hit is None:
-            if template_path.name == "world_search_button.png":
+            if opening_search:
                 from rok_automation.game.popups import close_extended_view
                 if close_extended_view(self.game, self.detector, screenshot, log=self._log):
                     return self._read_screen()
-            raise FarmingError(
-                f"Could not locate {template_path.name} on the "
-                f"{screen.state.value} screen"
-            )
-        self._log(f"Clicking {template_path.stem} (match={hit.confidence:.3f})")
+            button_name = "the fortress or map button" if opening_world else template_path.name
+            raise FarmingError(f"Could not locate {button_name} on the {screen.state.value} screen")
+        self._log(f"Clicking {button_template.stem} (match={hit.confidence:.3f})")
         self.game.click(hit.bounds, screenshot)
         next_expected = (
             (ScreenState.RESOURCE_SEARCH,)
-            if template_path.name == "world_search_button.png"
+            if opening_search
             else (ScreenState.WORLD_MAP,)
-            if template_path.name == "city_map_button.png"
+            if opening_world
             else None
         )
         changed = self._wait_for_dispatch_change(

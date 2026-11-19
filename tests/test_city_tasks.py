@@ -102,7 +102,7 @@ class TestCityTasks(unittest.TestCase):
                 for name in ("idle", "leather", "iron", "wood", "bone")]
         detector.locate_template.side_effect = (
             hits[:1] + ([None] * 6 if button_missing else [button])
-            + ([None] * 6 if card_missing else [card])
+            + ([None] * 7 if card_missing else [card])
         )
         runner = CityTaskRunner(game, detector, log=lambda _: None)
         runner._locate_forge_material = MagicMock(side_effect=hits[1:])
@@ -146,8 +146,37 @@ class TestCityTasks(unittest.TestCase):
             with self.subTest(button_missing=button_missing):
                 runner, game, _, _, _ = self._forge_runner(card_missing=True, button_missing=button_missing)
                 with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))):
-                    self.assertTrue(runner._claim_and_start_forge("leather"))
+                    self.assertFalse(runner._claim_and_start_forge("leather"))
                 self.assertEqual(game.click.call_count, 1 if button_missing else 2)
+
+    def test_forge_retries_missed_open_from_fresh_city_frame(self):
+        runner, game, _, button, card = self._forge_runner()
+        marker = TemplateHit(0.95, (500, 200, 40, 40))
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))), \
+             patch.object(runner, "_is_still_in_city", return_value=True), \
+             patch.object(runner, "_find_forge_marker", return_value=("idle", marker)) as find, \
+             patch.object(runner, "_wait_for_menu_control", side_effect=[
+                 ("first-miss.png", None), ("opened.png", button), ("menu.png", card),
+             ]), patch.object(runner, "_dismiss_material_menu"):
+            self.assertTrue(runner._claim_and_start_forge("leather"))
+        self.assertEqual([call.args[0] for call in find.call_args_list], ["frame-0.png", "frame-1.png"])
+        self.assertEqual(game.click.call_args_list[0].args, ((520, 280, 1, 1), "frame-0.png"))
+        self.assertEqual(game.click.call_args_list[1].args, ((520, 296, 1, 1), "frame-1.png"))
+        self.assertEqual(game.click.call_args_list[2].args, (button.bounds, "opened.png"))
+        self.assertEqual(game.click.call_count, 8)
+
+    def test_forge_rescans_when_marker_is_initially_hidden(self):
+        runner, game, _, button, card = self._forge_runner()
+        marker = TemplateHit(0.95, (500, 200, 40, 40))
+        with patch("rok_automation.automation.city_tasks.load_gray_frame", return_value=np.zeros((720, 1280))), \
+             patch.object(runner, "_is_still_in_city", return_value=True), \
+             patch.object(runner, "_find_forge_marker", side_effect=[None, ("idle", marker)]), \
+             patch.object(runner, "_wait_for_menu_control", side_effect=[
+                 ("opened.png", button), ("menu.png", card),
+             ]), patch.object(runner, "_dismiss_material_menu"):
+            self.assertTrue(runner._claim_and_start_forge("leather"))
+        self.assertEqual(game.click.call_args_list[0].args, ((520, 280, 1, 1), "frame-1.png"))
+        self.assertEqual(game.click.call_count, 7)
 
     def test_forge_target_outside_frame_does_not_click(self):
         runner, game, _, _, _ = self._forge_runner()
@@ -214,7 +243,9 @@ class TestCityTasks(unittest.TestCase):
         self.assertIsNone(runner._locate_forge_material(
             without_reward, _MATERIAL_TEMPLATES["bone"], "bone",
         ))
-        self.assertTrue(runner._claim_and_start_forge("bone"))
+        # The static fixture cannot react to taps or show the Materials button.
+        with patch.object(runner, "_is_still_in_city", return_value=False):
+            self.assertFalse(runner._claim_and_start_forge("bone"))
         self.assertEqual(game.click.call_count, 2)
         for call in game.click.call_args_list:
             self.assertEqual(call.args[0], (169, 286, 1, 1))
@@ -236,6 +267,28 @@ class TestCityTasks(unittest.TestCase):
                 self.assertIsNotNone(hit)
                 self.assertLessEqual(abs(hit.bounds[0] - 400), 1)
                 self.assertLessEqual(abs(hit.bounds[1] - 300), 1)
+
+    def test_bone_reward_between_coarse_scales_beats_smaller_lookalike(self):
+        import cv2
+        from rok_automation.automation.city_tasks import _MATERIAL_TEMPLATES
+        from rok_automation.vision.screen import ScreenDetector
+
+        template = _MATERIAL_TEMPLATES["bone"]
+        card = cv2.imread(str(template), cv2.IMREAD_GRAYSCALE)
+        frame = np.full((720, 1280), 60, dtype=np.uint8)
+        reward = cv2.resize(card, (22, 14), interpolation=cv2.INTER_AREA)
+        frame[250:275, 150:182] = 235
+        frame[250:264, 155:177] = reward
+
+        lookalike = cv2.resize(card, (15, 10), interpolation=cv2.INTER_AREA)
+        lookalike[3, 5] //= 2
+        frame[410:429, 230:253] = 235
+        frame[410:420, 234:249] = lookalike
+
+        runner = CityTaskRunner(MagicMock(), ScreenDetector())
+        hit = runner._locate_forge_material(frame, template, "bone")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.bounds, (155, 250, 22, 14))
 
     def test_stacked_bone_reward_keeps_bubble_validation(self):
         from pathlib import Path

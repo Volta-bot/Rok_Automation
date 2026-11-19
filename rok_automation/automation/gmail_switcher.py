@@ -783,7 +783,9 @@ class GmailSwitcher:
                         stable_reads = 0
                         stability_waits = 0
                         scrolls += 1
-                        self._scroll_dropdown(screenshot, frame, lilith.entries)
+                        self._scroll_dropdown(
+                            screenshot, frame, lilith.entries, lilith.field_bounds,
+                        )
                         continue
                     if not unchanged or stable_reads == 0:
                         # The list keeps gliding or bouncing for a moment
@@ -1025,20 +1027,23 @@ class GmailSwitcher:
         screenshot: Path,
         frame: Any,
         entries: list[_DropdownEntry],
+        field_bounds: Box | None,
     ) -> None:
         """Drag the dropdown list upward to reveal accounts further down."""
 
-        height, width = frame.shape[:2]
-        center_x = (round(sum(entry.bounds[0] + entry.bounds[2] / 2 for entry in entries)
-                          / len(entries)) if entries else round(width * 0.50))
-        # Use the dropdown's viewport rather than the number of OCR rows:
-        # partially clipped or unreadable rows should not shorten later swipes.
-        field = _POPUP_FIELD_CACHE.get((height, width))
-        top = (field[1] + field[3] + round(height * 0.05)
-               if field is not None else round(height * 0.52))
-        end_y = min(top, round(height * 0.68))
-        start_y = min(round(height * 0.86),
-                      max(round(height * 0.79), end_y + round(height * 0.20)))
+        height = frame.shape[0]
+        first, last = entries[0], entries[-1]
+        # With few accounts the list ends higher on screen. Starting below it
+        # dismisses the dropdown, so put the initial touch on a visible row.
+        center_x = round(last.bounds[0] + last.bounds[2] / 2)
+        start_y = round(last.center_y)
+        end_y = round(first.center_y)
+        if field_bounds is not None:
+            _, field_y, _, field_height = field_bounds
+            end_y = min(end_y, field_y + field_height + round(height * 0.05))
+        # A single recognized row may still be part of a scrollable list.
+        # Keep enough travel to register a swipe, even if it ends above the row.
+        end_y = max(0, min(end_y, start_y - round(height * 0.08)))
 
         self.game.drag((center_x, start_y), (center_x, end_y), screenshot)
         self.game.wait(_SCROLL_SETTLE_DELAY)

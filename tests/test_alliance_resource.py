@@ -490,17 +490,22 @@ class AllianceResourceTests(unittest.TestCase):
 
 
 class AllianceWorkflowTests(unittest.TestCase):
-    def test_alliance_precedes_normal_farming_and_reserves_one_slot(self):
+    def test_alliance_runs_only_at_zero_and_reserves_one_slot(self):
+        for armies_out in range(6):
+            with self.subTest(armies_out=armies_out):
+                self.assert_account_workflow(armies_out)
+
+    def assert_account_workflow(self, armies_out):
         game, detector = MagicMock(), MagicMock()
-        before = ScreenDetection(ScreenState.WORLD_MAP, 1, 'map', armies_out=3,
+        before = ScreenDetection(ScreenState.WORLD_MAP, 1, 'map', armies_out=armies_out,
                                  account_name='Vàng 6 mỏLM', preferred_resource=Resource.GOLD)
-        after = ScreenDetection(ScreenState.WORLD_MAP, 1, 'node', armies_out=4)
         controller = FarmingController(game, detector=detector, alliance_resource=True, log=lambda _: None,
                                        daily_rewards_flag_path=None)
         events = []
         runner = MagicMock()
         runner.run.side_effect = lambda name: events.append(('alliance', name)) or 1
-        detector.detect.side_effect = [before, after]
+        after = ScreenDetection(ScreenState.WORLD_MAP, 1, 'node', armies_out=1)
+        detector.detect.side_effect = [before, after] if armies_out == 0 else [before]
         rewards = MagicMock()
         rewards.claim_all.side_effect = lambda: events.append(('rewards', None))
         rewards.ensure_city_view.return_value = True
@@ -512,9 +517,16 @@ class AllianceWorkflowTests(unittest.TestCase):
              patch('rok_automation.automation.controller.load_recent_farmed_nodes', return_value=[]), \
              patch('rok_automation.automation.alliance_resource.AllianceResourceFarmer', return_value=runner):
             controller._farm_account()
-        self.assertEqual(events, [('rewards', None), ('alliance', 'Vàng 6 mỏLM'), ('normal', 5)])
-        self.assertEqual(controller.context.armies_dispatched, 1)
-        self.assertEqual(controller.context.starting_armies_out, 3)
+        expected_events = [('rewards', None)]
+        if armies_out == 0:
+            expected_events.append(('alliance', 'Vàng 6 mỏLM'))
+            runner.run.assert_called_once_with('Vàng 6 mỏLM')
+        else:
+            runner.run.assert_not_called()
+        expected_events.extend(('normal', slot) for slot in range(max(1, armies_out) + 1, 6))
+        self.assertEqual(events, expected_events)
+        self.assertEqual(controller.context.armies_dispatched, int(armies_out == 0))
+        self.assertEqual(controller.context.starting_armies_out, armies_out)
         self.assertEqual(controller.context.preferred_resource, Resource.GOLD)
         self.assertEqual(controller.context.account_name, 'Vàng 6 mỏLM')
 

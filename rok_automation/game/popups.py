@@ -6,6 +6,7 @@ from typing import Callable
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.screen import (
     ScreenDetection, ScreenDetector, ScreenState, TemplateHit, load_gray_frame,
+    VIEW_TOGGLE_MIN_CONFIDENCE, VIEW_TOGGLE_TEMPLATES,
 )
 
 _NAVIGATION = Path(__file__).resolve().parents[2] / "templates" / "navigation"
@@ -15,6 +16,19 @@ _UNKNOWN_MENU_CONTROLS = (
     (_NAVIGATION / "unknown_menu_close_gold.png", "X button", 0.88),
     (_NAVIGATION / "unknown_menu_close_light.png", "X button", 0.88),
 )
+
+
+def locate_view_toggle(
+    detector: ScreenDetector, screenshot: Path,
+) -> tuple[Path, TemplateHit] | None:
+    """Find the fortress or map button, in that order, in either view."""
+    for template in VIEW_TOGGLE_TEMPLATES:
+        hit = detector.locate_template(
+            screenshot, template, confidence_threshold=VIEW_TOGGLE_MIN_CONFIDENCE,
+        )
+        if isinstance(hit, TemplateHit) and hit.confidence >= VIEW_TOGGLE_MIN_CONFIDENCE:
+            return template, hit
+    return None
 
 
 def locate_extended_view(
@@ -27,9 +41,9 @@ def locate_extended_view(
     )
     if not isinstance(icon, TemplateHit):
         return None
-    for name in ("world_city_button.png", "city_map_button.png"):
+    for template in VIEW_TOGGLE_TEMPLATES:
         button = detector.locate_template(
-            screenshot, _NAVIGATION / name, confidence_threshold=0.68,
+            screenshot, template, confidence_threshold=VIEW_TOGGLE_MIN_CONFIDENCE,
         )
         if not isinstance(button, TemplateHit):
             continue

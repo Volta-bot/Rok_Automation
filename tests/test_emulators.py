@@ -153,6 +153,21 @@ class TestMuMuAdbCapture(unittest.TestCase):
             self.assertAlmostEqual(x, 75, delta=1)
             self.assertAlmostEqual(y, 75, delta=1)
 
+    def test_startup_samples_set_touch_dimensions_before_first_screenshot(self) -> None:
+        from rok_automation.game.interface import TimingConfig
+        from rok_automation.game.native import AdbFrameSource, NativeInterface
+
+        interface = NativeInterface.__new__(NativeInterface)
+        interface.source = AdbFrameSource("adb", "127.0.0.1:16384")
+        interface._guest_size = (720, 1280)
+        interface.timing = TimingConfig()
+        interface.log = None
+        with patch.object(interface.source, "capture", return_value=np.zeros((720, 1280, 3), dtype=np.uint8)), \
+             patch.object(interface, "_input") as send, patch.object(interface, "wait"):
+            interface._measure_latency()
+            interface.tap(110, 60)
+        send.assert_called_once_with(["shell", "input", "tap", "110", "60"])
+
     def test_connects_to_the_selected_mumu_instance(self) -> None:
         from rok_automation.game.native import create_native_interface
 

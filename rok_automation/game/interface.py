@@ -22,6 +22,10 @@ class GameInterface(Protocol):
         screenshot_path: str | Path,
     ) -> None: ...
 
+    def tap(self, x: int, y: int) -> None:
+        """Tap coordinates in the canonical 1280x720 frame without capturing it."""
+        ...
+
     def drag(
         self,
         start: tuple[int, int],

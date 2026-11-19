@@ -68,7 +68,11 @@ class _Template:
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_CHAT_CLOSE_TEMPLATE = _PROJECT_ROOT / "templates/navigation/chat_close_chevron.png"
+_NAVIGATION = _PROJECT_ROOT / "templates/navigation"
+_CHAT_CLOSE_TEMPLATE = _NAVIGATION / "chat_close_chevron.png"
+WORLD_SEARCH_MIN_CONFIDENCE = 0.78
+VIEW_TOGGLE_TEMPLATES = (_NAVIGATION / "world_city_button.png", _NAVIGATION / "city_map_button.png")
+VIEW_TOGGLE_MIN_CONFIDENCE = 0.78
 _TEMPLATES = (
     _Template(
         ScreenState.MAILBOX,
@@ -77,18 +81,13 @@ _TEMPLATES = (
     ),
     _Template(
         ScreenState.CITY,
-        "city map button",
-        _PROJECT_ROOT / "templates/navigation/city_map_button.png",
-    ),
-    _Template(
-        ScreenState.WORLD_MAP,
-        "world map city button",
-        _PROJECT_ROOT / "templates/navigation/world_city_button.png",
+        "city build button",
+        _NAVIGATION / "city_build_button.png",
     ),
     _Template(
         ScreenState.WORLD_MAP,
         "world map search button",
-        _PROJECT_ROOT / "templates/navigation/world_search_button.png",
+        _NAVIGATION / "world_search_button.png",
     ),
     _Template(
         ScreenState.RESOURCE_SEARCH,
@@ -132,6 +131,7 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "scout_manager_title.png": (0.20, 0.00, 0.80, 0.20),
     "scout_manager_close.png": (0.80, 0.00, 1.00, 0.18),
     "world_search_button.png": (0.00, 0.56, 0.16, 0.88),
+    "city_build_button.png": (0.00, 0.56, 0.16, 0.88),
     "extended_view_mountains.png": (0.00, 0.45, 0.25, 0.85),
     "city_map_button.png": (0.00, 0.74, 0.16, 1.00),
     "world_city_button.png": (0.00, 0.74, 0.16, 1.00),
@@ -567,6 +567,8 @@ class ScreenDetector:
 
         image_template = _load_gray_template(template_path)
         template_name = template_path.name
+        if template_name == "world_search_button.png":
+            confidence_threshold = max(confidence_threshold, WORLD_SEARCH_MIN_CONFIDENCE)
         frame_h, frame_w = frame.shape[:2]
         is_resource_dep = template_name in _RESOURCE_DEPENDENT_TEMPLATES
         effective_context = context_key if is_resource_dep else None
@@ -649,10 +651,15 @@ class ScreenDetector:
             frame_key_shape=(frame_h, frame_w),
         )
         if refine_scale:
-            # Small overhead icons can fall between the coarse 5% scale steps.
+            # At small scales, a lookalike can win the coarse scan while the
+            # real icon falls between steps. Always check these scales as well.
             coarse_step = round(match[2] * 100)
-            for step in range(max(round(minimum_scale * 100), coarse_step - 4),
-                              min(round(maximum_scale * 100), coarse_step + 4) + 1):
+            minimum_step = round(minimum_scale * 100)
+            maximum_step = round(maximum_scale * 100)
+            small_steps = range(minimum_step, min(maximum_step, 25) + 1)
+            nearby_steps = range(max(minimum_step, coarse_step - 4),
+                                 min(maximum_step, coarse_step + 4) + 1)
+            for step in sorted(set(small_steps).union(nearby_steps) - {coarse_step}):
                 refined_score, location = cls._match_at_scale(roi_frame, image_template, step)
                 if refined_score > score:
                     score = refined_score

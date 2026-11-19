@@ -145,7 +145,12 @@ class NativeInterface(AdbInput):
         for attempt in range(2):
             wait_while_paused(getattr(self, "pause_flag_path", None), getattr(self, "log", None))
             try:
-                return _validate_frame(self.source.capture())
+                frame = _validate_frame(self.source.capture())
+                # The renderer gives the display orientation used by ADB taps.
+                # Startup samples establish it before the first screenshot.
+                height, width = frame.shape[:2]
+                self._guest_size = (width, height)
+                return frame
             except (AdbError, EmulatorError, OSError, ValueError, cv2.error) as exc:
                 if attempt:
                     raise AdbError(f"Screenshot still unavailable after recovery: {exc}") from exc
@@ -163,9 +168,6 @@ class NativeInterface(AdbInput):
             self.timing = replace(self.timing, capture_latency=time.perf_counter() - started)
             if self.log is not None:
                 self.log(f"Screen timeouts scaled {self.timeout_scale:.1f}x for ADB capture")
-        # ADB input follows the display orientation, unlike `wm size`.
-        height, width = frame.shape[:2]
-        self._guest_size = (width, height)
         normalized = normalize_capture(frame)
         destination = self.screenshot_path.expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)

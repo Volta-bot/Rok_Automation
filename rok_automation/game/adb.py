@@ -345,8 +345,11 @@ class AdbInput:
         target_y = y + height // 2
         target_x = max(0, min(frame.shape[1] - 1, target_x))
         target_y = max(0, min(frame.shape[0] - 1, target_y))
+        self.tap(target_x, target_y)
 
-        guest_x, guest_y = self._to_guest(target_x, target_y)
+    def tap(self, x: int, y: int) -> None:
+        """Tap a known canonical-frame point without loading a screenshot."""
+        guest_x, guest_y = self._to_guest(x, y)
         self._input(["shell", "input", "tap", str(guest_x), str(guest_y)])
         self.wait(
             self.timing.click_delay

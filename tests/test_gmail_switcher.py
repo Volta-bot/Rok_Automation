@@ -268,21 +268,28 @@ class TestRedesignedGmailDropdown(unittest.TestCase):
             _DropdownEntry("second@gmail.com", "51486", (475, 455, 189, 23)),
             _DropdownEntry("third@gmail.com", None, (474, 538, 192, 23)),
         ]
-        switcher._scroll_dropdown(Path("frame.png"), np.zeros((712, 1275, 3)), entries)
+        switcher._scroll_dropdown(
+            Path("frame.png"), np.zeros((712, 1275, 3)), entries, (475, 302, 200, 25),
+        )
         start, end = game.drags[0]
         self.assertTrue(340 < end[1] < start[1] < 590)
         self.assertGreater(start[1] - end[1], 180)
 
-    def test_swipe_distance_does_not_shrink_with_fewer_visible_rows(self):
+    def test_swipe_stays_inside_compact_dropdown_at_touch_down(self):
         game = DummyGame()
         switcher = GmailSwitcher(game, ScreenDetector(), log=lambda _: None)
-        frame = np.zeros((712, 1275, 3))
-        rows = [_DropdownEntry("one@gmail.com", None, (475, 374, 200, 21)),
-                _DropdownEntry("two@gmail.com", None, (475, 455, 200, 21)),
-                _DropdownEntry("three@gmail.com", None, (475, 538, 200, 21))]
-        switcher._scroll_dropdown(Path("frame.png"), frame, rows)
-        switcher._scroll_dropdown(Path("frame.png"), frame, rows[:1])
-        self.assertEqual(game.drags[0], game.drags[1])
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        field_bounds = (478, 304, 217, 26)
+        rows = [
+            _DropdownEntry("one@gmail.com", "1744392", (479, 375, 189, 23)),
+            _DropdownEntry("two@gmail.com", "51486", (478, 458, 193, 23)),
+        ]
+        for visible, panel_bottom in ((rows, 534), (rows[:1], 451)):
+            with self.subTest(row_count=len(visible)):
+                switcher._scroll_dropdown(Path("frame.png"), frame, visible, field_bounds)
+                start, end = game.drags[-1]
+                self.assertTrue(350 < start[1] < panel_bottom)
+                self.assertGreater(start[1] - end[1], 50)
 
 
 class TestGmailRotation(unittest.TestCase):
