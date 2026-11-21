@@ -13,7 +13,7 @@ from rok_automation.game.emulators import families
 from rok_automation.game.frame import CANONICAL_CAPTURE_SIZE
 from rok_automation.game.native import create_native_interface
 from rok_automation.game.pause import clear_paused
-from rok_automation.vision.screen import ScreenDetector, save_frame
+from rok_automation.vision.screen import ScreenDetector, ScreenState, save_frame
 from rok_automation.logic.resource_selector import (
     RESOURCE_LEVELS,
     Resource,
@@ -299,12 +299,17 @@ def main() -> int:
                 detection = detector.detect(
                     output_path,
                     expected_resource_level=args.search_level,
-                    include_menus=True,
                 )
                 extended_view = None
-                if detection.state.value == "world_map":
+                close_control = None
+                if detection.state is ScreenState.WORLD_MAP:
                     from rok_automation.game.popups import locate_extended_view
                     extended_view = locate_extended_view(detector, output_path)
+                elif detection.state is ScreenState.UNKNOWN:
+                    from rok_automation.game.popups import locate_unknown_menu_control
+                    close_control = locate_unknown_menu_control(
+                        detector, output_path, close_only=True,
+                    )
             except (OSError, RuntimeError, ValueError) as exc:
                 print(f"Screen detection failed: {exc}")
                 return 1
@@ -338,6 +343,13 @@ def main() -> int:
                 f"Screen: {detection.state.value}{level}{route}{coordinates} "
                 f"(confidence={detection.confidence:.3f}, evidence={detection.evidence})"
             )
+            if close_control is not None:
+                _, hit = close_control
+                x, y, width, height = hit.bounds
+                print(
+                    f"Close X detected at ({x + width // 2}, {y + height // 2}) "
+                    f"(confidence={hit.confidence:.3f})"
+                )
             if detection.state.value == "world_map":
                 print(
                     "Extended view popup: "

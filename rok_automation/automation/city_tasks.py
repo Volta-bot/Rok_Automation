@@ -12,7 +12,7 @@ from typing import Callable
 from rok_automation.game.adb import AdbError
 from rok_automation.game.console import safe_print
 from rok_automation.game.interface import GameInterface
-from rok_automation.game.popups import close_chat
+from rok_automation.game.popups import back_out_of_unknown_menu, close_chat, close_mailbox
 from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
 from rok_automation.vision.screen import ScreenDetector, ScreenState, TemplateHit, load_gray_frame
 
@@ -82,7 +82,7 @@ class CityTaskRunner:
 
         remaining_resources = set(_RESOURCE_TEMPLATES) if collect_resources else set()
         forge_pending = bool(material)
-        screenshot, _ = self._capture_without_chat()
+        screenshot, _ = self._capture_without_interruptions(expect_city=True)
         if screenshot is None:
             return
         if not self._is_still_in_city(screenshot):
@@ -94,7 +94,7 @@ class CityTaskRunner:
         except AdbError as exc:
             self._log(f"Could not zoom out ({exc}); scanning the current city view")
         self.game.wait(0.50)
-        screenshot, _ = self._capture_without_chat()
+        screenshot, _ = self._capture_without_interruptions(expect_city=True)
         if screenshot is None:
             return
         if not self._is_still_in_city(screenshot):
@@ -161,23 +161,35 @@ class CityTaskRunner:
                             max(0, x - pad):x + width + pad] = 0
         return markers
 
-    def _capture_without_chat(self) -> tuple[Path | None, bool]:
+    def _capture_without_interruptions(self, *, expect_city: bool = False) -> tuple[Path | None, bool]:
+        """Close an accidental game overlay and capture the view underneath."""
+        candidates = {ScreenState.CHAT, ScreenState.MAILBOX}
+        if expect_city:
+            candidates.update({ScreenState.CITY, ScreenState.WORLD_MAP})
         for attempt in range(4):
             screenshot = self.game.screenshot()
             detection = self.detector.detect(
-                screenshot, read_account=False, candidate_states={ScreenState.CHAT},
+                screenshot, read_account=False,
+                candidate_states=candidates,
             )
-            if detection.state is not ScreenState.CHAT:
+            if expect_city and detection.state is ScreenState.UNKNOWN and attempt < 3:
+                if back_out_of_unknown_menu(self.game, self.detector, screenshot, log=self._log):
+                    continue
+            if detection.state not in {ScreenState.CHAT, ScreenState.MAILBOX}:
                 return screenshot, attempt > 0
-            if attempt < 3:
+            if attempt == 3:
+                break
+            if detection.state is ScreenState.CHAT:
                 close_chat(self.game, screenshot, detection, log=self._log)
-        self._log("Chat panel stayed open; stopping city tasks")
+            elif not close_mailbox(self.game, self.detector, screenshot, log=self._log):
+                self.game.wait(0.25)
+        self._log(f"{detection.state.value.capitalize()} stayed open; stopping city tasks")
         return None, True
 
     def _collect_visible_resources(self, remaining_resources: set[str]) -> bool:
         resources = set(remaining_resources)
-        screenshot, _ = self._capture_without_chat()
-        # A chat interruption on the double-check gets one fresh scan.
+        screenshot, _ = self._capture_without_interruptions(expect_city=True)
+        # An overlay interruption on the double-check gets one fresh scan.
         for pass_number in (1, 2, 3):
             if screenshot is None:
                 return False
@@ -196,10 +208,10 @@ class CityTaskRunner:
             elif pass_number >= 2:
                 break
             self.game.wait(0.50)
-            screenshot, recovered_chat = self._capture_without_chat()
+            screenshot, recovered = self._capture_without_interruptions(expect_city=True)
             if screenshot is None:
                 return False
-            if pass_number >= 2 and not recovered_chat:
+            if pass_number >= 2 and not recovered:
                 break
         return True
 
@@ -249,12 +261,14 @@ class CityTaskRunner:
         return max(hits, key=lambda candidate: candidate[1].confidence, default=None)
 
     def _open_forge(self) -> tuple[Path, TemplateHit] | None:
-        screenshot = self.game.screenshot()
+        screenshot, _ = self._capture_without_interruptions(expect_city=True)
+        if screenshot is None:
+            return None
         taps = 0
         for attempt in range(1, len(_FORGE_TAP_OFFSETS) + 1):
             if attempt > 1:
                 self.game.wait(0.35)
-                screenshot, _ = self._capture_without_chat()
+                screenshot, _ = self._capture_without_interruptions(expect_city=True)
                 if screenshot is None or not self._is_still_in_city(screenshot):
                     self._log("City view unavailable; stopping forge retries")
                     return None
@@ -284,6 +298,11 @@ class CityTaskRunner:
             if kind != "idle":
                 # The game needs time to clear a claimed reward before selecting the building.
                 self.game.wait(0.25)
+                screenshot, interrupted = self._capture_without_interruptions()
+                if screenshot is None:
+                    return None
+                if interrupted:
+                    continue
                 self.game.click(forge_bounds, screenshot)
             self.game.wait(_MENU_WAIT_SECONDS)
             screenshot, button = self._wait_for_menu_control(
@@ -323,7 +342,9 @@ class CityTaskRunner:
 
     def _wait_for_menu_control(self, template: Path, *, context_key: str):
         for _scan in range(MIN_SCREEN_SCANS):
-            screenshot = self.game.screenshot()
+            screenshot, _ = self._capture_without_interruptions()
+            if screenshot is None:
+                return None, None
             hit = self.detector.locate_template(
                 screenshot, template, confidence_threshold=0.64, context_key=context_key,
             )
@@ -335,7 +356,9 @@ class CityTaskRunner:
     def _dismiss_material_menu(self) -> None:
         """Close the material dialog when choosing a card leaves it open."""
 
-        screenshot = self.game.screenshot()
+        screenshot, _ = self._capture_without_interruptions()
+        if screenshot is None:
+            return
         close = self.detector.locate_template(
             screenshot,
             _FORGE_MATERIALS_CLOSE_TEMPLATE,
@@ -351,7 +374,7 @@ class CityTaskRunner:
         detection = self.detector.detect(
             screenshot,
             read_account=False,
-            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.MAILBOX},
             context_key="city-tasks",
         )
         return detection.state is ScreenState.CITY

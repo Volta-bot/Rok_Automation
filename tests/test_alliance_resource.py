@@ -12,7 +12,9 @@ from rok_automation.automation.alliance_resource import (
 )
 from rok_automation.automation.controller import FarmingController
 from rok_automation.logic.resource_selector import Resource
-from rok_automation.vision.screen import ScreenDetection, ScreenState
+from rok_automation.vision.screen import (
+    FARMING_SCREEN_STATES, ScreenDetection, ScreenDetector, ScreenState, TemplateHit,
+)
 
 
 class AllianceResourceTests(unittest.TestCase):
@@ -88,6 +90,7 @@ class AllianceResourceTests(unittest.TestCase):
         runner.detector.detect.return_value = ScreenDetection(ScreenState.WORLD_MAP, 1, 'map')
         runner._verified_action = MagicMock(return_value=True)
         runner._load_preset = MagicMock(side_effect=lambda: not preset_error(' '.join(t for t, _, _ in runner.words)))
+        runner._dispatch_bounds = MagicMock(return_value=(800, 600, 200, 60))
         runner._world_visible = lambda: runner.detector.detect.return_value.state is ScreenState.WORLD_MAP
 
     def test_threshold_construction_and_error_never_march_and_always_close(self):
@@ -262,51 +265,52 @@ class AllianceResourceTests(unittest.TestCase):
     def test_new_troops_uses_existing_blue_button_template(self):
         runner = self.runner()
         runner._capture = MagicMock()
-        runner.detector.locate_template.return_value = MagicMock(bounds=(900, 100, 200, 80))
+        runner.detector.detect.return_value = ScreenDetection(
+            ScreenState.NEW_TROOPS_PROMPT, 0.95, "new troops button", (900, 100, 200, 80),
+        )
         self.assertTrue(runner._press_text('quan moi', 'quan mi'))
         runner.game.click.assert_called_once_with((900, 100, 200, 80), 'frame')
-        template = runner.detector.locate_template.call_args.args[1]
-        self.assertEqual(template.name, 'new_troops_button.png')
+        self.assertEqual(runner.detector.detect.call_args.kwargs["candidate_states"],
+                         {ScreenState.NEW_TROOPS_PROMPT})
 
     def test_new_troops_uses_shared_screen_reader_and_ignores_instruction_text(self):
         runner = self.runner()
         runner.frame = np.zeros((1077, 1913, 3), dtype=np.uint8)
-        runner.detector.locate_template.return_value = None
+        runner.detector.detect.return_value = ScreenDetection(ScreenState.UNKNOWN, 0, "no button")
         runner.words = [('Tập hợp quân mới từ', (1388, 77, 245, 37), .99),
                         ('thành phố của bạn', (1389, 111, 222, 35), .99),
                         ('Quân mi', (1397, 179, 228, 73), .95)]
         self.assertIsNone(runner._new_troops_bounds())
-        runner.dispatch_reader = MagicMock()
-        runner.dispatch_reader.read.return_value = ScreenDetection(
+        runner.detector.detect.reset_mock()
+        runner.detector.detect.return_value = ScreenDetection(
             ScreenState.NEW_TROOPS_PROMPT, .99, 'new_troops_button', bounds=(1350, 154, 325, 130))
         self.assertEqual(runner._new_troops_bounds(), (1350, 154, 325, 130))
-        runner.dispatch_reader.read.assert_called_once_with('frame', expected_states=(ScreenState.NEW_TROOPS_PROMPT,))
+        runner.detector.detect.assert_called_once_with(
+            'frame', candidate_states={ScreenState.NEW_TROOPS_PROMPT},
+            read_account=False, resource_details=frozenset(),
+        )
 
     def test_normal_and_alliance_detect_same_deployment_button_in_saved_capture(self):
-        from rok_automation.vision.screen import ScreenDetector
-
         fixture = Path(__file__).parent / 'fixtures' / 'alliance_deployment_inset.png'
         detector = ScreenDetector()
-        controller = FarmingController(MagicMock(), detector=detector, log=lambda _: None)
-        detection, ambiguous = controller._classify_dispatch_screen(
-            fixture, expected_states=(ScreenState.TROOP_COMPOSITION,))
+        detection = detector.detect(
+            fixture, candidate_states=FARMING_SCREEN_STATES, expected_states=(ScreenState.TROOP_COMPOSITION,),
+            read_account=False, resource_details=frozenset(),
+        )
         runner = AllianceResourceFarmer(MagicMock(), detector, state_path=None)
         runner.shot = fixture
         self.assertEqual(detection.state, ScreenState.TROOP_COMPOSITION)
-        self.assertFalse(ambiguous)
         self.assertEqual(runner._dispatch_bounds(ScreenState.TROOP_COMPOSITION), detection.bounds)
         self.assertIsNone(runner._dispatch_bounds(ScreenState.NEW_TROOPS_PROMPT))
 
     def test_alliance_gather_variant_is_shared_and_clicks_visible_button(self):
-        from rok_automation.vision.screen import ScreenDetector
-
         fixture = Path(__file__).parent / 'fixtures' / 'alliance_gather_popup.png'
         detector = ScreenDetector()
-        controller = FarmingController(MagicMock(), detector=detector, log=lambda _: None)
-        detection, ambiguous = controller._classify_dispatch_screen(
-            fixture, expected_states=(ScreenState.RESOURCE_FOUND,))
+        detection = detector.detect(
+            fixture, candidate_states=FARMING_SCREEN_STATES, expected_states=(ScreenState.RESOURCE_FOUND,),
+            read_account=False, resource_details=frozenset(),
+        )
         self.assertEqual(detection.state, ScreenState.RESOURCE_FOUND)
-        self.assertFalse(ambiguous)
         self.assertGreater(detection.confidence, .95)
         runner = AllianceResourceFarmer(MagicMock(), detector, state_path=None, log=lambda _: None)
         runner.shot = fixture
@@ -324,13 +328,21 @@ class AllianceResourceTests(unittest.TestCase):
         runner.game.click.assert_called_once_with(detection.bounds, fixture)
 
     def test_ambiguous_shared_button_requires_ocr_confirmation(self):
-        from rok_automation.automation.dispatch import DispatchScreenReader
-
-        reader = DispatchScreenReader(MagicMock())
-        detection = ScreenDetection(ScreenState.NEW_TROOPS_PROMPT, .8, 'similar buttons', bounds=(1, 2, 3, 4))
-        with patch.object(reader, 'classify', return_value=(detection, True)), \
-             patch.object(reader, 'read_button_state', return_value=None):
-            self.assertEqual(reader.read('frame').state, ScreenState.UNKNOWN)
+        detector = ScreenDetector()
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        candidates = {ScreenState.RESOURCE_FOUND, ScreenState.NEW_TROOPS_PROMPT}
+        for labels, state in (([], ScreenState.UNKNOWN), (["Quân mới"], ScreenState.NEW_TROOPS_PROMPT)):
+            with self.subTest(labels=labels), \
+                 patch("rok_automation.vision.screen.load_gray_frame", return_value=frame[:, :, 0]), \
+                 patch("rok_automation.vision.screen.load_color_frame", return_value=frame), \
+                 patch("rok_automation.vision.screen.read_text_region", return_value=labels) as ocr, \
+                 patch.object(detector, "_locate_in_frame", side_effect=[
+                     TemplateHit(.81, (1, 2, 30, 40)), TemplateHit(.80, (1, 2, 30, 40)),
+                 ]):
+                self.assertEqual(detector.detect(
+                    'frame', candidate_states=candidates, resource_details=frozenset(),
+                ).state, state)
+                ocr.assert_called_once()
 
     def test_preset_fallback_selects_one_and_rejects_two(self):
         runner = self.runner()
@@ -412,7 +424,9 @@ class AllianceResourceTests(unittest.TestCase):
                 runner = self.runner()
                 runner._capture = MagicMock()
                 runner._preset_one_bounds = MagicMock(return_value=(1200, 250, 30, 30))
-                runner._text = MagicMock(return_value=(800, 600, 200, 60))
+                runner.detector.detect.return_value = ScreenDetection(
+                    ScreenState.TROOP_COMPOSITION, 0.95, "march button", (800, 600, 200, 60),
+                )
                 runner._deployment_signature = MagicMock(side_effect=[('old',), ('new',)] if changed else None,
                                                          return_value=('old',))
                 self.assertEqual(runner._load_preset(), changed)
@@ -499,7 +513,8 @@ class AllianceWorkflowTests(unittest.TestCase):
         game, detector = MagicMock(), MagicMock()
         before = ScreenDetection(ScreenState.WORLD_MAP, 1, 'map', armies_out=armies_out,
                                  account_name='Vàng 6 mỏLM', preferred_resource=Resource.GOLD)
-        controller = FarmingController(game, detector=detector, alliance_resource=True, log=lambda _: None,
+        logs = []
+        controller = FarmingController(game, detector=detector, alliance_resource=True, log=logs.append,
                                        daily_rewards_flag_path=None)
         events = []
         runner = MagicMock()
@@ -521,8 +536,13 @@ class AllianceWorkflowTests(unittest.TestCase):
         if armies_out == 0:
             expected_events.append(('alliance', 'Vàng 6 mỏLM'))
             runner.run.assert_called_once_with('Vàng 6 mỏLM')
+            expected_log = '[Alliance] Vàng 6 mỏLM has 0/5 marches out. Checking whether the alliance node is eligible.'
         else:
             runner.run.assert_not_called()
+            expected_log = (
+                f'[Alliance] Vàng 6 mỏLM is skipping the alliance node because {armies_out}/5 marches are already out.'
+            )
+        self.assertIn(expected_log, logs)
         expected_events.extend(('normal', slot) for slot in range(max(1, armies_out) + 1, 6))
         self.assertEqual(events, expected_events)
         self.assertEqual(controller.context.armies_dispatched, int(armies_out == 0))

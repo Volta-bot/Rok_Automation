@@ -11,7 +11,8 @@ from rok_automation.game.interface import TimingConfig
 from rok_automation.logic.resource_selector import Resource, SearchTarget
 from rok_automation.performance import PerformanceStats, collect_performance, timed
 from rok_automation.vision.screen import (
-    ScreenDetection, ScreenDetector, ScreenState, _POSITION_CACHE, _SCALE_CACHE,
+    FARMING_SCREEN_STATES, ScreenDetection, ScreenDetector, ScreenState, TemplateHit,
+    _POSITION_CACHE, _SCALE_CACHE,
 )
 
 
@@ -23,7 +24,7 @@ class DispatchRecoveryTests(unittest.TestCase):
         controller = FarmingController(game, log=lambda _: None)
         bounds = (800, 490, 160, 70)
         march = ScreenDetection(ScreenState.TROOP_COMPOSITION, 0.98, "march", bounds)
-        with patch.object(controller, "_classify_dispatch_screen", return_value=(march, False)), \
+        with patch.object(controller.detector, "detect", return_value=march), \
              patch.object(controller, "_wait_for_dispatch_change", return_value=None), \
              patch("rok_automation.automation.controller.screen_scan_attempts", return_value=range(8)):
             with self.assertRaises(UnconfirmedMarchError):
@@ -33,38 +34,6 @@ class DispatchRecoveryTests(unittest.TestCase):
 
 
 class ReadingCacheTests(unittest.TestCase):
-    def test_level_cache_requires_identical_pixels_and_context(self):
-        detector = ScreenDetector()
-        frame = np.zeros((720, 1280), np.uint8)
-        bounds = (700, 450, 120, 60)
-        with patch.object(detector, "_read_search_level", side_effect=[8, 7, 6, 5]) as ocr:
-            self.assertEqual(detector._cached_search_level(frame, bounds, Resource.GOLD), 8)
-            frame[0, 0] = 255  # Outside the label crops.
-            self.assertEqual(detector._cached_search_level(frame, bounds, Resource.GOLD), 8)
-            ocr.assert_called_once()
-            frame[370, 620] = 255  # Low-level label position in the fallback crop.
-            self.assertEqual(detector._cached_search_level(frame, bounds, Resource.GOLD), 7)
-            self.assertEqual(detector._cached_search_level(frame, bounds, Resource.WOOD), 6)
-            detector.clear_reading_cache()
-            self.assertEqual(detector._cached_search_level(frame, bounds, Resource.WOOD), 5)
-
-    def test_unreadable_levels_are_retried(self):
-        detector = ScreenDetector()
-        frame = np.zeros((720, 1280), np.uint8)
-        with patch.object(detector, "_read_search_level", side_effect=[None, 8]) as ocr:
-            self.assertIsNone(detector._cached_search_level(frame, (700, 450, 120, 60), None))
-            self.assertEqual(detector._cached_search_level(frame, (700, 450, 120, 60), None), 8)
-            self.assertEqual(ocr.call_count, 2)
-
-    def test_level_cache_includes_the_last_row_of_the_fallback_crop(self):
-        detector = ScreenDetector()
-        frame = np.zeros((720, 1280), np.uint8)
-        bounds = (700, 450, 120, 46)
-        with patch.object(detector, "_read_search_level", side_effect=[8, 7]):
-            self.assertEqual(detector._cached_search_level(frame, bounds, None), 8)
-            frame[429, 620] = 255
-            self.assertEqual(detector._cached_search_level(frame, bounds, None), 7)
-
     def test_stockpiles_refresh_between_accounts_and_on_recovery(self):
         controller = FarmingController(MagicMock(), detector=ScreenDetector(), log=lambda _: None)
         amounts = {Resource.GOLD: 10, Resource.WOOD: 20}
@@ -89,6 +58,20 @@ class ReadingCacheTests(unittest.TestCase):
 
 
 class FastDetectionTests(unittest.TestCase):
+    def test_strong_expected_button_skips_other_screen_checks(self):
+        detector = ScreenDetector()
+        frame = np.zeros((720, 1280), np.uint8)
+        with patch("rok_automation.vision.screen.load_gray_frame", return_value=frame), \
+             patch.object(detector, "_locate_in_frame", return_value=TemplateHit(.95, (800, 490, 160, 70))) as locate:
+            result = detector.detect(
+                "frame", candidate_states=FARMING_SCREEN_STATES,
+                expected_states=(ScreenState.TROOP_COMPOSITION,), read_account=False,
+                resource_details=frozenset(),
+            )
+        self.assertEqual(result.state, ScreenState.TROOP_COMPOSITION)
+        locate.assert_called_once()
+        self.assertEqual(locate.call_args.args[1].name, "march_button.png")
+
     def tearDown(self):
         _POSITION_CACHE.clear()
         _SCALE_CACHE.clear()
@@ -118,15 +101,12 @@ class FastDetectionTests(unittest.TestCase):
         game = MagicMock()
         game.timing = TimingConfig()
         controller = FarmingController(game, detector=MagicMock(), log=lambda _: None)
-        unknown = ScreenDetection(ScreenState.UNKNOWN, 0, "transition")
         city = ScreenDetection(ScreenState.CITY, 0.95, "unexpected city")
         ticks = iter(index * 0.04 for index in range(100))
-        def classify(*args, fast_only=False, **kwargs):
-            return (unknown if fast_only else city), False
         with patch("rok_automation.automation.controller.time.monotonic", side_effect=lambda: next(ticks)), \
-             patch.object(controller, "_classify_dispatch_screen", side_effect=classify) as check:
+             patch.object(controller.detector, "detect", return_value=city) as check:
             result = controller._wait_for_dispatch_change(
-                ScreenState.RESOURCE_FOUND, None, timeout=2,
+                ScreenState.RESOURCE_FOUND, timeout=2,
                 expected_states=(ScreenState.NEW_TROOPS_PROMPT,),
             )
         self.assertEqual(result[1].state, ScreenState.CITY)

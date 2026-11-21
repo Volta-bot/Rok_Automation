@@ -117,7 +117,7 @@ class TestCityTasks(unittest.TestCase):
                     self.assertTrue(runner._claim_and_start_forge("leather"))
                 self.assertEqual(game.click.call_count, 8)
                 self.assertEqual(game.click.call_args_list[0].args, ((520, 280, 1, 1), "frame-0.png"))
-                self.assertEqual(game.click.call_args_list[1].args, ((520, 280, 1, 1), "frame-0.png"))
+                self.assertEqual(game.click.call_args_list[1].args, ((520, 280, 1, 1), "frame-1.png"))
                 self.assertEqual(game.click.call_args_list[2].args[0], button.bounds)
                 self.assertTrue(all(call.args[0] == card.bounds for call in game.click.call_args_list[3:]))
                 self.assertEqual(sum(call.args == (0.08,) for call in game.wait.call_args_list), 4)

@@ -12,13 +12,12 @@ from pathlib import Path
 
 import cv2
 
-from rok_automation.automation.dispatch import DispatchScreenReader
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.button_positions import STATIC_BUTTON_POSITIONS
 from rok_automation.game.console import format_log
 from rok_automation.storage import write_json
 from rok_automation.game.screen_retry import MIN_SCREEN_SCANS
-from rok_automation.vision.screen import ScreenState, load_color_frame
+from rok_automation.vision.screen import FARMING_SCREEN_STATES, ScreenState, load_color_frame
 
 _ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ALLIANCE_STATE_PATH = Path(os.environ.get("ROK_STATE_DIR", _ROOT / "state")) / "alliance_nodes.json"
@@ -55,7 +54,6 @@ def preset_error(text):
 class AllianceResourceFarmer:
     def __init__(self, game, detector, *, log=print, state_path=DEFAULT_ALLIANCE_STATE_PATH):
         self.game, self.detector = game, detector
-        self.dispatch_reader = DispatchScreenReader(detector)
         self.log = lambda message: log(format_log(message, "Alliance"))
         self.state_path = state_path
         self.march_attempted = False
@@ -256,7 +254,9 @@ class AllianceResourceFarmer:
         return self._dispatch_bounds(ScreenState.NEW_TROOPS_PROMPT)
 
     def _dispatch_bounds(self, state):
-        detection = self.dispatch_reader.read(self.shot, expected_states=(state,))
+        detection = self.detector.detect(
+            self.shot, candidate_states={state}, read_account=False, resource_details=frozenset(),
+        )
         return detection.bounds if detection.state is state else None
 
     def _press_dispatch(self, state, expected):
@@ -338,7 +338,9 @@ class AllianceResourceFarmer:
         # Candidate-only world detection can mistake an overlay for the map.
         # Inspect gather/deployment buttons before the map HUD: the Search
         # button remains visible behind the alliance resource popup.
-        detection = self.dispatch_reader.read(self.shot)
+        detection = self.detector.detect(
+            self.shot, candidate_states=FARMING_SCREEN_STATES, read_account=False, resource_details=frozenset(),
+        )
         return detection.state is ScreenState.WORLD_MAP and not self._template("close")
 
     def _territory_visible(self):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import replace
 from datetime import datetime
 import os
 from pathlib import Path
@@ -13,9 +12,6 @@ from typing import Any
 import cv2
 
 from rok_automation.game.screen_retry import MIN_SCREEN_SCANS, screen_scan_attempts
-from rok_automation.automation.dispatch import (
-    DispatchScreenReader, _DISPATCH_BUTTONS, _DISPATCH_BUTTON_CONFIDENCE,
-)
 from rok_automation.automation.context import FarmContext
 from rok_automation.automation.account_switcher import (
     AccountSwitcher,
@@ -60,13 +56,14 @@ from rok_automation.performance import PerformanceStats, collect_performance, re
 from rok_automation.storage import write_json
 from rok_automation.vision.resource_bar import read_resource_bar
 from rok_automation.vision.screen import (
+    FARMING_SCREEN_STATES,
     VIEW_TOGGLE_MIN_CONFIDENCE,
     WORLD_SEARCH_MIN_CONFIDENCE,
     ScreenDetection,
     ScreenDetector,
     ScreenState,
+    TemplateHit,
     load_color_frame,
-    load_gray_frame,
     save_frame,
 )
 
@@ -87,13 +84,10 @@ class UnconfirmedMarchError(RuntimeError):
 DEFAULT_SESSION_SUMMARY_PATH = Path(os.environ.get("ROK_STATE_DIR", "state")) / "session_summary.json"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SEARCH_TEMPLATES = _PROJECT_ROOT / "templates/search"
-_GATHERING_TEMPLATES = _PROJECT_ROOT / "templates/gathering"
 _NAVIGATION_TEMPLATES = _PROJECT_ROOT / "templates/navigation"
 _SEARCH_SETTLE_SECONDS = 0.85
-_SEARCH_SUBMIT_DELAY = 0.04
 _SEARCH_MENU_READY_TIMEOUT = 2.5
 _CONTROL_READY_TIMEOUT = 2.5
-_LEVEL_REPEAT_PAUSE = 0.15
 _LEVEL_SETTLE_DELAY = 0.12
 _MAX_ACTION_ATTEMPTS = 5
 _ACTION_RETRY_DELAY = 0.20
@@ -110,11 +104,23 @@ _DISPATCH_TIMEOUT = 20.0
 _STEP_CHANGE_TIMEOUT = 0.70
 _STEP_SETTLE_DELAY = 0.05
 _FALLBACK_CONFIRM_SECONDS = 0.45
+_DISPATCH_BUTTONS = {
+    ScreenState.RESOURCE_FOUND: "gather_button",
+    ScreenState.NEW_TROOPS_PROMPT: "new_troops_button",
+    ScreenState.TROOP_COMPOSITION: "march_button",
+    ScreenState.RESOURCE_SEARCH: "submit_button",
+}
 _NEXT_DISPATCH_STATE: dict[ScreenState, ScreenState] = {
     ScreenState.RESOURCE_FOUND: ScreenState.NEW_TROOPS_PROMPT,
     ScreenState.NEW_TROOPS_PROMPT: ScreenState.TROOP_COMPOSITION,
     ScreenState.TROOP_COMPOSITION: ScreenState.WORLD_MAP,
 }
+# March confirmation must check for a lingering deployment panel even when
+# the World Map HUD is visible behind it.
+_MAP_TRANSITION_STATES = frozenset({
+    ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.TROOP_COMPOSITION,
+    ScreenState.CHAT, ScreenState.MAILBOX,
+})
 # Recovery: how many failed steps / unreadable screens one army may hit
 # before the run stops safely.
 _MAX_RECOVERY_ATTEMPTS = 5
@@ -293,6 +299,14 @@ class FarmingController:
                 known_current = result.identity
                 self.signed_in_accounts.verify_many(rotation.farmed)
                 if result.run_complete:
+                    try:
+                        removed = self.signed_in_accounts.prune_unfarmed(rotation.farmed)
+                    except OSError as exc:
+                        self._log(f"[Warning] Could not clean up the signed-in Gmail list: {exc}")
+                    else:
+                        if removed:
+                            self._log(f"Removed {removed} unmatched OCR account(s) from the signed-in Gmail list")
+                            self._log(GMAIL_PROGRESS_UPDATED)
                     context.armies_dispatched = total_dispatched
                     context.dispatched_targets = list(self.session_targets)
                     context.last_error = None
@@ -617,7 +631,6 @@ class FarmingController:
         self._stockpile_cache = None
         self._selected_resource = None
         self._resource_levels.clear()
-        self.detector.clear_reading_cache()
 
     def _farm_account(
         self,
@@ -754,10 +767,14 @@ class FarmingController:
             self._check_skip_request()
         self.context.starting_armies_out = armies_out
         alliance_enabled = self.alliance_resource or alliance_resource_enabled()
+        account_name = self.context.account_name
         if not alliance_enabled:
-            self._log("[Alliance] Farm Alliance Resource Node is disabled for this character")
+            self._log(f"[Alliance] {account_name} is skipping the alliance node because alliance farming is disabled.")
         elif armies_out > 0:
-            self._log(f"[Alliance] Skipping alliance node: {armies_out}/5 march slots are already in use")
+            self._log(
+                f"[Alliance] {account_name} is skipping the alliance node because "
+                f"{armies_out}/5 marches are already out."
+            )
         elif detection.state is not ScreenState.WORLD_MAP:
             self._log(f"[Alliance] Skipping alliance node: started in {detection.state.value}, not World View")
         elif world_detection.state is not ScreenState.WORLD_MAP:
@@ -765,8 +782,11 @@ class FarmingController:
         else:
             from rok_automation.automation.alliance_resource import AllianceResourceFarmer
 
+            self._log(f"[Alliance] {account_name} has 0/5 marches out. Checking whether the alliance node is eligible.")
             runner = AllianceResourceFarmer(self.game, self.detector, log=self._log)
-            sent = runner.run(self.context.account_name)
+            sent = runner.run(account_name)
+            if not sent and not runner.march_attempted:
+                self._log(f"[Alliance] {account_name} did not send a march to the alliance node.")
             self.context.armies_dispatched += sent
             # Keep the resource/name read over our own city. The camera now
             # points at the alliance node, so do not identify the account again.
@@ -979,7 +999,7 @@ class FarmingController:
                     screenshot, screen = self._read_screen()
                 state = screen.state
 
-                if state is ScreenState.MAILBOX:
+                if state in {ScreenState.CHAT, ScreenState.MAILBOX}:
                     # A navigation wait can hand us a popup directly, without
                     # passing through _read_screen's normal recovery first.
                     pending_result = None
@@ -1021,22 +1041,6 @@ class FarmingController:
                     continue
 
                 if state is ScreenState.RESOURCE_SEARCH:
-                    # Guard: If gather_button (THU THẬP) is already visible on screen
-                    # (e.g. from an earlier search pan), handle it as RESOURCE_FOUND immediately.
-                    if screenshot is not None:
-                        gather_hit = self.detector.locate_template(
-                            screenshot,
-                            _GATHERING_TEMPLATES / "gather_button.png",
-                            confidence_threshold=0.75,
-                        )
-                        if gather_hit is not None:
-                            pending_result = self.detector.detect(
-                                screenshot,
-                                read_account=False,
-                                candidate_states={ScreenState.RESOURCE_FOUND},
-                            )
-                            continue
-
                     skip_unavailable_targets()
                     if target_index >= len(target_list):
                         return False
@@ -1090,15 +1094,6 @@ class FarmingController:
                     )
                     # Determine which resource tab is currently active on screen.
                     active_resource = screen.preferred_resource
-                    if active_resource is None and screen.bounds is not None and screenshot is not None:
-                        frame = load_gray_frame(screenshot)
-                        if frame is not None:
-                            res = ScreenDetector.identify_active_search_resource(
-                                screen.bounds, frame.shape[1]
-                            )
-                            if isinstance(res, Resource):
-                                active_resource = res
-
                     if active_resource == target.resource:
                         # Desired resource is already selected and dialog is open.
                         # Do NOT click the icon again, as that toggles the box closed.
@@ -1113,7 +1108,7 @@ class FarmingController:
                         )
                         self._selected_resource = target.resource
                         screenshot = None
-                    screenshot = self._set_search_level(
+                    before_search_path, search_screen = self._set_search_level(
                         target.level,
                         initial_screenshot=screenshot,
                     )
@@ -1122,16 +1117,13 @@ class FarmingController:
                         FarmState.SEARCH_RESOURCE,
                         f"Searching {target.resource.value} Lv{target.level}",
                     )
-                    if screenshot is None:
-                        self.game.wait(_SEARCH_SUBMIT_DELAY)
-                    before_search_path = self._click_template(
-                        _SEARCH_TEMPLATES / "submit_button.png",
-                        expected_state=ScreenState.RESOURCE_SEARCH,
-                        initial_screenshot=screenshot,
-                    )
+                    if search_screen.bounds is None:
+                        raise FarmingError("Could not locate Search on the verified resource panel")
                     before_search = load_color_frame(before_search_path)
                     if before_search is None:
                         raise FarmingError("Could not read the pre-search screenshot")
+                    self._log(f"Clicking submit_button (match={search_screen.confidence:.3f})")
+                    self.game.click(search_screen.bounds, before_search_path)
                     _result_path, result = self._wait_for_search_result(before_search)
                     self._transition(FarmState.PROCESS_RESULT)
 
@@ -1152,18 +1144,10 @@ class FarmingController:
 
                 if state is ScreenState.RESOURCE_FOUND:
                     target = current_target()
-                    if pending_result is not None:
-                        result = pending_result
-                        pending_result = None
-                    else:
-                        # Reached the result panel through recovery: re-read
-                        # its coordinates and route before deciding.
+                    if pending_result is None:
                         self._log("Resource panel is open; continuing from Thu thập")
-                        result = self.detector.detect(
-                            screenshot,
-                            read_account=False,
-                            candidate_states={ScreenState.RESOURCE_FOUND},
-                        )
+                    result = screen
+                    pending_result = None
                     coordinates = result.resource_coordinates
                     if coordinates is None:
                         # One retry: the panel's X/Y text can fail to OCR
@@ -1306,26 +1290,32 @@ class FarmingController:
             self._log(f"Could not read the top-bar stockpiles: {error}")
             return {}
 
-    def _read_screen(
-        self,
-        *,
-        expected_states: tuple[ScreenState, ...] | None = None,
-    ) -> tuple[Path, ScreenDetection]:
+    def _read_screen(self) -> tuple[Path, ScreenDetection]:
         """Identify the current farming screen using fast ROI/pinned checks."""
 
         deadline = time.monotonic() + self._budget(_SCREEN_READ_TIMEOUT)
         previous: ScreenDetection | None = None
         screenshot = self.game.screenshot()
         detection = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no capture yet")
-        from rok_automation.game.popups import close_scout_manager, back_out_of_unknown_menu, close_mailbox, close_extended_view
+        from rok_automation.game.popups import (
+            back_out_of_unknown_menu, close_chat, close_extended_view, close_mailbox,
+            close_scout_manager, close_vip_reward,
+        )
         popup_closes = 0
         scans = 0
         while True:
             scans += 1
-            detection, ambiguous = self._classify_dispatch_screen(
-                screenshot,
-                expected_states=expected_states,
+            detection = self.detector.detect(
+                screenshot, read_account=False, candidate_states=FARMING_SCREEN_STATES,
+                context_key=self._selected_resource, resource_details={ScreenState.RESOURCE_FOUND},
             )
+            if popup_closes < 3 and close_vip_reward(
+                self.game, screenshot, detection, log=self._log,
+            ):
+                popup_closes += 1
+                screenshot = self.game.screenshot()
+                previous = None
+                continue
             if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.UNKNOWN} and popup_closes < 3:
                 if close_extended_view(self.game, self.detector, screenshot, log=self._log):
                     popup_closes += 1
@@ -1338,13 +1328,19 @@ class FarmingController:
                     screenshot = self.game.screenshot()
                     previous = None
                     continue
-            if (detection.state is ScreenState.UNKNOWN or ambiguous) and popup_closes < 3:
+            if detection.state is ScreenState.CHAT and popup_closes < 3:
+                close_chat(self.game, screenshot, detection, log=self._log)
+                popup_closes += 1
+                screenshot = self.game.screenshot()
+                previous = None
+                continue
+            if detection.state is ScreenState.UNKNOWN and popup_closes < 3:
                 if close_scout_manager(self.game, self.detector, screenshot, log=self._log):
                     popup_closes += 1
                     screenshot = self.game.screenshot()
                     previous = None
                     continue
-                if detection.state is ScreenState.UNKNOWN and back_out_of_unknown_menu(
+                if back_out_of_unknown_menu(
                     self.game, self.detector, screenshot, log=self._log,
                 ):
                     popup_closes += 1
@@ -1353,7 +1349,6 @@ class FarmingController:
                     continue
             if (
                 detection.state is not ScreenState.UNKNOWN
-                and not ambiguous
                 and detection.confidence >= 0.80
             ):
                 return screenshot, detection
@@ -1364,18 +1359,9 @@ class FarmingController:
             )
             previous = detection
             if stable and detection.state is not ScreenState.UNKNOWN:
-                if not ambiguous:
-                    return screenshot, detection
-                ocr_state = self._read_button_state(screenshot, detection.bounds)
-                if ocr_state is not None:
-                    return screenshot, replace(detection, state=ocr_state)
-                return screenshot, ScreenDetection(
-                    ScreenState.UNKNOWN, 0.0, "ambiguous button label could not be verified"
-                )
+                return screenshot, detection
             if time.monotonic() >= deadline and scans >= MIN_SCREEN_SCANS:
-                return screenshot, (ScreenDetection(
-                    ScreenState.UNKNOWN, 0.0, "ambiguous button label could not be verified"
-                ) if ambiguous else detection)
+                return screenshot, detection
             self.game.wait(self.game.timing.poll_interval)
             screenshot = self.game.screenshot()
 
@@ -1419,6 +1405,20 @@ class FarmingController:
                 if toggle is not None:
                     button_template, hit = toggle
                     break
+            elif opening_search:
+                view = self.detector.detect(
+                    screenshot, read_account=False,
+                    candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+                )
+                if view.state is ScreenState.CITY:
+                    return screenshot, view
+                if (
+                    view.state is ScreenState.WORLD_MAP
+                    and view.bounds is not None
+                    and view.confidence >= confidence_threshold
+                ):
+                    hit = TemplateHit(view.confidence, view.bounds)
+                    break
             else:
                 hit = self.detector.locate_template(
                     screenshot,
@@ -1427,17 +1427,6 @@ class FarmingController:
                     context_key=self._selected_resource,
                 )
             if hit is not None and hit.confidence >= confidence_threshold:
-                if opening_search:
-                    map_screen = self.detector.detect(
-                        screenshot,
-                        read_account=False,
-                        candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
-                    )
-                    if map_screen.state is ScreenState.CITY:
-                        return screenshot, map_screen
-                    if map_screen.state is not ScreenState.WORLD_MAP:
-                        hit = None
-                        continue
                 break
             hit = None
             self._recover_search_mailbox(screenshot)
@@ -1455,18 +1444,16 @@ class FarmingController:
             if opening_search
             else (ScreenState.WORLD_MAP,)
             if opening_world
-            else None
+            else ()
         )
         changed = self._wait_for_dispatch_change(
             screen.state,
-            hit.bounds,
             timeout=change_timeout,
             expected_states=next_expected,
+            read_found_details=True,
         )
-        if changed is not None:
-            next_screenshot, next_detection, ambiguous = changed
-            if not ambiguous and next_detection.confidence >= 0.80:
-                return next_screenshot, next_detection
+        if changed is not None and changed[1].confidence >= 0.80:
+            return changed
         return None
 
     def _set_search_level(
@@ -1474,65 +1461,53 @@ class FarmingController:
         desired_level: int,
         *,
         initial_screenshot: Path | None = None,
-    ) -> Path | None:
+    ) -> tuple[Path, ScreenDetection]:
         if desired_level not in RESOURCE_LEVELS:
             raise FarmingError(f"Unsupported resource level: {desired_level}")
 
         resource = self._selected_resource
-        screenshot_hint = initial_screenshot
-        for _attempt in range(_MAX_ACTION_ATTEMPTS):
-            if _attempt:
-                record_event("level_retry")
-            screenshot, detection = self._wait_for_search_menu_level(
-                initial_screenshot=screenshot_hint
-            )
-            screenshot_hint = None
-            current_level = detection.resource_level
-            if current_level is None:
-                raise FarmingError("Could not read the level shown in the search menu")
+        screenshot, detection = self._wait_for_search_menu_level(initial_screenshot=initial_screenshot)
+        missed = 0
+        for _ in range(max(RESOURCE_LEVELS) - 1 + _MAX_ACTION_ATTEMPTS):
+            slider = detection.search_slider
+            if slider is None:
+                raise FarmingError("Could not verify the level slider on the search panel")
+            current_level = slider.level
             if resource is not None:
                 self._resource_levels[resource] = current_level
             if current_level == desired_level:
-                return screenshot
+                return screenshot, detection
 
-            direction = "plus" if current_level < desired_level else "minus"
-            click_count = abs(desired_level - current_level)
-            self._log(f"Changing search level {current_level} → {desired_level}")
-            self._click_template(
-                _SEARCH_TEMPLATES / f"level_{direction}.png",
-                expected_state=ScreenState.RESOURCE_SEARCH,
-                confidence_threshold=0.60,
-                repeat=click_count,
-                initial_screenshot=screenshot,
-            )
+            increasing = current_level < desired_level
+            control = slider.plus if increasing else slider.minus
+            next_level = current_level + (1 if increasing else -1)
+            self._log(f"Changing search level {current_level} → {next_level}")
+            direction = "plus" if increasing else "minus"
+            self._log(f"Clicking level_{direction} (match={control.confidence:.3f})")
+            self.game.click(control.bounds, screenshot)
             self.game.wait(_LEVEL_SETTLE_DELAY)
 
-            # Check up to 5 times with a small delay so the slider/label update
-            # is detected before deciding another click is needed.
-            last_level = current_level
-            for _verify in range(2):
-                verify_screenshot, verify_detection = self._wait_for_search_menu_level()
-                if verify_detection.resource_level is not None and resource is not None:
-                    self._resource_levels[resource] = verify_detection.resource_level
-                if verify_detection.resource_level == desired_level:
-                    return verify_screenshot
-                if verify_detection.resource_level is not None:
-                    last_level = verify_detection.resource_level
+            screenshot, detection = self._wait_for_search_menu_level()
+            if detection.resource_level == current_level:
                 self.game.wait(_ACTION_RETRY_DELAY)
-            if last_level == current_level:
-                template = _SEARCH_TEMPLATES / f"level_{direction}.png"
-                self.detector.invalidate_position(template, context_key=resource)
-                self._log(f"Search level did not change; finding {direction} again for {resource.value if resource else 'current resource'}")
+                screenshot, detection = self._wait_for_search_menu_level()
+            if detection.resource_level == desired_level:
+                if resource is not None:
+                    self._resource_levels[resource] = desired_level
+                return screenshot, detection
+            if detection.resource_level == current_level:
+                missed += 1
+                record_event("level_retry")
+                if missed >= _MAX_ACTION_ATTEMPTS:
+                    break
+            elif detection.resource_level == next_level:
+                missed = 0
+            else:
+                raise FarmingError(f"Unexpected search level change from {current_level} to {detection.resource_level}")
 
-        final_screenshot, final_detection = self._wait_for_search_menu_level()
-        if final_detection.resource_level != desired_level:
-            raise FarmingError(
-                f"Could not set search level {desired_level}; "
-                f"menu shows {final_detection.resource_level}"
-            )
-        if resource is not None:
-            self._resource_levels[resource] = desired_level
-        return final_screenshot
+        raise FarmingError(
+            f"Could not set search level {desired_level}; menu shows {detection.resource_level}"
+        )
 
     def _wait_for_search_menu_level(
         self,
@@ -1542,7 +1517,7 @@ class FarmingController:
         """Wait briefly for the resource menu to finish opening or updating."""
 
         deadline = time.monotonic() + self._budget(_SEARCH_MENU_READY_TIMEOUT)
-        last_state = ScreenState.UNKNOWN
+        last_detection = ScreenDetection(ScreenState.UNKNOWN, 0, "no search panel")
         attempts = 0
         next_screenshot = initial_screenshot
         while time.monotonic() < deadline or attempts < MIN_SCREEN_SCANS:
@@ -1553,32 +1528,27 @@ class FarmingController:
                 else self.game.screenshot()
             )
             next_screenshot = None
-            detection = self.detector.detect(
+            last_detection = self.detector.detect(
                 screenshot,
                 read_account=False,
                 candidate_states={ScreenState.RESOURCE_SEARCH},
                 context_key=self._selected_resource,
             )
-            last_state = detection.state
-            if detection.state is ScreenState.UNKNOWN:
+            if last_detection.state is ScreenState.UNKNOWN:
                 self._recover_search_mailbox(screenshot)
             if (
-                detection.state is ScreenState.RESOURCE_SEARCH
-                and detection.resource_level is not None
+                last_detection.state is ScreenState.RESOURCE_SEARCH
+                and last_detection.search_slider is not None
+                and (self._selected_resource is None or last_detection.preferred_resource is self._selected_resource)
             ):
-                return screenshot, detection
-            if detection.state not in {
-                ScreenState.UNKNOWN,
-                ScreenState.RESOURCE_SEARCH,
-            }:
-                self._require_state(detection, ScreenState.RESOURCE_SEARCH)
+                return screenshot, last_detection
             self.game.wait(_ACTION_RETRY_DELAY)
 
-        if last_state is ScreenState.RESOURCE_SEARCH:
-            raise FarmingError("Could not read the level shown in the search menu")
+        if last_detection.state is ScreenState.RESOURCE_SEARCH:
+            raise FarmingError("Could not verify the selected resource and level slider")
         raise FarmingError(
             "Search menu did not become ready; "
-            f"last detected screen was {last_state.value}"
+            f"last detected screen was {last_detection.state.value}"
         )
 
     def _dispatch_army(
@@ -1605,22 +1575,32 @@ class FarmingController:
         fallback_since: float | None = None
         last_state = ScreenState.UNKNOWN
         expected_next: tuple[ScreenState, ...] = (ScreenState.RESOURCE_FOUND,)
-        pending_frame: tuple[Path, ScreenDetection, bool] | None = None
+        pending_frame: tuple[Path, ScreenDetection] | None = None
         menu_backs = 0
 
         for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             if pending_frame is not None:
-                screenshot, detection, ambiguous = pending_frame
+                screenshot, detection = pending_frame
                 pending_frame = None
             else:
                 screenshot = self.game.screenshot()
-                detection, ambiguous = self._classify_dispatch_screen(
-                    screenshot,
-                    expected_states=expected_next,
+                detection = self.detector.detect(
+                    screenshot, read_account=False,
+                    candidate_states=_MAP_TRANSITION_STATES if marched else FARMING_SCREEN_STATES,
+                    expected_states=expected_next, context_key=self._selected_resource,
+                    resource_details=frozenset(),
                 )
             last_state = detection.state
 
-            if marched and (ambiguous or detection.state is not ScreenState.WORLD_MAP):
+            if marched and detection.state is not ScreenState.WORLD_MAP:
+                self.game.wait(self.game.timing.poll_interval)
+                continue
+            if detection.state is ScreenState.CHAT:
+                from rok_automation.game.popups import close_chat
+                if menu_backs < 3:
+                    close_chat(self.game, screenshot, detection, log=self._log)
+                    menu_backs += 1
+                fallback_since = None
                 self.game.wait(self.game.timing.poll_interval)
                 continue
             if detection.state is ScreenState.MAILBOX:
@@ -1648,12 +1628,6 @@ class FarmingController:
                 continue
 
             state = detection.state
-            if ambiguous:
-                ocr_state = self._read_button_state(screenshot, detection.bounds)
-                if ocr_state is None:
-                    self.game.wait(self.game.timing.poll_interval)
-                    continue
-                state = ocr_state
 
             if state in {
                 ScreenState.CITY,
@@ -1721,8 +1695,7 @@ class FarmingController:
             expected_next = (next_state,) if next_state is not None else ()
             pending_frame = self._wait_for_dispatch_change(
                 detection.state,
-                detection.bounds,
-                expected_states=expected_next or None,
+                expected_states=expected_next,
             )
 
         if marched:
@@ -1735,41 +1708,37 @@ class FarmingController:
             f"Lv{target.level}; last detected screen was {last_state.value}"
         )
 
-    def _classify_dispatch_screen(self, screenshot, *, expected_states=None):
-        return DispatchScreenReader(self.detector, self._selected_resource).classify(
-            screenshot, expected_states=expected_states,
-        )
-
-    def _read_button_state(self, screenshot, bounds):
-        return DispatchScreenReader(self.detector, self._selected_resource).read_button_state(screenshot, bounds)
-
     def _wait_for_dispatch_change(
         self,
         clicked_state: ScreenState,
-        clicked_bounds: tuple[int, int, int, int] | None,
         *,
         timeout: float | None = None,
-        expected_states: tuple[ScreenState, ...] | None = None,
-    ) -> tuple[Path, ScreenDetection, bool] | None:
+        expected_states: tuple[ScreenState, ...] = (),
+        read_found_details: bool = False,
+    ) -> tuple[Path, ScreenDetection] | None:
         """Wait until the screen advances past ``clicked_state`` and return it."""
 
         if timeout is None:
             timeout = self._budget(_STEP_CHANGE_TIMEOUT)
         self.game.wait(_STEP_SETTLE_DELAY)
         deadline = time.monotonic() + timeout
+        resource_details = {ScreenState.RESOURCE_FOUND} if read_found_details else frozenset()
+        candidates = (
+            _MAP_TRANSITION_STATES if expected_states == (ScreenState.WORLD_MAP,)
+            else FARMING_SCREEN_STATES
+        )
         for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot = self.game.screenshot()
-            detection, ambiguous = self._classify_dispatch_screen(
-                screenshot,
-                expected_states=expected_states,
+            detection = self.detector.detect(
+                screenshot, read_account=False, candidate_states=candidates,
+                expected_states=expected_states, context_key=self._selected_resource,
+                resource_details=resource_details,
             )
             if detection.state is not ScreenState.UNKNOWN:
-                if expected_states and detection.state in expected_states:
-                    return screenshot, detection, ambiguous
-                if detection.state is ScreenState.MAILBOX:
-                    return screenshot, detection, ambiguous
+                if detection.state in expected_states or detection.state in {ScreenState.CHAT, ScreenState.MAILBOX}:
+                    return screenshot, detection
                 if detection.state is not clicked_state and _scan >= MIN_SCREEN_SCANS:
-                    return screenshot, detection, ambiguous
+                    return screenshot, detection
             self.game.wait(self.game.timing.poll_interval)
         return None
 
@@ -1792,11 +1761,8 @@ class FarmingController:
         *,
         expected_state: ScreenState,
         confidence_threshold: float = 0.68,
-        repeat: int = 1,
         initial_screenshot: Path | None = None,
     ) -> Path:
-        if repeat < 1:
-            raise ValueError("repeat must be at least 1")
         # The detector validates its resource-specific cached position against
         # the current frame before returning it.
         deadline = time.monotonic() + self._budget(_CONTROL_READY_TIMEOUT)
@@ -1819,15 +1785,8 @@ class FarmingController:
             )
             if hit is not None:
                 last_state = expected_state
-                self._log(
-                    f"Clicking {template_path.stem}"
-                    f"{f' {repeat} times' if repeat > 1 else ''} "
-                    f"(match={hit.confidence:.3f})"
-                )
-                for click_index in range(repeat):
-                    self.game.click(hit.bounds, screenshot)
-                    if click_index + 1 < repeat:
-                        self.game.wait(_LEVEL_REPEAT_PAUSE)
+                self._log(f"Clicking {template_path.stem} (match={hit.confidence:.3f})")
+                self.game.click(hit.bounds, screenshot)
                 return screenshot
 
             self._recover_search_mailbox(screenshot)
@@ -1879,49 +1838,16 @@ class FarmingController:
 
         for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot = self.game.screenshot()
-            gather_button = self.detector.locate_template(
-                screenshot,
-                _GATHERING_TEMPLATES / "gather_button.png",
-                confidence_threshold=0.68,
+            last_detection = self.detector.detect(
+                screenshot, read_account=False, context_key=self._selected_resource,
+                candidate_states={ScreenState.RESOURCE_FOUND, ScreenState.RESOURCE_SEARCH, ScreenState.MAILBOX},
+                resource_details={ScreenState.RESOURCE_FOUND},
             )
-            submit_button = (
-                None
-                if gather_button is not None and gather_button.confidence >= 0.80
-                else self.detector.locate_template(
-                    screenshot,
-                    _SEARCH_TEMPLATES / "submit_button.png",
-                    confidence_threshold=0.68,
-                    context_key=self._selected_resource,
-                )
-            )
-            if gather_button is None and submit_button is None:
+            if last_detection.state is ScreenState.MAILBOX:
                 self._recover_search_mailbox(screenshot)
-            if gather_button is not None and (
-                submit_button is None
-                or gather_button.confidence > submit_button.confidence
-            ):
-                detection = self.detector.detect(
-                    screenshot,
-                    read_account=False,
-                    candidate_states={ScreenState.RESOURCE_FOUND},
-                )
-                last_detection = detection
-                if detection.state is ScreenState.RESOURCE_FOUND:
-                    return screenshot, detection
-
-            if submit_button is not None and (
-                gather_button is None
-                or submit_button.confidence >= gather_button.confidence
-            ):
-                # The blue search button can visually resemble the blue gather
-                # button. Compare their match scores so a real gather button
-                # wins when the result panel has opened.
-                last_detection = ScreenDetection(
-                    ScreenState.RESOURCE_SEARCH,
-                    submit_button.confidence,
-                    "search menu remains open",
-                    submit_button.bounds,
-                )
+            if last_detection.state is ScreenState.RESOURCE_FOUND:
+                return screenshot, last_detection
+            if last_detection.state is ScreenState.RESOURCE_SEARCH:
                 if self._map_view_changed(before_search, screenshot):
                     unchanged_frames = 0
                 else:
@@ -1936,7 +1862,7 @@ class FarmingController:
                         ScreenState.NO_RESULT,
                         1.0,
                         "Map view unchanged after search; no resource location found",
-                        submit_button.bounds,
+                        last_detection.bounds,
                     )
             else:
                 unchanged_frames = 0

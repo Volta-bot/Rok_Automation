@@ -226,6 +226,23 @@ class GmailAccountRegistry:
                 # UI registry cannot be written at this instant.
                 continue
 
+    def prune_unfarmed(self, farmed: list[GmailIdentity]) -> int:
+        """Remove unmatched OCR entries after a complete farming rotation."""
+
+        # A UID-only read may account for an OCR row that has only an email.
+        if not farmed or any(email_key(identity.email) is None for identity in farmed):
+            return 0
+        accounts = self.load()
+        kept = [
+            account
+            for account in accounts
+            if not account.verified or any(account.identity.matches(identity) for identity in farmed)
+        ]
+        removed = len(accounts) - len(kept)
+        if removed:
+            self._save(kept)
+        return removed
+
     def remove(self, identity: GmailIdentity) -> bool:
         accounts = self.load()
         kept = [
@@ -652,6 +669,8 @@ class GmailSwitcher:
                     frame,
                 )
                 last_state = state
+                if self.rok_menus._recover_menu_interruption(screenshot, state):
+                    continue
                 if state == "character_list":
                     # The character traversal leaves this modal open when the
                     # final starred character has been checked. Close it before
@@ -1064,6 +1083,9 @@ class GmailSwitcher:
             lilith = self._read_lilith_screen(frame)
             if lilith is None:
                 state, bounds, _ = self.rok_menus._detect_menu_state(screenshot, frame)
+                if state == "mailbox":
+                    self.rok_menus._dismiss_mailbox(screenshot)
+                    continue
                 if state == "map_or_city":
                     break
                 if state == "login_confirmation" and bounds is not None:
@@ -1155,7 +1177,9 @@ class GmailSwitcher:
                 last_state, _, _ = self.rok_menus._detect_menu_state(screenshot, frame)
                 if last_state == "map_or_city":
                     return
-                if last_state in {"settings_menu", "governor_profile"}:
+                if self.rok_menus._recover_menu_interruption(screenshot, last_state):
+                    key, bounds = None, None
+                elif last_state in {"settings_menu", "governor_profile"}:
                     key = last_state
                     bounds = self._find_game_menu_close(frame)
                 else:
@@ -1205,6 +1229,8 @@ class GmailSwitcher:
                     screenshot,
                     frame,
                 )
+            if lilith is None and self.rok_menus._recover_menu_interruption(screenshot, state):
+                continue
             if state != previous_state and state != "unknown":
                 return
             self.game.wait(self.game.timing.poll_interval)

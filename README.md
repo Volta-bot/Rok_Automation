@@ -12,7 +12,7 @@ ROKauto is a Windows desktop automation tool for **Rise of Kingdoms** on **MuMu 
 - **Daily rewards:** Optionally claims available VIP points, the free VIP chest and the campaign chest, handling already-claimed rewards and common dialogs.
 - **City tasks:** The GUI can collect visible ready Food, Wood, Stone and Gold icons after a small zoom out. It can also claim a ready forge output and select Leather, Iron, Wood or Bone for production, whether or not an output was ready. Enabled city tasks run after farming each account, or immediately on the current account when farming is disabled.
 - **Background operation:** Screenshots use MuMu's native renderer when available, checked against an ADB screenshot at startup; capture falls back to ADB if necessary. Taps use MuMu's local ADB connection, so the host mouse is not moved and the emulator can be covered. Captures are normalized to 1280×720, with corresponding coordinate mapping for input. Capture latency is measured to scale timeouts, and ADB input retries after reconnection.
-- **Farming capture and recognition:** Uses the capture, search-result waiting and troop-dispatch flow from checkpoint `39fbf4e`. Every capture writes a canonical PNG and every new army reads a fresh screen. Search levels are read directly with OCR.
+- **Farming capture and recognition:** Uses the capture, search-result waiting and troop-dispatch flow from checkpoint `39fbf4e`. Every capture writes a canonical PNG and every new army reads a fresh screen. Search levels are read from the active resource slider and verified after each adjustment.
 - **Control center:** Start, pause and stop a run, choose the account scope and optional tasks, view logs and resource totals, and run screenshot, screen-detection and stockpile diagnostics. Alliance help/technology and troop training are marked as planned, not implemented.
 
 ## Requirements and setup
@@ -53,7 +53,8 @@ python -m venv .venv-build
 The build initializes OCR to cache the required models (network may be needed
 on the build machine), bundles the application, and checks offline OCR, templates,
 Tk, and worker startup before producing `dist/ROKauto-windows-x64.zip` and its
-SHA-256 file. Generated releases and build environments are ignored by Git.
+SHA-256 file. Publish the ZIP and checksum as GitHub Release assets. Keep
+generated executables, bundled dependencies, and build environments out of Git.
 Validate actual emulator operation on a Windows machine without Python before
 publishing a release. `ROKauto-worker.exe --help` exposes the existing CLI.
 

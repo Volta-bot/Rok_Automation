@@ -15,6 +15,7 @@ import numpy as np
 from rok_automation.game.screen_retry import screen_scan_attempts
 from rok_automation.game.console import safe_print, format_log
 from rok_automation.game.interface import GameInterface
+from rok_automation.game.popups import back_out_of_unknown_menu, close_mailbox
 from rok_automation.vision.account_label import read_text_detections
 from rok_automation.vision.screen import (
     ScreenDetector,
@@ -530,6 +531,9 @@ class AccountSwitcher:
             state, bounds, score = self._detect_menu_state(screenshot, frame)
             last_state = state
 
+            if self._recover_menu_interruption(screenshot, state):
+                continue
+
             if state == "character_list":
                 self.game.wait(0.20)
                 return state
@@ -664,8 +668,10 @@ class AccountSwitcher:
         detection = self.detector.detect(
             screenshot,
             read_account=False,
-            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+            candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.MAILBOX},
         )
+        if detection.state is ScreenState.MAILBOX:
+            return "mailbox", None, detection.confidence
         if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
             portrait_bounds = (
                 round(width * 0.005),
@@ -677,6 +683,18 @@ class AccountSwitcher:
 
         return "unknown", None, 0.0
 
+    def _dismiss_mailbox(self, screenshot: Path) -> None:
+        if not close_mailbox(self.game, self.detector, screenshot, log=self._log):
+            self.game.wait(_ACTION_RETRY_DELAY)
+
+    def _recover_menu_interruption(self, screenshot: Path, state: str) -> bool:
+        if state == "mailbox":
+            self._dismiss_mailbox(screenshot)
+            return True
+        return state == "unknown" and back_out_of_unknown_menu(
+            self.game, self.detector, screenshot, log=self._log,
+        )
+
     def _wait_for_menu_state_change(self, previous_state: str) -> None:
         """Wait briefly until the screen advances past ``previous_state``."""
 
@@ -685,6 +703,8 @@ class AccountSwitcher:
         for _scan in screen_scan_attempts(deadline, clock=time.monotonic):
             screenshot, frame = self._capture()
             state, _bounds, _score = self._detect_menu_state(screenshot, frame)
+            if self._recover_menu_interruption(screenshot, state):
+                continue
             if state != previous_state and state != "unknown":
                 return
             self.game.wait(self.game.timing.poll_interval)
@@ -716,6 +736,10 @@ class AccountSwitcher:
             self.game.wait(_ACTION_RETRY_DELAY)
             screenshot, frame = self._capture()
             state, bounds, _score = self._detect_menu_state(screenshot, frame)
+
+            if state == "mailbox":
+                self._dismiss_mailbox(screenshot)
+                continue
 
             if state == "login_confirmation" and bounds is not None:
                 login_yes = self._find_login_confirmation_yes(frame)
@@ -1357,8 +1381,11 @@ class AccountSwitcher:
             detection = self.detector.detect(
                 screenshot,
                 read_account=False,
-                candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP},
+                candidate_states={ScreenState.CITY, ScreenState.WORLD_MAP, ScreenState.MAILBOX},
             )
+            if detection.state is ScreenState.MAILBOX:
+                self._dismiss_mailbox(screenshot)
+                continue
             if detection.state in {ScreenState.CITY, ScreenState.WORLD_MAP}:
                 self._log(f"RoK {detection.state.value} loaded for {expected_name}")
                 return

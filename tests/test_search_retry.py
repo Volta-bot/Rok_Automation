@@ -6,6 +6,7 @@ import cv2
 
 from rok_automation.automation.controller import FarmingController, FarmingError
 from rok_automation.game.interface import TimingConfig
+from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
 from rok_automation.vision.screen import (
     VIEW_TOGGLE_TEMPLATES, ScreenDetection, ScreenDetector, ScreenState, TemplateHit,
     cache_captured_frame, load_color_frame,
@@ -13,6 +14,42 @@ from rok_automation.vision.screen import (
 
 
 class SearchRetryTests(unittest.TestCase):
+    def test_barbarian_panel_opens_search_and_switches_to_gold(self):
+        screenshot = Path(__file__).parent / "fixtures" / "barbarian_search.png"
+        game = MagicMock(timing=TimingConfig())
+        game.screenshot.return_value = screenshot
+        detector = ScreenDetector()
+        controller = FarmingController(game, detector=detector, log=lambda _: None)
+        controller.context.preferred_resource = Resource.GOLD
+
+        _, opened = controller._wait_for_dispatch_change(
+            ScreenState.WORLD_MAP, expected_states=(ScreenState.RESOURCE_SEARCH,),
+        )
+        self.assertIs(opened.state, ScreenState.RESOURCE_SEARCH)
+        self.assertIn("active tab: barbarian", opened.evidence)
+        self.assertIsNone(opened.preferred_resource)
+        self.assertIsNone(opened.search_slider)
+        game.screenshot.assert_called_once()
+
+        gold = ScreenDetection(
+            ScreenState.RESOURCE_SEARCH, .95, "gold panel", (946, 455, 153, 72),
+            resource_level=8, preferred_resource=Resource.GOLD,
+        )
+        result = ScreenDetection(
+            ScreenState.RESOURCE_FOUND, .95, "gather", resource_coordinates=(100, 200),
+        )
+        with patch.object(controller, "_set_search_level", return_value=(screenshot, gold)) as adjust, \
+             patch.object(controller, "_wait_for_search_result", return_value=(screenshot, result)), \
+             patch.object(controller, "_dispatch_army", return_value=True), \
+             patch.object(controller, "_remember_farmed_node"):
+            self.assertTrue(controller._farm_one_army(1, dict.fromkeys(Resource, max(RESOURCE_LEVELS)), set()))
+
+        adjust.assert_called_once_with(8, initial_screenshot=None)
+        self.assertEqual(game.click.call_count, 2)
+        x, y, width, height = game.click.call_args_list[0].args[0]
+        self.assertTrue(970 < x + width / 2 < 1075 and 585 < y + height / 2 < 690)
+        self.assertEqual(game.click.call_args_list[1].args, (gold.bounds, screenshot))
+
     def run_wait(self, *, capture_latency=0.021, map_changed=True, result_at=None, menu_visible=True):
         game, detector = MagicMock(), MagicMock()
         game.timing = TimingConfig(capture_latency=capture_latency)
@@ -22,12 +59,13 @@ class SearchRetryTests(unittest.TestCase):
             return 'frame'
         game.screenshot.side_effect = capture
         game.wait.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-        def locate(frame, path, **kwargs):
-            if path.name == 'gather_button.png':
-                return TemplateHit(0.95, (1, 2, 30, 20)) if result_at is not None and clock[0] >= result_at else None
-            return TemplateHit(0.9, (1, 2, 30, 20)) if menu_visible else None
-        detector.locate_template.side_effect = locate
-        detector.detect.return_value = ScreenDetection(ScreenState.RESOURCE_FOUND, 0.95, 'found')
+        def detect(frame, **kwargs):
+            if result_at is not None and clock[0] >= result_at:
+                return ScreenDetection(ScreenState.RESOURCE_FOUND, 0.95, 'found')
+            if menu_visible:
+                return ScreenDetection(ScreenState.RESOURCE_SEARCH, 0.9, 'search', (1, 2, 30, 20))
+            return ScreenDetection(ScreenState.UNKNOWN, 0.0, 'loading')
+        detector.detect.side_effect = detect
         controller = FarmingController(game, detector=detector, log=lambda _: None)
         with patch('rok_automation.automation.controller.time.monotonic', side_effect=lambda: clock[0]), \
              patch.object(controller, '_map_view_changed', return_value=map_changed):
@@ -76,8 +114,10 @@ class SearchRetryTests(unittest.TestCase):
         for score in (0.615, 0.91):
             with self.subTest(score=score):
                 game, detector = MagicMock(timing=TimingConfig()), MagicMock()
-                detector.locate_template.return_value = TemplateHit(score, (30, 520, 45, 45))
-                detector.detect.return_value = city
+                detector.detect.return_value = (
+                    ScreenDetection(ScreenState.WORLD_MAP, score, "weak search", (30, 520, 45, 45))
+                    if score < 0.78 else city
+                )
                 controller = FarmingController(game, detector=detector, log=lambda _: None)
                 with patch.object(controller, "_recover_search_mailbox"), \
                      patch("rok_automation.game.popups.close_extended_view", return_value=False):
@@ -139,7 +179,7 @@ class SearchRetryTests(unittest.TestCase):
                 detector.locate_template.side_effect = hits
                 controller = FarmingController(game, detector=detector, log=lambda _: None)
                 with patch.object(controller, "_read_screen", return_value=(shot, city)), \
-                     patch.object(controller, "_wait_for_dispatch_change", return_value=(landed, world, False)):
+                     patch.object(controller, "_wait_for_dispatch_change", return_value=(landed, world)):
                     self.assertEqual(controller._open_world_map_directly(), (landed, world))
                 game.click.assert_called_once_with(expected.bounds, shot)
                 expected_templates = VIEW_TOGGLE_TEMPLATES[:detector.locate_template.call_count]

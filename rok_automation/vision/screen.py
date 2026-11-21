@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import AbstractSet, Any
 
 import cv2
 import numpy as np
 from rok_automation.performance import timed
-from rok_automation.logic.resource_selector import RESOURCE_LEVELS, Resource
+from rok_automation.logic.resource_selector import MAX_RESOURCE_LEVEL, RESOURCE_LEVELS, Resource
 from rok_automation.vision.account_label import (
     read_account_label,
     read_army_count,
@@ -29,6 +29,8 @@ class ScreenState(str, Enum):
     CITY = "city"
     WORLD_MAP = "world_map"
     VIP = "vip"
+    VIP_METAL_CHEST_REWARD = "vip_metal_chest_reward"
+    VIP_WOODEN_CHEST_REWARD = "vip_wooden_chest_reward"
     CHIEN_DICH = "chien_dich"
     CHINH_PHAT = "chinh_phat"
     RESOURCE_SEARCH = "resource_search"
@@ -36,6 +38,42 @@ class ScreenState(str, Enum):
     NO_RESULT = "no_result"
     NEW_TROOPS_PROMPT = "new_troops_prompt"
     TROOP_COMPOSITION = "troop_composition"
+
+
+_REWARD_MENUS = frozenset({ScreenState.VIP, ScreenState.CHIEN_DICH, ScreenState.CHINH_PHAT})
+_DISPATCH_BUTTONS = (
+    ScreenState.RESOURCE_FOUND,
+    ScreenState.NEW_TROOPS_PROMPT,
+    ScreenState.TROOP_COMPOSITION,
+    ScreenState.RESOURCE_SEARCH,
+)
+_HUD_STATES = (ScreenState.MAILBOX, ScreenState.CITY, ScreenState.WORLD_MAP)
+VIP_REWARD_POPUPS = frozenset({ScreenState.VIP_METAL_CHEST_REWARD, ScreenState.VIP_WOODEN_CHEST_REWARD})
+_VIP_REWARD_GUARDED_STATES = VIP_REWARD_POPUPS | {ScreenState.VIP, ScreenState.CITY}
+FARMING_SCREEN_STATES = frozenset((
+    *_DISPATCH_BUTTONS, *_HUD_STATES, ScreenState.CHAT,
+)) | VIP_REWARD_POPUPS
+_SCREEN_STATES = FARMING_SCREEN_STATES | _REWARD_MENUS
+_RESOURCE_DETAIL_STATES = frozenset({ScreenState.RESOURCE_SEARCH, ScreenState.RESOURCE_FOUND})
+_BUTTON_LABELS = {
+    ScreenState.RESOURCE_FOUND: ("thuthap", "thuth"),
+    ScreenState.NEW_TROOPS_PROMPT: ("quanmoi", "quanmi", "quanm"),
+    ScreenState.TROOP_COMPOSITION: ("hanhquan", "hanhq"),
+    ScreenState.RESOURCE_SEARCH: ("timkiem", "timk"),
+}
+_DISPATCH_CONFIDENCE = 0.78
+_STRONG_BUTTON_CONFIDENCE = 0.85
+_DISPATCH_AMBIGUITY_MARGIN = 0.12
+_SEARCH_TAB_GEOMETRY = {
+    # Tab center and submit template scale at the canonical 1280px width.
+    # The Barbarian panel has a wider footer than the resource panels.
+    "barbarian": (0.21, 0.85),
+    Resource.FOOD: (0.35, 0.65),
+    Resource.WOOD: (0.50, 0.65),
+    Resource.STONE: (0.65, 0.65),
+    Resource.GOLD: (0.80, 0.65),
+}
+_LOWEST_SLIDER_LEVEL = 1
 
 
 @dataclass(frozen=True)
@@ -52,12 +90,20 @@ class ScreenDetection:
     green_route_evidence: str | None = None
     armies_out: int | None = None
     resource_coordinates: tuple[int, int] | None = None
+    search_slider: SearchSlider | None = None
 
 
 @dataclass(frozen=True)
 class TemplateHit:
     confidence: float
     bounds: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class SearchSlider:
+    level: int
+    minus: TemplateHit
+    plus: TemplateHit
 
 
 @dataclass(frozen=True)
@@ -69,7 +115,15 @@ class _Template:
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _NAVIGATION = _PROJECT_ROOT / "templates/navigation"
+_SEARCH = _PROJECT_ROOT / "templates/search"
 _CHAT_CLOSE_TEMPLATE = _NAVIGATION / "chat_close_chevron.png"
+_ALLIANCE_GATHER_TEMPLATE = _PROJECT_ROOT / "templates/gathering/gather_button_alliance.png"
+_CAMPAIGN_CARD_TEMPLATE = _PROJECT_ROOT / "templates/daily_reward/chinh_phat_card.png"
+_VIP_REWARD_TEMPLATES = _PROJECT_ROOT / "templates/daily_reward"
+_VIP_REWARD_BANNERS = (
+    (ScreenState.VIP_METAL_CHEST_REWARD, "vip_metal_reward", "Xin chúc mừng", .15, .25),
+    (ScreenState.VIP_WOODEN_CHEST_REWARD, "vip_wooden_reward", "Thưởng điểm hàng ngày", .19, .31),
+)
 WORLD_SEARCH_MIN_CONFIDENCE = 0.78
 VIEW_TOGGLE_TEMPLATES = (_NAVIGATION / "world_city_button.png", _NAVIGATION / "city_map_button.png")
 VIEW_TOGGLE_MIN_CONFIDENCE = 0.78
@@ -110,6 +164,7 @@ _TEMPLATES = (
         _PROJECT_ROOT / "templates/gathering/march_button.png",
     ),
 )
+_TEMPLATE_BY_STATE = {template.state: template for template in _TEMPLATES}
 _TEMPLATE_CACHE: dict[Path, Any] = {}
 # (frame size, template identity) -> scale step (percent) of a confident match.
 _SCALE_CACHE: dict[tuple[int, ...], int] = {}
@@ -148,12 +203,15 @@ _TEMPLATE_ROIS: dict[str, tuple[float, float, float, float]] = {
     "level_minus.png": (0.12, 0.18, 0.98, 0.72),
     "settings_button.png": (0.65, 0.60, 1.0, 1.0),
     "character_menu_button.png": (0.10, 0.18, 0.90, 0.86),
-    "vip_shield.png": (0.00, 0.00, 0.25, 0.18),
+    "vip_shield.png": (0.071, 0.043, 0.125, 0.125),
     "wooden_chest.png": (0.80, 0.05, 0.98, 0.25),
     "green_nhan.png": (0.70, 0.40, 0.95, 0.60),
     "vip_close_x.png": (0.78, 0.00, 0.96, 0.22),
     "menu_dots.png": (0.88, 0.85, 1.00, 1.00),
+    "menu_dots_glyph.png": (0.92, 0.89, 0.997, 0.985),
     "chien_dich.png": (0.50, 0.82, 0.65, 1.00),
+    "chien_dich_swords.png": (0.53, 0.89, 0.60, 0.981),
+    "menu_shield.png": (0.68, 0.88, 0.78, 1.00),
     "chinh_phat_card.png": (0.02, 0.10, 0.30, 0.55),
     "golden_chest.png": (0.02, 0.20, 0.18, 0.45),
     "chinh_phat_chest_collected.png": (0.02, 0.20, 0.18, 0.45),
@@ -294,10 +352,6 @@ class ScreenDetector:
         if not 0.0 < confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
         self.confidence_threshold = confidence_threshold
-        self._level_readings: dict[Any, tuple[Any, int]] = {}
-
-    def clear_reading_cache(self) -> None:
-        self._level_readings.clear()
 
     @timed("detection")
     def detect(
@@ -306,15 +360,15 @@ class ScreenDetector:
         *,
         expected_resource_level: int | None = None,
         read_account: bool = True,
-        candidate_states: set[ScreenState] | None = None,
+        candidate_states: AbstractSet[ScreenState] | None = None,
+        expected_states: tuple[ScreenState, ...] = (),
         context_key: Any = None,
-        include_menus: bool = False,
+        resource_details: AbstractSet[ScreenState] = _RESOURCE_DETAIL_STATES,
     ) -> ScreenDetection:
-        """Classify an image and attach the active level to a found result.
+        """Classify one screenshot against the requested screens.
 
-        The farming controller supplies ``expected_resource_level`` from its
-        runtime context. The search interface is set to that level before the
-        search, so this avoids OCR of the result label.
+        Expected states are checked first for strong matches during transitions.
+        Resource details and account reads can be limited for frequent polls.
         """
 
         if (
@@ -330,75 +384,29 @@ class ScreenDetector:
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {image_path}")
 
-        if candidate_states is None or ScreenState.CHAT in candidate_states:
-            chat = self._locate_in_frame(
-                frame, _CHAT_CLOSE_TEMPLATE,
-                confidence_threshold=max(0.88, self.confidence_threshold),
-                minimum_scale=0.55, maximum_scale=1.65,
-            )
-            if chat is not None:
-                return ScreenDetection(
-                    ScreenState.CHAT, chat.confidence, "chat panel close chevron", chat.bounds,
-                )
-
-        if include_menus:
-            menu = self._detect_reward_menu(image_path)
-            if menu is not None:
-                return menu
-
-        best = ScreenDetection(ScreenState.UNKNOWN, 0.0, "no UI template matched")
-        templates = (
-            _TEMPLATES
-            if candidate_states is None
-            else tuple(
-                template for template in _TEMPLATES
-                if template.state in candidate_states
-            )
+        best = self._classify_screen(
+            image_path, frame,
+            _SCREEN_STATES if candidate_states is None else candidate_states,
+            expected_states, context_key,
         )
-        for template in templates:
-            hit = self._locate_in_frame(
-                frame,
-                template.path,
-                confidence_threshold=0.0,
-                context_key=context_key,
-                maximum_scale=1.35,
-            )
-            if hit is not None and hit.confidence > best.confidence:
-                best = ScreenDetection(
-                    template.state,
-                    hit.confidence,
-                    template.name,
-                    hit.bounds,
-                )
-                if hit.confidence >= 0.90 and len(templates) == 1:
-                    break
-
-        if best.confidence < self.confidence_threshold:
-            return ScreenDetection(
-                ScreenState.UNKNOWN,
-                best.confidence,
-                f"best candidate was {best.evidence}",
-                best.bounds,
-            )
         if best.state is ScreenState.RESOURCE_SEARCH and best.bounds is not None:
-            level = self._read_search_level(frame, best.bounds)
+            slider = best.search_slider if best.state in resource_details else None
             active_res = self.identify_active_search_resource(best.bounds, frame.shape[1])
             evidence = best.evidence
             if isinstance(active_res, Resource):
                 evidence = f"{evidence}; active resource: {active_res.value}"
             elif active_res:
                 evidence = f"{evidence}; active tab: {active_res}"
-            if level is not None:
-                evidence = f"{evidence}; OCR read Cấp: {level}"
-            return ScreenDetection(
-                best.state,
-                best.confidence,
-                evidence,
-                best.bounds,
-                level,
+            if slider is not None:
+                evidence = f"{evidence}; slider at Cấp: {slider.level}"
+            return replace(
+                best,
+                evidence=evidence,
+                resource_level=slider.level if slider is not None else None,
                 preferred_resource=active_res if isinstance(active_res, Resource) else None,
+                search_slider=slider,
             )
-        if best.state is ScreenState.RESOURCE_FOUND:
+        if best.state is ScreenState.RESOURCE_FOUND and best.state in resource_details:
             color_frame = load_color_frame(image_path)
             if color_frame is None:
                 raise FileNotFoundError(f"Could not read screenshot: {image_path}")
@@ -452,8 +460,255 @@ class ScreenDetector:
             )
         return best
 
-    def _detect_reward_menu(self, image_path: Path) -> ScreenDetection | None:
-        """Read menu titles for diagnostics without changing farming states."""
+    def _classify_screen(
+        self,
+        image_path: Path,
+        frame: Any,
+        candidates: AbstractSet[ScreenState],
+        expected_states: tuple[ScreenState, ...],
+        context_key: Any,
+    ) -> ScreenDetection:
+        if candidates & _VIP_REWARD_GUARDED_STATES:
+            popup = self._match_vip_reward(image_path, frame)
+            if popup is not None:
+                if popup.state in candidates:
+                    return popup
+                return ScreenDetection(ScreenState.UNKNOWN, 0.0, popup.evidence)
+
+        if candidates & _REWARD_MENUS:
+            menu = self._match_reward_menu(image_path, frame, candidates)
+            if menu is not None:
+                return menu
+
+        checked: dict[ScreenState, ScreenDetection | None] = {}
+
+        def match(state: ScreenState) -> ScreenDetection | None:
+            if state not in checked:
+                checked[state] = (
+                    self._match_search_panel(image_path, frame, context_key)
+                    if state is ScreenState.RESOURCE_SEARCH
+                    else self._match_screen_button(frame, state, context_key)
+                )
+            return checked[state]
+
+        for state in expected_states:
+            if state in candidates and state in _DISPATCH_BUTTONS:
+                hit = match(state)
+                if hit is not None and hit.confidence >= _STRONG_BUTTON_CONFIDENCE:
+                    return hit
+
+        if ScreenState.CHAT in candidates:
+            chat = self._locate_in_frame(
+                frame, _CHAT_CLOSE_TEMPLATE,
+                confidence_threshold=max(0.88, self.confidence_threshold),
+                minimum_scale=0.55, maximum_scale=1.65,
+            )
+            if chat is not None:
+                return ScreenDetection(
+                    ScreenState.CHAT, chat.confidence, "chat panel close chevron", chat.bounds,
+                )
+
+        # An open panel can leave the City or World Map HUD visible behind it.
+        buttons = []
+        for state in _DISPATCH_BUTTONS:
+            if state not in candidates:
+                continue
+            hit = match(state)
+            if hit is not None:
+                if hit.confidence >= _STRONG_BUTTON_CONFIDENCE:
+                    return hit
+                buttons.append(hit)
+        if buttons:
+            buttons.sort(key=lambda hit: hit.confidence, reverse=True)
+            first = buttons[0]
+            if len(buttons) == 1 or first.confidence - buttons[1].confidence >= _DISPATCH_AMBIGUITY_MARGIN:
+                return first
+            state = self._read_button_label(image_path, first.bounds, candidates)
+            if state is ScreenState.RESOURCE_SEARCH:
+                search = match(state)
+                if search is not None:
+                    return search
+            elif state is not None:
+                return ScreenDetection(state, first.confidence, "dispatch button label OCR", first.bounds)
+            return ScreenDetection(ScreenState.UNKNOWN, 0.0, "ambiguous button label could not be verified")
+
+        hud = (match(state) for state in _HUD_STATES if state in candidates)
+        return max(
+            (hit for hit in hud if hit is not None),
+            key=lambda hit: hit.confidence,
+            default=ScreenDetection(ScreenState.UNKNOWN, 0.0, "no screen matched"),
+        )
+
+    def _match_screen_button(
+        self, frame: Any, state: ScreenState, context_key: Any,
+    ) -> ScreenDetection | None:
+        template = _TEMPLATE_BY_STATE[state]
+        confidence = self.confidence_threshold
+        if state in _DISPATCH_BUTTONS:
+            confidence = max(confidence, _DISPATCH_CONFIDENCE)
+        hit = self._locate_in_frame(
+            frame, template.path, confidence_threshold=confidence, context_key=context_key,
+        )
+        if hit is None and state is ScreenState.RESOURCE_FOUND:
+            hit = self._locate_in_frame(
+                frame, _ALLIANCE_GATHER_TEMPLATE, confidence_threshold=confidence,
+            )
+        if hit is not None:
+            return ScreenDetection(state, hit.confidence, template.name, hit.bounds)
+        return None
+
+    def _match_search_panel(
+        self, image_path: Path, frame: Any, context_key: Any,
+    ) -> ScreenDetection | None:
+        """Locate Search and both level controls in one resource panel."""
+        height, width = frame.shape[:2]
+        template = _load_gray_template(_SEARCH / "submit_button.png")
+        # The popup is anchored over the selected bottom-row card.
+        tabs = sorted(_SEARCH_TAB_GEOMETRY, key=lambda tab: tab != context_key)
+        for tab in tabs:
+            center, canonical_scale = _SEARCH_TAB_GEOMETRY[tab]
+            center *= width
+            submit = self._match_in_area(
+                frame, template,
+                (round(center - width * .10), round(height * .59),
+                 round(center + width * .10), round(height * .77)),
+                width * canonical_scale / 1280, max(self.confidence_threshold, .78),
+            )
+            if submit is None or not self._verify_blue_button_text(frame, template, submit.bounds):
+                continue
+            x, y, w, h = submit.bounds
+            controls = []
+            for name, offset in (("level_minus.png", -.92), ("level_plus.png", .92)):
+                center_x = x + w / 2 + offset * w
+                center_y = y - .50 * h
+                button = self._match_in_area(
+                    frame, _load_gray_template(_SEARCH / name),
+                    (round(center_x - .23 * w), round(center_y - .33 * h),
+                     round(center_x + .23 * w), round(center_y + .33 * h)),
+                    w / template.shape[1], .82,
+                )
+                if button is None:
+                    break
+                controls.append(button)
+            if len(controls) != 2:
+                continue
+
+            minus, plus = controls
+            color = load_color_frame(image_path) if tab != "barbarian" else None
+            slider = self._read_slider(color, minus, plus) if color is not None else None
+            return ScreenDetection(
+                ScreenState.RESOURCE_SEARCH, submit.confidence, "resource search panel",
+                submit.bounds, search_slider=slider,
+            )
+        return None
+
+    @classmethod
+    def _match_in_area(
+        cls, frame: Any, template: Any, area: tuple[int, int, int, int],
+        scale: float, minimum_confidence: float,
+    ) -> TemplateHit | None:
+        left, top, right, bottom = area
+        left, top = max(0, left), max(0, top)
+        score, (x, y, matched_scale) = cls._best_scale_match(
+            frame[top:bottom, left:right], template,
+            minimum_scale=scale * .87, maximum_scale=scale * 1.15,
+        )
+        if score < minimum_confidence:
+            return None
+        height, width = cls._scaled_size(template, matched_scale)
+        return TemplateHit(score, (left + x, top + y, width, height))
+
+    @staticmethod
+    def _read_slider(frame: Any, minus: TemplateHit, plus: TemplateHit) -> SearchSlider | None:
+        mx, my, mw, mh = minus.bounds
+        px, py, pw, ph = plus.bounds
+        if abs((my + mh / 2) - (py + ph / 2)) > mh * .18 or px <= mx + mw:
+            return None
+        left = mx + mw
+        top = max(0, min(my, py) - round(mh * .12))
+        bottom = max(my + mh, py + ph) + round(mh * .12)
+        track = frame[top:bottom, left:px]
+        if not track.size:
+            return None
+        hsv = cv2.cvtColor(track, cv2.COLOR_BGR2HSV)
+        blue = cv2.inRange(hsv, (80, 38, 135), (114, 255, 255))
+        _, _, stats, centers = cv2.connectedComponentsWithStats(blue)
+        handles = [
+            cx + left
+            for (_, _, width, height, area), (cx, cy) in zip(stats[1:], centers[1:])
+            if mw * .25 <= width <= mw * .95
+            and mh * .65 <= height <= mh * 1.25
+            and area >= width * height * .5
+            and abs(cy + top - (my + mh / 2)) <= mh * .18
+        ]
+        if len(handles) != 1:
+            return None
+        # The first and last detents are slightly inboard of the +/- buttons.
+        minus_center = mx + mw / 2
+        span = px + pw / 2 - minus_center
+        position = (handles[0] - minus_center) / span
+        last_detent = MAX_RESOURCE_LEVEL - _LOWEST_SLIDER_LEVEL
+        detent = (position - .112) / .776 * last_detent
+        index = round(detent)
+        if not 0 <= index <= last_detent or abs(detent - index) > .25:
+            return None
+        return SearchSlider(_LOWEST_SLIDER_LEVEL + index, minus, plus)
+
+    @staticmethod
+    def _read_button_label(
+        image_path: Path,
+        bounds: tuple[int, int, int, int] | None,
+        candidates: AbstractSet[ScreenState],
+    ) -> ScreenState | None:
+        if bounds is None:
+            return None
+        frame = load_color_frame(image_path)
+        if frame is None:
+            return None
+        text = unicodedata.normalize(
+            "NFD", " ".join(read_text_region(frame, bounds, upscale=1.5)).casefold(),
+        )
+        folded = "".join(char for char in text if char.isalnum()).replace("đ", "d")
+        for state, keywords in _BUTTON_LABELS.items():
+            if state in candidates and any(keyword in folded for keyword in keywords):
+                return state
+        return None
+
+    def _match_vip_reward(self, image_path: Path, gray_frame: Any) -> ScreenDetection | None:
+        frame = load_color_frame(image_path)
+        if frame is None:
+            return None
+        h, w = gray_frame.shape[:2]
+        sample = frame[round(h * .17):round(h * .30):4, round(w * .40):round(w * .60):4]
+        if not sample.size:
+            return None
+        gold = cv2.inRange(sample, (0, 120, 210), (155, 220, 255))
+        if cv2.countNonZero(gold) < gold.size * .35:
+            return None
+
+        scale = min(w / 1280, h / 720)
+        for state, template, title, top, bottom in _VIP_REWARD_BANNERS:
+            banner = self._match_in_area(
+                gray_frame, _load_gray_template(_VIP_REWARD_TEMPLATES / f"{template}_banner.png"),
+                (round(w * .34), round(h * top), round(w * .66), round(h * bottom)), scale, .85,
+            )
+            if banner is None:
+                continue
+            # Other rewards use gold banners too. Verify the dimmed VIP title.
+            header = self._match_in_area(
+                gray_frame, _load_gray_template(_VIP_REWARD_TEMPLATES / f"{template}_header.png"),
+                (round(w * .46), round(h * .08), round(w * .54), round(h * .15)), scale, .87,
+            )
+            if header is not None:
+                return ScreenDetection(
+                    state, min(banner.confidence, header.confidence),
+                    f"{title} banner over the VIP menu", banner.bounds,
+                )
+        return None
+
+    def _match_reward_menu(
+        self, image_path: Path, gray_frame: Any, candidates: AbstractSet[ScreenState],
+    ) -> ScreenDetection | None:
         frame = load_color_frame(image_path)
         if frame is None:
             raise FileNotFoundError(f"Could not read screenshot: {image_path}")
@@ -474,10 +729,14 @@ class ScreenDetector:
             normalized = "".join(c for c in normalized if c.isalnum()).replace("đ", "d")
             if normalized in titles and confidence >= 0.70:
                 state, label = titles[normalized]
-                return ScreenDetection(state, confidence, f"{label} menu title OCR", bounds)
+                if state in candidates:
+                    return ScreenDetection(state, confidence, f"{label} menu title OCR", bounds)
+                return None
         # The Chinh phạt card belongs to the Chiến dịch selection menu.
-        hit = self.locate_template(
-            image_path, _PROJECT_ROOT / "templates/daily_reward/chinh_phat_card.png",
+        if ScreenState.CHIEN_DICH not in candidates:
+            return None
+        hit = self._locate_in_frame(
+            gray_frame, _CAMPAIGN_CARD_TEMPLATE,
             confidence_threshold=0.88,
         )
         if hit is not None:
@@ -757,95 +1016,6 @@ class ScreenDetector:
             return Resource.STONE
         else:
             return Resource.GOLD
-
-    def _cached_search_level(
-        self,
-        frame: Any,
-        bounds: tuple[int, int, int, int],
-        context_key: Any,
-    ) -> int | None:
-        # Cover both OCR crops, including the label's low-level position.
-        # Exact pixel equality avoids trusting a stale level after a missed tap.
-        x, y, width, height = bounds
-        fallback_left = max(0, round(x - width * 0.9))
-        fallback_top = max(0, round(y - height * 1.7))
-        # Use the same rounded origin + size as read_text_region's fallback,
-        # including its last row when rounding the two terms differs by a pixel.
-        patch = frame[
-            fallback_top:max(round(y - height * 0.55), fallback_top + round(height * 1.25)),
-            fallback_left:max(round(x + width * 2.0), fallback_left + round(width * 2.5)),
-        ]
-        key = (frame.shape, bounds, context_key)
-        cached = self._level_readings.get(key)
-        if patch.size and cached is not None and np.array_equal(patch, cached[0]):
-            return cached[1]
-        level = self._read_search_level(frame, bounds)
-        if level is not None and patch.size:
-            if len(self._level_readings) >= 8:
-                self._level_readings.clear()
-            self._level_readings[key] = (patch.copy(), level)
-        else:
-            self._level_readings.pop(key, None)
-        return level
-
-    @staticmethod
-    def _read_search_level(
-        frame: Any,
-        submit_bounds: tuple[int, int, int, int],
-    ) -> int | None:
-        """OCR the visible ``Cấp: N`` label beside the resource slider."""
-
-        x, y, width, height = submit_bounds
-        # The label is right-aligned just above the slider, about one
-        # submit-button height above the button itself. Crop it tightly so
-        # OCR cannot borrow a number from the slider or another UI element.
-        label_left = round(x + width * 0.25)
-        label_right = round(x + width * 2.0)
-        label_top = round(y - height * 1.30)
-        label_bottom = round(y - height * 0.55)
-        lines = read_text_region(
-            frame,
-            (
-                label_left,
-                label_top,
-                label_right - label_left,
-                label_bottom - label_top,
-            ),
-            upscale=3.0,
-        )
-        match = ScreenDetector._parse_level_text(lines)
-        if match is None:
-            # The level label follows the slider handle. At low levels it
-            # moves left of the search button, outside the first crop.
-            # Still require the Cấp label adjacent to the digit so unrelated
-            # numbers in the popup cannot be mistaken for the level.
-            lines = read_text_region(
-                frame,
-                (
-                    max(0, round(x - width * 0.9)),
-                    max(0, round(y - height * 1.7)),
-                    round(width * 2.5),
-                    round(height * 1.25),
-                ),
-                upscale=3.0,
-            )
-            match = ScreenDetector._parse_level_text(lines)
-        if match is None:
-            return None
-        return int(match.group(1))
-
-    @staticmethod
-    def _parse_level_text(lines: tuple[str, ...]) -> re.Match[str] | None:
-        decomposed = unicodedata.normalize("NFD", " ".join(lines).casefold())
-        folded = "".join(
-            character
-            for character in decomposed
-            if not unicodedata.category(character).startswith("M")
-        ).replace("đ", "d")
-        # RapidOCR occasionally drops or misreads the small accented "ấ" in
-        # "Cấp: 8" as "Cp: 8" or "CEp.8"; accept those variants while still
-        # requiring the C/p prefix next to the level digit.
-        return re.search(r"\bc(?:[aei])?p\s*[:：.]?\s*([1-8])\b", folded)
 
     @staticmethod
     def _scaled_size(template: Any, scale: float) -> tuple[int, int]:

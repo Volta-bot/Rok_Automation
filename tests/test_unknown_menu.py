@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,13 +7,77 @@ from unittest.mock import MagicMock, patch
 import cv2
 import numpy as np
 
+from rok_automation.__main__ import main
+from rok_automation.automation.city_tasks import CityTaskRunner
 from rok_automation.automation.controller import FarmingController
+from rok_automation.automation.gmail_switcher import GmailSwitcher
 from rok_automation.game.interface import TimingConfig
 from rok_automation.game.popups import back_out_of_unknown_menu
 from rok_automation.vision.screen import ScreenDetection, ScreenDetector, ScreenState
 
 
 class UnknownMenuTests(unittest.TestCase):
+    def test_diagnostic_reports_inset_x_without_clicking(self):
+        fixtures = Path(__file__).parent / "fixtures"
+        panel = fixtures / "unknown_menu_inset_close.png"
+        city = fixtures / "forge_bone_stacked.png"
+        back_corner = cv2.imread(str(fixtures / "unknown_menu_back.png"))
+        frame = np.full((720, 1280, 3), 120, np.uint8)
+        height, width = back_corner.shape[:2]
+        frame[:height, :width] = back_corner
+        with tempfile.TemporaryDirectory() as directory:
+            back_only = Path(directory) / "back_only.png"
+            cv2.imwrite(str(back_only), frame)
+            for screenshot, expected_state, expected_close in (
+                (panel, "unknown", True), (back_only, "unknown", False), (city, "city", False),
+            ):
+                with self.subTest(screenshot=screenshot.name):
+                    game = MagicMock(screenshot_path=screenshot)
+                    game.screenshot.return_value = screenshot
+                    with patch.object(sys, "argv", ["rok_automation", "--detect-screen"]), \
+                         patch("rok_automation.__main__._build_game", return_value=game), \
+                         patch("rok_automation.__main__.save_frame", return_value=screenshot), \
+                         patch("rok_automation.__main__.print") as output:
+                        self.assertEqual(main(), 0)
+                    lines = [call.args[0] for call in output.call_args_list]
+                    self.assertTrue(any(line.startswith(f"Screen: {expected_state} ") for line in lines))
+                    reported = [line for line in lines if line.startswith("Close X detected")]
+                    if expected_close:
+                        self.assertEqual(len(reported), 1)
+                        self.assertRegex(reported[0], r"Close X detected at \(10\d\d, \d+\) \(confidence=0\.\d{3}\)")
+                    else:
+                        self.assertFalse(reported)
+                    game.click.assert_not_called()
+
+    def test_inset_gold_mine_close_recovers_and_rescans_city(self):
+        fixtures = Path(__file__).parent / "fixtures"
+        panel = fixtures / "unknown_menu_inset_close.png"
+        city = fixtures / "forge_bone_stacked.png"
+
+        for flow in ("farming", "city tasks", "Gmail"):
+            with self.subTest(flow=flow):
+                game = MagicMock(timing=TimingConfig())
+                game.screenshot.side_effect = [panel, city]
+                detector = ScreenDetector()
+                if flow == "farming":
+                    controller = FarmingController(game, detector=detector, log=lambda _: None)
+                    shot, detection = controller._read_screen()
+                    self.assertEqual(shot, city)
+                    self.assertIs(detection.state, ScreenState.CITY)
+                elif flow == "city tasks":
+                    runner = CityTaskRunner(game, detector, log=lambda _: None)
+                    self.assertEqual(runner._capture_without_interruptions(expect_city=True), (city, True))
+                else:
+                    switcher = GmailSwitcher(game, detector, log=lambda _: None)
+                    switcher._wait_for_state_change("governor_profile")
+
+                self.assertEqual(game.screenshot.call_count, 2)
+                game.click.assert_called_once()
+                bounds, screenshot = game.click.call_args.args
+                self.assertEqual(screenshot, panel)
+                x, y, w, h = bounds
+                self.assertTrue(1080 <= x + w // 2 <= 1100 and 76 <= y + h // 2 <= 100)
+
     def test_close_x_variants_in_both_top_corners(self):
         fixtures = Path(__file__).parent / "fixtures"
         with tempfile.TemporaryDirectory() as directory:
@@ -77,9 +142,7 @@ class UnknownMenuTests(unittest.TestCase):
         controller = FarmingController(game, log=lambda _: None)
         unknown = ScreenDetection(ScreenState.UNKNOWN, 0.0, "event menu")
         world = ScreenDetection(ScreenState.WORLD_MAP, 0.95, "search button")
-        with patch.object(controller, "_classify_dispatch_screen", side_effect=[
-            (unknown, False), (world, False),
-        ]) as classify, patch(
+        with patch.object(controller.detector, "detect", side_effect=[unknown, world]) as classify, patch(
             "rok_automation.game.popups.close_scout_manager", return_value=False,
         ), patch(
             "rok_automation.game.popups.back_out_of_unknown_menu", return_value=True,
@@ -97,8 +160,8 @@ class UnknownMenuTests(unittest.TestCase):
                 controller = FarmingController(game, log=lambda _: None)
                 unknown = ScreenDetection(ScreenState.UNKNOWN, 0.0, "menu")
                 world = ScreenDetection(ScreenState.WORLD_MAP, 0.95, "search")
-                with patch.object(controller, "_classify_dispatch_screen", side_effect=
-                    [(unknown, False)] * unknown_count + [(world, False)],
+                with patch.object(controller.detector, "detect", side_effect=
+                    [unknown] * unknown_count + [world],
                 ), patch(
                     "rok_automation.game.popups.close_scout_manager", return_value=False,
                 ), patch(

@@ -8,6 +8,14 @@ __pycache__/
 .eggs/
 build/
 dist/
+/_internal/
+*.exe
+*.dll
+*.pyz
+/ROKauto-windows-*.zip
+/ROKauto-windows-*.zip.sha256
+/build-environment.txt
+/README.txt
 build-portable.log
 test-results.log
 

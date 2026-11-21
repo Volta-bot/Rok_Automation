@@ -6,15 +6,17 @@ from typing import Callable
 from rok_automation.game.interface import GameInterface
 from rok_automation.vision.screen import (
     ScreenDetection, ScreenDetector, ScreenState, TemplateHit, load_gray_frame,
-    VIEW_TOGGLE_MIN_CONFIDENCE, VIEW_TOGGLE_TEMPLATES,
+    VIEW_TOGGLE_MIN_CONFIDENCE, VIEW_TOGGLE_TEMPLATES, VIP_REWARD_POPUPS,
 )
 
 _NAVIGATION = Path(__file__).resolve().parents[2] / "templates" / "navigation"
 _BACK_BUTTON = _NAVIGATION.parent / "daily_reward" / "back_button.png"
+_CENTERED_PANEL_CLOSE = _NAVIGATION.parent / "daily_reward" / "vip_close_x.png"
 _UNKNOWN_MENU_CONTROLS = (
     (_BACK_BUTTON, "Back arrow", 0.82),
     (_NAVIGATION / "unknown_menu_close_gold.png", "X button", 0.88),
     (_NAVIGATION / "unknown_menu_close_light.png", "X button", 0.88),
+    (_CENTERED_PANEL_CLOSE, "X button", 0.90),
 )
 
 
@@ -71,36 +73,55 @@ def close_extended_view(
     return True
 
 
-def back_out_of_unknown_menu(
-    game: GameInterface, detector: ScreenDetector, screenshot: Path,
-    *, log: Callable[[str], None],
-) -> bool:
-    """Tap a matched Back arrow or corner X; never guess coordinates."""
+def locate_unknown_menu_control(
+    detector: ScreenDetector, screenshot: Path, *, close_only: bool = False,
+) -> tuple[str, TemplateHit] | None:
+    """Find a verified Back arrow or X on an unrecognized screen."""
     frame = load_gray_frame(screenshot)
     if frame is None:
-        return False
+        return None
     frame_height, frame_width = frame.shape[:2]
     for template, label, confidence in _UNKNOWN_MENU_CONTROLS:
+        if close_only and template == _BACK_BUTTON:
+            continue
         hit = detector.locate_template(
             screenshot, template, confidence_threshold=confidence,
         )
         if not isinstance(hit, TemplateHit):
             continue
         x, y, width, height = hit.bounds
+        bottom_limit = 0.12
         if template == _BACK_BUTTON:
             in_corner = x + width <= frame_width * 0.10
+        elif template == _CENTERED_PANEL_CLOSE:
+            # City building info and VIP use the same inset header and X.
+            in_corner = (x >= frame_width * 0.78 and x + width <= frame_width * 0.96
+                         and y >= frame_height * 0.06)
+            bottom_limit = 0.18
         else:
             in_corner = (x + width <= frame_width * 0.16
                          or x >= frame_width * 0.80)
         if not (0 <= x and 0 <= y and in_corner
                 and x + width <= frame_width
-                and y + height <= frame_height * 0.12):
+                and y + height <= frame_height * bottom_limit):
             continue
-        log(f"Unrecognized menu: tapping the {label} and detecting again")
-        game.click(hit.bounds, screenshot)
-        game.wait(0.5)
-        return True
-    return False
+        return label, hit
+    return None
+
+
+def back_out_of_unknown_menu(
+    game: GameInterface, detector: ScreenDetector, screenshot: Path,
+    *, log: Callable[[str], None],
+) -> bool:
+    """Tap a matched Back arrow or X, including the inset panel header."""
+    control = locate_unknown_menu_control(detector, screenshot)
+    if control is None:
+        return False
+    label, hit = control
+    log(f"Unrecognized menu: tapping the {label} and detecting again")
+    game.click(hit.bounds, screenshot)
+    game.wait(0.5)
+    return True
 
 
 def close_scout_manager(
@@ -144,6 +165,20 @@ def close_mailbox(
     log("Mailbox detected: tapping the top-right X and detecting again")
     game.click(close.bounds, screenshot)
     game.wait(0.5)
+    return True
+
+
+def close_vip_reward(
+    game: GameInterface, screenshot: Path, detection: ScreenDetection,
+    *, log: Callable[[str], None], settle_delay: float = 0.5,
+) -> bool:
+    """Dismiss a VIP reward by tapping its banner."""
+    if detection.state not in VIP_REWARD_POPUPS or detection.bounds is None:
+        return False
+    chest = "metal" if detection.state is ScreenState.VIP_METAL_CHEST_REWARD else "wooden"
+    log(f"VIP {chest} chest reward detected. Tapping to dismiss...")
+    game.click(detection.bounds, screenshot)
+    game.wait(settle_delay)
     return True
 
 

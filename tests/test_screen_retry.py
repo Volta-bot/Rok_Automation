@@ -28,7 +28,7 @@ class ScreenRetryTests(unittest.TestCase):
              patch("rok_automation.automation.daily_reward.time.monotonic", side_effect=range(100)), \
              patch("rok_automation.game.popups.close_mailbox", return_value=False):
             self.assertTrue(claimer._wait_for_condition(condition, timeout=0))
-        self.assertEqual([call.args[0] for call in condition.call_args_list], frames)
+        self.assertEqual([call.args[1] for call in condition.call_args_list], frames)
         game.click.assert_not_called()
 
     def test_daily_rewards_failure_rescans_without_repeating_clicks(self):
@@ -37,7 +37,7 @@ class ScreenRetryTests(unittest.TestCase):
         with patch.object(claimer, "_capture", return_value=(Path("frame"), np.zeros((1, 1, 3)), (1, 1))) as capture, \
              patch("rok_automation.automation.daily_reward.time.monotonic", side_effect=range(100)), \
              patch("rok_automation.game.popups.close_mailbox", return_value=False):
-            self.assertFalse(claimer._wait_for_condition(lambda _: False, timeout=0))
+            self.assertFalse(claimer._wait_for_condition(lambda *_: False, timeout=0))
         self.assertEqual(capture.call_count, 6)
         game.click.assert_not_called()
 
@@ -54,7 +54,8 @@ class ScreenRetryTests(unittest.TestCase):
     def test_failed_campaign_menu_does_not_proceed_to_next_step(self):
         claimer = DailyRewardClaimer(MagicMock(), detector=MagicMock(), log=lambda _: None)
         with patch.object(claimer, "_capture", return_value=(Path("frame"), np.zeros((720, 1280, 3)), (1280, 720))), \
-             patch.object(claimer, "_locate_chien_dich", return_value=(1, 2, 3, 4)), \
+             patch.object(claimer, "_is_screen", return_value=False), \
+             patch.object(claimer, "_find_chien_dich", return_value=(1, 2, 3, 4)), \
              patch.object(claimer, "_wait_for_condition", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "Chiến dịch menu did not open"):
-                claimer._open_chien_dich_menu((1280, 720))
+                claimer._open_chien_dich_menu()

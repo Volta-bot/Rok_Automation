@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rok_automation.automation.controller import FarmingController
@@ -17,8 +18,8 @@ class TestDispatchCoordinates(unittest.TestCase):
                 controller = FarmingController(game, detector=MagicMock(), log=logs.append)
                 troop = ScreenDetection(ScreenState.TROOP_COMPOSITION, 0.95, "march", (1, 2, 3, 4))
                 world = ScreenDetection(ScreenState.WORLD_MAP, 0.95, "world")
-                with patch.object(controller, "_classify_dispatch_screen", return_value=(troop, False)), \
-                     patch.object(controller, "_wait_for_dispatch_change", return_value=("map.png", world, False)), \
+                with patch.object(controller.detector, "detect", return_value=troop), \
+                     patch.object(controller, "_wait_for_dispatch_change", return_value=(Path("map.png"), world)), \
                      patch.object(controller, "_save_session_summary"):
                     self.assertTrue(controller._dispatch_army(SearchTarget(Resource.GOLD, 7), 3,
                                                               coordinates=coordinates))

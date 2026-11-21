@@ -64,7 +64,7 @@ class ExtendedViewTests(unittest.TestCase):
         game.screenshot.side_effect = [Path("popup"), Path("normal")]
         controller = FarmingController(game, detector=MagicMock(), log=lambda _: None)
         world = ScreenDetection(ScreenState.WORLD_MAP, 0.95, "city button")
-        with patch.object(controller, "_classify_dispatch_screen", return_value=(world, False)), \
+        with patch.object(controller.detector, "detect", return_value=world), \
              patch("rok_automation.game.popups.close_extended_view", side_effect=[True, False]) as close:
             screenshot, detection = controller._read_screen()
         self.assertEqual(screenshot, Path("normal"))

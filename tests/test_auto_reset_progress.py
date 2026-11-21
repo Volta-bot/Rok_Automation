@@ -6,27 +6,37 @@ from unittest.mock import MagicMock, patch
 
 from rok_automation.automation.context import FarmContext
 from rok_automation.automation.controller import FarmingController
-from rok_automation.automation.gmail_switcher import GmailIdentity, GmailRotation, GmailSwitchResult
+from rok_automation.automation.gmail_switcher import (
+    GmailAccountRegistry, GmailIdentity, GmailRotation, GmailSwitchResult,
+)
 
 
 class AutoResetProgressTests(unittest.TestCase):
-    def test_only_a_successful_full_rotation_resets_saved_progress(self):
-        for outcome in ('complete', 'error', 'stop'):
+    def test_only_a_successful_full_rotation_cleans_accounts_and_resets_progress(self):
+        for outcome in ('complete', 'error', 'stop', 'limited'):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 path = root / 'progress.json'
-                first = GmailIdentity(email='first@example.com')
-                current = GmailIdentity(email='current@example.com')
+                first = GmailIdentity(email='first@gmail.com')
+                current = GmailIdentity(email='current@gmail.com')
                 rotation = GmailRotation(path=path)
                 rotation.mark_farmed(first)
                 rotation.set_character_progress(current, 0, 2, 1)
                 logs = []
                 controller = FarmingController(MagicMock(), detector=MagicMock(), log=logs.append,
+                    switch_gmail=outcome != 'limited',
                     gmail_state_path=path, signed_in_accounts_path=root / 'accounts.json',
                     session_summary_path=root / 'summary.json')
+                registry = controller.signed_in_accounts
+                ocr_typo = GmailIdentity(email='currcnt@gmail.com')
+                manual = GmailIdentity(email='manual@gmail.com')
+                registry.verify(GmailIdentity(email='first@amail.com'))
+                registry.verify(ocr_typo)
+                registry.add_manual(manual.email)
                 switcher = MagicMock()
                 switcher.switch_to_next.side_effect = [GmailSwitchResult(identity=current, run_complete=False),
-                    GmailSwitchResult(identity=first, run_complete=True)]
+                    GmailSwitchResult(identity=first, run_complete=outcome == 'complete')]
+                switcher._register_current.side_effect = GmailRotation.mark_farmed
                 farm_result = (FarmContext(), 1, 0)
                 if outcome == 'error':
                     farm_result = (FarmContext(last_error='capture failed'), 0, 0)
@@ -46,7 +56,17 @@ class AutoResetProgressTests(unittest.TestCase):
                     self.assertFalse(saved.completed)
                     self.assertTrue(any('reset automatically' in line for line in logs))
                     self.assertEqual(json.loads((root / 'summary.json').read_text())['status'], 'complete')
-                    self.assertTrue(controller.signed_in_accounts.load())
+                    self.assertCountEqual([account.identity for account in registry.load()], [first, current, manual])
                 else:
                     self.assertTrue(saved.is_farmed(first))
                     self.assertIsNotNone(saved.get_character_progress(current))
+                    self.assertIn(ocr_typo, [account.identity for account in registry.load()])
+
+    def test_cleanup_leaves_registry_intact_when_farmed_emails_are_unknown(self):
+        with tempfile.TemporaryDirectory() as folder:
+            registry = GmailAccountRegistry(Path(folder) / 'accounts.json')
+            account = registry.verify(GmailIdentity(email='current@example.com'))
+
+            self.assertEqual(registry.prune_unfarmed([]), 0)
+            self.assertEqual(registry.prune_unfarmed([GmailIdentity(uid='1234')]), 0)
+            self.assertEqual(registry.load(), [account])
